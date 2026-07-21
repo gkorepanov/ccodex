@@ -1,0 +1,72 @@
+name: Build relay packages
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "relay/**"
+      - "packages/relay-*/**"
+      - "scripts/build-relay.sh"
+      - "rust-toolchain.toml"
+      - ".github/workflows/build-relays.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  relay:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            package: relay-darwin-arm64
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            package: relay-linux-arm64-gnu
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            package: relay-linux-x64-gnu
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: docker/setup-buildx-action@v3
+        if: runner.os == 'Linux'
+      - uses: actions/cache@v4
+        if: runner.os == 'macOS'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            relay/target/release
+            relay/target/${{ matrix.target }}/release
+          key: relay-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('relay/Cargo.lock') }}
+      - name: Install Rust target
+        if: runner.os == 'macOS'
+        run: rustup target add "${{ matrix.target }}"
+      - name: Build macOS relay
+        if: runner.os == 'macOS'
+        env:
+          CCODEX_RELAY_TARGET: ${{ matrix.target }}
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: ./scripts/build-relay.sh
+      - name: Build glibc 2.31 Linux relay
+        if: runner.os == 'Linux'
+        run: ./scripts/build-linux-relay.sh "${{ matrix.target }}" "${{ matrix.package }}"
+      - run: node release/verify-packages.mjs --target "${{ matrix.package }}"
+      - run: packages/${{ matrix.package }}/bin/ccodex-relay --help
+      - run: mkdir -p artifacts && npm pack ./packages/${{ matrix.package }} --pack-destination artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}
+          path: artifacts/*.tgz
+          if-no-files-found: error
+          retention-days: 7

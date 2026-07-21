@@ -1,0 +1,35 @@
+# Packaged installs normally use their pinned Codex/Claude binaries and ~/.ccodex/state.
+# Override only when deliberately testing another executable or state location.
+# app_server_codex = "/absolute/path/to/codex"
+# delegate_codex = "/absolute/path/to/stock/codex"
+# claude_binary = "/absolute/path/to/claude"
+# data_dir = "~/.ccodex/state"
+
+idle_timeout_seconds = 900
+model_cache_seconds = 300
+log_level = "info"
+log_prompts = false
+debug_capture = false
+debug_log_max_bytes = 1048576
+
+# Always-on boundary recorder for Codex App RPC requests, responses and notifications.
+# Two rolling segments share this total budget; secret-valued keys remain redacted.
+rpc_capture = true
+rpc_capture_include_content = true
+rpc_capture_max_bytes = 1073741824
+
+# Remove or comment out this key to restore stock Codex title generation.
+rename_prompt = """
+Create a concise, vivid, memorable title for the task.
+Start with exactly one rare, expressive, context-relevant emoji followed by one space.
+Avoid generic decorative emoji when a more specific symbol fits.
+Keep the complete title, including emoji, within 36 characters.
+Return only the title.
+"""
+
+# Optional status command interception. This does not affect provider routing or lifecycle.
+[features]
+status_command = true # intercept `/ccstatus`, `/ccstate`, and legacy status aliases without a model turn
+
+# No aliases are configured by default. Every `gpt-*` model id stays stock.
+# Current Codex Mobile selects Claude through namespaced `claude:*` catalog ids.

@@ -1,0 +1,27 @@
+{
+  "name": "@gkorepanov/ccodex-relay-linux-x64-gnu",
+  "version": "0.4.0",
+  "description": "CCodex remote-control relay for Linux x64 glibc.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gkorepanov/ccodex.git",
+    "directory": "packages/relay-linux-x64-gnu"
+  },
+  "license": "MIT",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "bin"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

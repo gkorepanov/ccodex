@@ -1,0 +1,12 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 3
+    labels: [compatibility]
+  - package-ecosystem: cargo
+    directory: /relay
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 3
+    labels: [compatibility]

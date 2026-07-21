@@ -1,0 +1,718 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "lifecycle-v1",
+  "pinnedVersions": {
+    "codexAppServer": "0.144.6",
+    "claudeAgentSdk": "0.3.215",
+    "claudeCode": "2.1.215"
+  },
+  "supportedLifecycleRpc": [
+    "thread/start",
+    "thread/read",
+    "thread/resume",
+    "thread/turns/list",
+    "thread/items/list",
+    "thread/unsubscribe",
+    "thread/name/set",
+    "thread/metadata/update",
+    "thread/settings/update",
+    "thread/archive",
+    "thread/unarchive",
+    "thread/delete",
+    "thread/fork",
+    "thread/rollback",
+    "thread/compact/start",
+    "thread/inject_items",
+    "thread/shellCommand",
+    "thread/backgroundTerminals/list",
+    "thread/backgroundTerminals/clean",
+    "thread/backgroundTerminals/terminate",
+    "thread/goal/set",
+    "thread/goal/get",
+    "thread/goal/clear",
+    "review/start",
+    "turn/start",
+    "turn/steer",
+    "turn/interrupt"
+  ],
+  "providerEventTypes": {
+    "topLevel": [
+      "assistant",
+      "user",
+      "result",
+      "stream_event",
+      "tool_progress",
+      "tool_use_summary",
+      "auth_status",
+      "rate_limit_event",
+      "conversation_reset",
+      "prompt_suggestion"
+    ],
+    "systemSubtypes": [
+      "init",
+      "status",
+      "compact_boundary",
+      "session_state_changed",
+      "api_retry",
+      "control_request_progress",
+      "local_command_output",
+      "model_refusal_fallback",
+      "model_refusal_no_fallback",
+      "hook_started",
+      "hook_progress",
+      "hook_response",
+      "task_started",
+      "task_progress",
+      "task_updated",
+      "task_notification",
+      "background_tasks_changed",
+      "notification",
+      "permission_denied",
+      "informational",
+      "mirror_error",
+      "worker_shutting_down",
+      "plugin_install",
+      "files_persisted",
+      "memory_recall",
+      "elicitation_complete",
+      "thinking_tokens",
+      "commands_changed"
+    ],
+    "unknownDisposition": "journal first, emit one explicit unsupportedVisible diagnostic, never silently drop"
+  },
+  "scenarios": [
+    {
+      "id": "durable-basic-turn",
+      "computerUseScenario": "Create a Claude task, send one message, receive one final answer, reopen it.",
+      "appRpcInputs": [
+        "thread/start(model=claude:*)",
+        "turn/start(text)",
+        "thread/read(includeTurns=true)"
+      ],
+      "providerInputs": [
+        "one model-visible SDKUserMessage"
+      ],
+      "providerEvents": [
+        "system/init",
+        "stream_event message/content deltas",
+        "assistant",
+        "result/success",
+        "system/session_state_changed idle"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.basic",
+      "orderingAndCardinality": [
+        "one turn/started",
+        "one user item",
+        "one final agent item",
+        "one terminal turn/completed",
+        "active before terminal, idle after terminal"
+      ],
+      "reconnectRestart": "thread/read and thread/resume materialize the same completed turn without replay duplicates",
+      "tests": [
+        "tests/claude/service.test.ts#persists and streams a basic Claude turn through the Codex lifecycle"
+      ],
+      "gap": null
+    },
+    {
+      "id": "native-reasoning-and-tool-activity",
+      "computerUseScenario": "Observe changing reasoning text and named Read/Search pills in main and child tasks.",
+      "appRpcInputs": [
+        "turn/start(summary=auto|detailed)"
+      ],
+      "providerInputs": [
+        "thinking={type:adaptive,display:summarized}",
+        "structured tools and Bash"
+      ],
+      "providerEvents": [
+        "thinking_delta",
+        "tool_use",
+        "tool_result",
+        "assistant",
+        "result"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.reasoningTool",
+      "orderingAndCardinality": [
+        "summaryPartAdded precedes later summary parts",
+        "tool item ID is stable start-to-completion",
+        "semantic commandActions survive replay"
+      ],
+      "reconnectRestart": "reasoning.summary and commandActions are present in materialized turns",
+      "tests": [
+        "tests/claude/service.test.ts#projects summarized Claude thinking through the native Codex reasoning-summary contract",
+        "tests/claude/toolMapper.test.ts"
+      ],
+      "gap": "If Claude emits no summarized thinking_delta, the honest UI remains generic Thinking. No text is fabricated."
+    },
+    {
+      "id": "background-main-continuation",
+      "computerUseScenario": "Start background Bash, leave/reopen the App, see output updates, then one final answer in the original turn.",
+      "appRpcInputs": [
+        "turn/start",
+        "thread/resume while turn is inProgress"
+      ],
+      "providerInputs": [
+        "background Bash and later task notification continuation"
+      ],
+      "providerEvents": [
+        "task_started",
+        "task_progress",
+        "task_updated",
+        "task_notification",
+        "background_tasks_changed",
+        "assistant/result"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.background",
+      "orderingAndCardinality": [
+        "one commandExecution item",
+        "N outputDelta events",
+        "final answer before exactly one terminal",
+        "no idle while task/tailer/continuation remains"
+      ],
+      "reconnectRestart": "resume returns inProgress command with accumulated output; process restart terminally reconciles an unsafe open invocation as failed, never success",
+      "tests": [
+        "tests/claude/service.test.ts#keeps background continuation and its final answer in the originating logical turn",
+        "tests/claude/service.test.ts#keeps a background Bash as one command item and streams its output file",
+        "tests/claude/service.test.ts#reconciles an active crash into one durable failed terminal turn"
+      ],
+      "gap": null
+    },
+    {
+      "id": "subagent-child-lifecycle",
+      "computerUseScenario": "Spawn a subagent, open its native card, inspect its ongoing and final child conversation.",
+      "appRpcInputs": [
+        "turn/start",
+        "thread/read(child)",
+        "thread/resume(child)"
+      ],
+      "providerInputs": [
+        "Agent/Task tool invocation"
+      ],
+      "providerEvents": [
+        "task_started",
+        "assistant/user with parent_tool_use_id",
+        "task_progress",
+        "task_notification",
+        "result"
+      ],
+      "expectedTrace": "golden-traces.v1.json#child.subagent",
+      "orderingAndCardinality": [
+        "one generated Codex child UUID",
+        "one collabAgentToolCall link",
+        "child has its own turn/items/status",
+        "raw provider task ID is never navigable"
+      ],
+      "reconnectRestart": "pending child approval is replayed with the same durable request identity; crash closes unsafe open child state once",
+      "tests": [
+        "tests/claude/service.test.ts#materializes a Claude subagent as a readable child thread",
+        "tests/claude/service.test.ts#preserves nested subagent hierarchy instead of flattening it into the main turn",
+        "tests/claude/service.test.ts#never advertises a raw Claude task id as a navigable child thread"
+      ],
+      "gap": null
+    },
+    {
+      "id": "approval-reconnect",
+      "computerUseScenario": "Approve one command, disconnect on a later pending approval, reconnect and resolve it from App.",
+      "appRpcInputs": [
+        "turn/start(approvalPolicy=on-request)",
+        "server response to item/commandExecution/requestApproval",
+        "thread/resume"
+      ],
+      "providerInputs": [
+        "canUseTool callback pending until App decision"
+      ],
+      "providerEvents": [
+        "tool_use",
+        "tool_result",
+        "assistant/result"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.approval",
+      "orderingAndCardinality": [
+        "request persisted before publish",
+        "stable durable identity with connection-local numeric ID",
+        "resolved at most once",
+        "command completion precedes final answer"
+      ],
+      "reconnectRestart": "reconnect replays unresolved request; gateway restart cancels unsafe provider interaction and fails the original turn once",
+      "tests": [
+        "tests/claude/session/session.test.ts#owns main interaction persistence, delivery, and idempotent resolution",
+        "tests/claude/service.test.ts#bridges a Claude Bash permission through a Codex server request",
+        "tests/gateway/subscriptions.test.ts#resolves an approval only on connections that received its request"
+      ],
+      "gap": null
+    },
+    {
+      "id": "active-side-multi-turn",
+      "computerUseScenario": "Open /side during an active parent, complete two side turns, return to the still-running parent.",
+      "appRpcInputs": [
+        "thread/fork(threadSource=user,excludeTurns=true,ephemeral=true)",
+        "thread/inject_items",
+        "two turn/start calls"
+      ],
+      "providerInputs": [
+        "forkSession at stable boundary",
+        "no-query parent snapshot",
+        "no-query injected side boundary",
+        "two model-visible side inputs"
+      ],
+      "providerEvents": [
+        "delayed no-query result acknowledgements",
+        "side assistant/result",
+        "concurrent parent events"
+      ],
+      "expectedTrace": "golden-traces.v1.json#ephemeral.side",
+      "orderingAndCardinality": [
+        "fork RPC returns before side turn",
+        "side is not broadcast into durable sidebar",
+        "two independent side terminals",
+        "parent terminal unchanged",
+        "replayed prelude boundary UUID is monotonic and cannot be overwritten by a stale service snapshot"
+      ],
+      "reconnectRestart": "The gateway retains the process-owned side while alive, but the current App relaunch sends no RPC naming the existing side ID. Parent reconnect remains independent and succeeds.",
+      "tests": [
+        "tests/claude/service.test.ts#runs the complete captured Full Access side, child, settings, and reconnect lifecycle"
+      ],
+      "gap": "EXTERNAL APP BLOCKER: existing side history cannot be rediscovered because App persists/sends no side thread ID after relaunch and materializes fork history as empty turns. Desktop also hides /side while an approval plaque is pending, so side and approval remain separate mandatory App scenarios."
+    },
+    {
+      "id": "active-settings-deferred",
+      "computerUseScenario": "Change effort/model/speed/permissions while background work is active; current turn finishes, next turn uses the latest selection.",
+      "appRpcInputs": [
+        "thread/settings/update during inProgress",
+        "next turn/start"
+      ],
+      "providerInputs": [
+        "current Query keeps frozen applied settings",
+        "durable next Query resumes with latest desired settings; ephemeral next turn applies public controls to the same Query before input"
+      ],
+      "providerEvents": [
+        "result before/after task notification",
+        "background output",
+        "subagent terminal",
+        "approval resolution"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.deferredSettings",
+      "orderingAndCardinality": [
+        "settings RPC/updated promptly",
+        "no false idle/error",
+        "last-write-wins desired generation",
+        "one original terminal",
+        "retirement only at lifecycle quiescence"
+      ],
+      "reconnectRestart": "latest desired settings persist; restart invents neither a failed settings turn nor an old picker value",
+      "tests": [
+        "tests/claude/service.test.ts#defers active-turn settings with last-write-wins until the real terminal boundary",
+        "tests/claude/service.test.ts#does not retire a settings-stale runtime while its background Bash and output tailer can continue",
+        "tests/claude/service.test.ts#keeps a settings-stale runtime leased while a subagent is nonterminal",
+        "tests/claude/service.test.ts#switches model, effort, and speed between ephemeral turns without replacing provider context",
+        "tests/claude/service.test.ts#defers last-write-wins ephemeral controls until the active lifecycle drains",
+        "tests/claude/service.test.ts#does not submit an ephemeral turn when a provider control fails and converges on retry",
+        "tests/claude/service.test.ts#live-applies max effort while retaining initialization-bound ephemeral settings",
+        "tests/claude/service.test.ts#uses the latest ephemeral permission policy after switching out of full access"
+      ],
+      "gap": "POINT UI ACCEPTANCE: existing side captures preserve a fixed Sonnet/High selection but do not yet show one post-input Sonnet↔Opus or effort change with remembered context."
+    },
+    {
+      "id": "deny-stop-late-events",
+      "computerUseScenario": "Deny a command, press Stop while parent/child/background work exists, observe both stop without revival.",
+      "appRpcInputs": [
+        "approval decline",
+        "turn/interrupt",
+        "thread/backgroundTerminals/list|clean|terminate",
+        "repeated turn/interrupt"
+      ],
+      "providerInputs": [
+        "stopTask",
+        "abort Query",
+        "late task/progress/notification events"
+      ],
+      "providerEvents": [
+        "permission_denied",
+        "task_progress",
+        "task_updated",
+        "task_notification",
+        "result/error or idle"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.interrupt",
+      "orderingAndCardinality": [
+        "one interrupted terminal",
+        "late events are journaled but invisible",
+        "no phantom turn/child/status active",
+        "cleanup and repeated Stop are idempotent"
+      ],
+      "reconnectRestart": "terminal interrupted snapshot is stable; no late provider event can revive it after reconnect/restart",
+      "tests": [
+        "tests/claude/service.test.ts#cleans child background terminals and fences late task events after parent Stop",
+        "tests/claude/service.test.ts#interrupts only the selected child through Claude stopTask",
+        "tests/claude/autonomousContinuation.test.ts#Stop during delayed requesting completes once and fences every late provider event"
+      ],
+      "gap": null
+    },
+    {
+      "id": "compact-lifecycle",
+      "computerUseScenario": "Run Compact, wait through a long provider compaction, optionally Stop it, then continue the task.",
+      "appRpcInputs": [
+        "thread/compact/start",
+        "turn/interrupt(compaction turn)"
+      ],
+      "providerInputs": [
+        "/compact control input"
+      ],
+      "providerEvents": [
+        "system/status",
+        "system/compact_boundary",
+        "post-compaction summary append",
+        "session_state_changed"
+      ],
+      "expectedTrace": "golden-traces.v1.json#ephemeral.compact",
+      "orderingAndCardinality": [
+        "RPC acknowledgement precedes delayed boundary",
+        "one compact turn",
+        "thread/compacted before terminal completion",
+        "late/duplicate boundary fenced"
+      ],
+      "reconnectRestart": "in-progress compact resumes same IDs or deterministically fails once after unsafe process loss",
+      "tests": [
+        "tests/claude/service.test.ts#acknowledges manual compaction before a delayed provider boundary and completes one native lifecycle",
+        "tests/claude/service.test.ts#interrupts compaction exactly once and fences a late provider boundary",
+        "tests/claude/service.test.ts#resumes the same in-progress compaction ids and completes once for both subscribers",
+        "tests/claude/service.test.ts#reconciles a persisted in-progress compaction after gateway restart"
+      ],
+      "gap": "No sanitized real App compact capture is committed; automated service regressions are the contract oracle."
+    },
+    {
+      "id": "rollback-after-compaction",
+      "computerUseScenario": "Edit/resend or rollback across one or more compactions, then fork/rollback deeper again.",
+      "appRpcInputs": [
+        "thread/rollback(numTurns=N)",
+        "following turn/start(model/effort)"
+      ],
+      "providerInputs": [
+        "fork raw transcript at retained provider boundary with provenance mapping"
+      ],
+      "providerEvents": [
+        "compact_boundary and post-compact summary provenance"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.rollback",
+      "orderingAndCardinality": [
+        "source unchanged until replacement fully validates",
+        "all retained provider UUIDs remapped",
+        "one atomic lineage switch",
+        "temporary fork compensated on source race"
+      ],
+      "reconnectRestart": "replacement lineage and remapped boundaries survive restart and support deeper rollback",
+      "tests": [
+        "tests/claude/rollbackBoundary.test.ts",
+        "tests/store/sqliteStore.test.ts#atomically commits a durable fork with stable turn/item ids and remapped provider boundaries"
+      ],
+      "gap": null
+    },
+    {
+      "id": "context-usage-and-compaction-fences",
+      "computerUseScenario": "Watch context gauge through agentic turns, compact, reconnect and restart.",
+      "appRpcInputs": [
+        "turn/start",
+        "thread/compact/start",
+        "thread/resume"
+      ],
+      "providerInputs": [
+        "getContextUsage control probe detached from terminal completion"
+      ],
+      "providerEvents": [
+        "aggregate result usage",
+        "iteration usage",
+        "compact_boundary"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.usage",
+      "orderingAndCardinality": [
+        "cumulative total may exceed window",
+        "resident last uses authoritative/final iteration",
+        "stale probes cannot overwrite newer message/compact generations"
+      ],
+      "reconnectRestart": "same persisted resident snapshot is replayed after reconnect and gateway restart",
+      "tests": [
+        "tests/claude/contextUsage.test.ts#keeps captured aggregate accounting separate from the authoritative 298k resident snapshot",
+        "tests/claude/contextUsage.test.ts#preserves delayed manual compaction usage and completes its terminal lifecycle independently",
+        "tests/claude/contextUsage.test.ts#replays the same persisted 298k snapshot on reconnect and gateway restart"
+      ],
+      "gap": "EXTERNAL APP OBSERVATION: wire replay returns one identical persisted usage snapshot after resume/restart; the remaining visual discrepancy matches App resume-state timing and needs payload-hash plus App-state timestamps before it can reopen gateway work."
+    },
+    {
+      "id": "autonomous-continuation-ttft",
+      "computerUseScenario": "Background completion wakes the same turn after a delayed requesting TTFT; Stop/reconnect during the delay.",
+      "appRpcInputs": [
+        "turn/start",
+        "turn/interrupt",
+        "thread/resume"
+      ],
+      "providerInputs": [
+        "queued task notification followed by continuation prompt"
+      ],
+      "providerEvents": [
+        "notification before/during request",
+        "message_start",
+        "result",
+        "idle"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.autonomous",
+      "orderingAndCardinality": [
+        "original turn stays active",
+        "one request generation acknowledges covered notifications",
+        "later notifications remain pending",
+        "no TTFT-based fake success"
+      ],
+      "reconnectRestart": "reconnect returns same in-progress turn; restart fails unsafe original once without synthetic revival",
+      "tests": [
+        "tests/claude/autonomousContinuation.test.ts#keeps the captured 6047ms requesting TTFT in one original turn",
+        "tests/claude/autonomousContinuation.test.ts#Stop during delayed requesting completes once and fences every late provider event",
+        "tests/claude/autonomousContinuation.test.ts#reconnects during requesting to the same durable in-progress turn",
+        "tests/claude/autonomousContinuation.test.ts#reconciles a gateway restart as one failed original turn, never success or revival"
+      ],
+      "gap": "Manual App delayed-TTFT/Stop/reconnect remains unproven: the Sonnet attempt reached provider output too quickly, and the follow-up lab quota fell to 2%. The captured 6047 ms race remains covered deterministically."
+    },
+    {
+      "id": "goal-driven-continuation",
+      "computerUseScenario": "Set /goal, let automatic work continue across background/subagent/approval lifecycle, pause/resume/replace it.",
+      "appRpcInputs": [
+        "thread/goal/set|get|clear",
+        "thread/resume"
+      ],
+      "providerInputs": [
+        "hidden goal MCP tools and continuation commands"
+      ],
+      "providerEvents": [
+        "assistant/result usage",
+        "background/subagent/approval quiescence facts"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.goal",
+      "orderingAndCardinality": [
+        "goal mutation response precedes notification",
+        "one generation owns usage/continuation",
+        "no synthetic user item",
+        "fork does not inherit goal"
+      ],
+      "reconnectRestart": "goal snapshot is durable and emitted after resume hydration; stale generation usage is rejected",
+      "tests": [
+        "tests/claude/goalLifecycle.test.ts#attaches a simultaneous goal set to the pending user turn without starting a duplicate continuation",
+        "tests/claude/goalLifecycle.test.ts#keeps reconnect snapshots connection-local and schedules one continuation after terminal emission",
+        "tests/claude/goalLifecycle.test.ts#hydrates resume response before the goal snapshot and continuation",
+        "tests/gateway/goalRpc.test.ts"
+      ],
+      "gap": "Native /goal UI visibility passed. The committed UI capture is pre-fix evidence of duplicate continuation; a fresh duplicate-free App run remains unproven after the deterministic fix because follow-up lab quota fell to 2%."
+    },
+    {
+      "id": "system-ephemeral-title-worker",
+      "computerUseScenario": "Create/rename/fork a Claude task and see title generation without notices, sidebar pollution or metadata errors.",
+      "appRpcInputs": [
+        "thread/fork(model=gpt-5.4-mini,ephemeral=true,threadSource=system)",
+        "turn/start(outputSchema=title schema)"
+      ],
+      "providerInputs": [
+        "stock Codex ephemeral worker; Claude ownership only influences post-normalization marker"
+      ],
+      "providerEvents": [],
+      "expectedTrace": "golden-traces.v1.json#ephemeral.title",
+      "orderingAndCardinality": [
+        "silent system worker",
+        "no durable overlay/name/settings mutation",
+        "one corrected title delta/completion",
+        "cleanup after terminal"
+      ],
+      "reconnectRestart": "ephemeral worker is not durable; owning durable title remains persisted",
+      "tests": [
+        "tests/handoff/service.test.ts#routes the captured system title fork through a silent ephemeral stock thread",
+        "tests/handoff/service.test.ts#rewrites only the captured title prompt on managed system ephemeral threads"
+      ],
+      "gap": null
+    },
+    {
+      "id": "metadata-cross-client-sync",
+      "computerUseScenario": "Rename, archive and unarchive a Claude task on mobile and observe the same sidebar state on desktop.",
+      "appRpcInputs": [
+        "thread/name/set",
+        "thread/metadata/update",
+        "thread/archive",
+        "thread/unarchive",
+        "thread/read"
+      ],
+      "providerInputs": [
+        "renameSession only after a durable Claude session exists"
+      ],
+      "providerEvents": [],
+      "expectedTrace": "golden-traces.v1.json#main.metadata",
+      "orderingAndCardinality": [
+        "metadata persists before response",
+        "one global name/archive/unarchive notification per mutation",
+        "no model turn",
+        "all attached App connections converge"
+      ],
+      "reconnectRestart": "thread/list/read after reconnect or restart returns the same durable metadata and archive state",
+      "tests": [
+        "tests/claude/service.test.ts#renames a fresh thread locally before Claude has persisted its session",
+        "tests/gateway/subscriptions.test.ts#broadcasts global thread lifecycle once while keeping turn details scoped",
+        "tests/store/sqliteStore.test.ts#persists thread metadata and durable turns"
+      ],
+      "gap": "No sanitized mobile↔desktop metadata capture is committed; the cross-client notification and persistence pieces are covered separately."
+    },
+    {
+      "id": "durable-same-provider-fork",
+      "computerUseScenario": "Fork a Claude task from a selected message and continue in the new sidebar task with preserved history IDs.",
+      "appRpcInputs": [
+        "thread/fork(ephemeral=false,path|turn boundary)",
+        "thread/read|resume(target)",
+        "turn/start(target)"
+      ],
+      "providerInputs": [
+        "forkSession/forked transcript at stable provider boundary"
+      ],
+      "providerEvents": [
+        "provider lineage creation; later normal target assistant/result"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.durableFork",
+      "orderingAndCardinality": [
+        "one target thread/started",
+        "preserved source turn/item display IDs belong to target",
+        "source remains unchanged",
+        "target owns an independent provider lineage"
+      ],
+      "reconnectRestart": "target remains listable/resumable after restart and source/target progress independently",
+      "tests": [
+        "tests/claude/service.test.ts#preserves source turn and item ids in a visible fork",
+        "tests/store/sqliteStore.test.ts#atomically commits a durable fork with stable turn/item ids and remapped provider boundaries"
+      ],
+      "gap": null
+    },
+    {
+      "id": "image-view-lifecycle",
+      "computerUseScenario": "Ask Claude to inspect an image in main or child task and see one native Image View card that survives replay.",
+      "appRpcInputs": [
+        "turn/start with image-producing/reading task",
+        "thread/read|resume"
+      ],
+      "providerInputs": [
+        "Read tool with a verified supported local image path"
+      ],
+      "providerEvents": [
+        "streamed Read tool_use",
+        "successful tool_result",
+        "canonical assistant block"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.imageView",
+      "orderingAndCardinality": [
+        "promote only after successful verified Read",
+        "one imageView started and one completed",
+        "canonical assistant replay does not duplicate the item",
+        "failed/non-image Read remains commandExecution"
+      ],
+      "reconnectRestart": "event replay and materialized main/child snapshots contain exactly one completed imageView item",
+      "tests": [
+        "tests/claude/service.test.ts#projects streamed image Reads atomically and durably without duplicate lifecycle items",
+        "tests/claude/service.test.ts#projects a child streamed image Read with the same durable lifecycle"
+      ],
+      "gap": null
+    },
+    {
+      "id": "provider-aware-rate-limit-lifecycle",
+      "computerUseScenario": "Open Claude and Codex tasks on different App connections and request provider-correct quota/status.",
+      "appRpcInputs": [
+        "thread/start|resume|fork|turn/start foreground signals",
+        "account/rateLimits/read",
+        "account/usage/read"
+      ],
+      "providerInputs": [
+        "usage_EXPERIMENTAL control snapshot without model prompt"
+      ],
+      "providerEvents": [
+        "rate_limit_event"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.rateLimits",
+      "orderingAndCardinality": [
+        "provider context is connection-local",
+        "late stock/retired-Claude update cannot steal foreground",
+        "system title worker cannot steal foreground"
+      ],
+      "reconnectRestart": "resume restores provider attribution and refreshes truthful provider-labelled data",
+      "tests": [
+        "tests/claude/rateLimitService.test.ts",
+        "tests/gateway/providerRateLimits.test.ts"
+      ],
+      "gap": "The shipped built-in /status card reads OpenAI frontend HTTP and cannot be replaced through app-server RPC; CCodex status is the supported truthful surface."
+    },
+    {
+      "id": "provider-switch-on-turn",
+      "computerUseScenario": "Change provider and send a message; CCodex compacts the old epoch and continues the same public task on the new provider.",
+      "appRpcInputs": [
+        "thread/settings/update(staged provider)",
+        "turn/start(original input)",
+        "thread/fork plus thread/rollback for an older epoch boundary"
+      ],
+      "providerInputs": [
+        "native source-provider compact/handoff",
+        "fresh hidden target session receiving the original user input exactly once"
+      ],
+      "providerEvents": [
+        "visible contextCompaction lifecycle",
+        "target-provider lifecycle projected onto the stable public thread id"
+      ],
+      "expectedTrace": "golden-traces.v1.json#main.crossProviderFork",
+      "orderingAndCardinality": [
+        "source epoch is sealed only after target turn delivery",
+        "public thread id never changes",
+        "original user input is delivered exactly once",
+        "fork selects the provider epoch containing the chosen completed turn"
+      ],
+      "reconnectRestart": "a delivered target turn is committed after restart without duplicate delivery; incomplete hidden targets are cleaned and retried",
+      "tests": [
+        "tests/handoff/providerSwitchService.test.ts#atomically switches Claude to stock, keeps the public id, and persists the epoch boundary",
+        "tests/handoff/providerSwitchService.test.ts#switches stock to Claude and commits only after starting the untouched input",
+        "tests/handoff/providerSwitchService.test.ts#commits an already-delivered target turn after gateway restart without sending it twice"
+      ],
+      "gap": null
+    }
+  ],
+  "knownRacePermutations": [
+    "provider result before/after background task notification",
+    "settings update before/after result and before lifecycle quiescence",
+    "interrupt concurrent with task completion, approval resolution and autonomous request",
+    "side no-query acknowledgement before/after first real side message_start",
+    "side prelude replay UUID update followed by stale service snapshot write",
+    "usage probe completion after message_start, compact, interrupt, next turn, retirement or shutdown",
+    "compact boundary before/after status idle and duplicate/late compact boundary",
+    "rollback provider fork completion after concurrent source revision mutation",
+    "goal runtime materialization after delete/archive/shutdown or goal generation replacement",
+    "rate-limit refresh/event after runtime replacement or connection foreground change",
+    "title system-ephemeral worker concurrent with first durable Claude turn",
+    "duplicate provider UUID and duplicate effect/server-request resolution"
+  ],
+  "unsupportedUiDifferences": [
+    {
+      "behavior": "Desktop /side is hidden while an approval plaque is pending",
+      "owner": "Codex App frontend",
+      "contract": "validate active /side and approval+Stop as two separate mandatory scenarios"
+    },
+    {
+      "behavior": "Built-in /status card always uses OpenAI frontend HTTP",
+      "owner": "Codex App frontend",
+      "contract": "never mislabel it as Claude; use CCodex status for provider-correct data"
+    },
+    {
+      "behavior": "No provider summarized thinking_delta",
+      "owner": "Claude provider/model",
+      "contract": "show generic Thinking; do not synthesize semantic reasoning"
+    },
+    {
+      "behavior": "Initialization-only ephemeral settings after first model-visible turn",
+      "owner": "pinned Claude SDK/session semantics",
+      "contract": "model, low/medium/high/xhigh effort, fast mode and permissions use same-Query controls; cwd, output schema, personality and collaboration instructions return precise invalid-params errors rather than discard side context"
+    },
+    {
+      "behavior": "Switching an existing ephemeral session into max effort",
+      "owner": "pinned Claude SDK 0.3.215 applyFlagSettings schema",
+      "contract": "preserve max when selected at session creation, but reject a later transition into max because the public dynamic effort control supports only low/medium/high/xhigh"
+    },
+    {
+      "behavior": "Externally RPC-created empty task opens with App-local picker defaults",
+      "owner": "Codex App local UI state; same behavior observed with stock",
+      "contract": "do not invent resume/settings notifications solely to override the empty selector"
+    }
+  ]
+}

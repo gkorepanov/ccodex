@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "productVersion": "0.4.0",
+  "node": ">=22.13 <27",
+  "codexCli": "0.144.6",
+  "codexGitRevision": "1e66aaa95b5ab39d3ef3057cd50bdecd576a8356",
+  "claudeAgentSdk": "0.3.215",
+  "claudeCode": "2.1.215",
+  "protocolFixture": "codex-0.144.4",
+  "relayPackages": {
+    "darwin-arm64": "@gkorepanov/ccodex-relay-darwin-arm64",
+    "linux-arm64-gnu": "@gkorepanov/ccodex-relay-linux-arm64-gnu",
+    "linux-x64-gnu": "@gkorepanov/ccodex-relay-linux-x64-gnu"
+  }
+}
