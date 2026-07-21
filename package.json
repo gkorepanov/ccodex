@@ -1,0 +1,91 @@
+{
+  "name": "@gkorepanov/ccodex",
+  "version": "0.4.0",
+  "description": "Unofficial Codex App compatibility bridge for Codex CLI and Claude Code runtimes.",
+  "homepage": "https://github.com/gkorepanov/ccodex#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gkorepanov/ccodex.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gkorepanov/ccodex/issues"
+  },
+  "private": false,
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "ccodex": "./dist/cli/main.js",
+    "codex-hybrid": "./dist/cli/main.js"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=22.13 <27"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.map",
+    "vendor/codex/continuation.md",
+    "assets/ccodex/goals/continuation.md",
+    "README.md",
+    "install.sh",
+    "uninstall.sh",
+    "compatibility.json",
+    "config.example.toml",
+    "legal/LICENSES.md",
+    "legal/THIRD_PARTY_NOTICES.md"
+  ],
+  "scripts": {
+    "build": "npm run build:ts && npm run build:relay",
+    "clean:dist": "rm -rf dist",
+    "build:ts": "npm run clean:dist && tsc -p tsconfig.build.json",
+    "build:relay": "./scripts/build-relay.sh",
+    "check": "tsc -p tsconfig.json --noEmit && npm run check:architecture && npm run check:public-tree",
+    "check:architecture": "node scripts/check-one-writer-architecture.mjs",
+    "check:architecture:target-zero": "node scripts/check-one-writer-architecture.mjs --target-zero",
+    "check:public-tree": "node scripts/check-public-tree.mjs",
+    "architecture:baseline": "node scripts/check-one-writer-architecture.mjs --update-ledger",
+    "dev": "tsx src/cli/main.ts",
+    "sync:codex-assets": "node scripts/codex-assets.mjs",
+    "check:codex-assets": "node scripts/codex-assets.mjs --check",
+    "update:codex-pin": "node scripts/update-codex-pin.mjs",
+    "generate:protocol": "node scripts/generate-protocol.mjs",
+    "check:protocol-generated": "node scripts/generate-protocol.mjs --check",
+    "generate:notices": "node release/generate-notices.mjs",
+    "release:version": "node release/set-version.mjs",
+    "release:promote": "node release/promote.mjs",
+    "test": "vitest run && cargo test --manifest-path relay/Cargo.toml --quiet",
+    "test:contracts": "vitest run tests/protocol/lifecycleContractManifest.test.ts tests/claude/adapterVariants.test.ts tests/claude/rateLimits.test.ts --maxWorkers=1",
+    "contracts:lifecycle:inventory": "node scripts/build-lifecycle-contract-inventory.mjs",
+    "contracts:lifecycle:check": "node scripts/build-lifecycle-contract-inventory.mjs --check && vitest run tests/protocol/lifecycleContractManifest.test.ts --maxWorkers=1",
+    "test:package": "./scripts/probe-package.sh",
+    "test:public-package": "./scripts/probe-public-package.sh",
+    "test:watch": "vitest",
+    "prepack": "npm run check:codex-assets && npm run build:ts && npm run generate:notices"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.215",
+    "@openai/codex": "0.144.6",
+    "diff": "8.0.3",
+    "smol-toml": "1.7.0",
+    "uuid": "13.0.2",
+    "ws": "8.21.0",
+    "zod": "4.4.3"
+  },
+  "optionalDependencies": {
+    "@gkorepanov/ccodex-relay-darwin-arm64": "0.4.0",
+    "@gkorepanov/ccodex-relay-linux-arm64-gnu": "0.4.0",
+    "@gkorepanov/ccodex-relay-linux-x64-gnu": "0.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/ws": "8.18.1",
+    "ajv": "8.20.0",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}

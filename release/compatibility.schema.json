@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gkorepanov/ccodex/blob/main/release/compatibility.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "productVersion", "node", "codexCli", "codexGitRevision",
+    "claudeAgentSdk", "claudeCode", "protocolFixture", "relayPackages"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "productVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$" },
+    "node": { "type": "string" },
+    "codexCli": { "type": "string" },
+    "codexGitRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "claudeAgentSdk": { "type": "string" },
+    "claudeCode": { "type": "string" },
+    "protocolFixture": { "type": "string" },
+    "relayPackages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["darwin-arm64", "linux-arm64-gnu", "linux-x64-gnu"],
+      "properties": {
+        "darwin-arm64": { "const": "@gkorepanov/ccodex-relay-darwin-arm64" },
+        "linux-arm64-gnu": { "const": "@gkorepanov/ccodex-relay-linux-arm64-gnu" },
+        "linux-x64-gnu": { "const": "@gkorepanov/ccodex-relay-linux-x64-gnu" }
+      }
+    }
+  }
+}

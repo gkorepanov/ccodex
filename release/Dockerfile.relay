@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1.7
+FROM rust:1.95-bullseye AS build
+
+ARG TARGET
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends clang cmake perl pkg-config \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add "$TARGET"
+
+WORKDIR /work
+COPY relay/Cargo.toml relay/Cargo.lock ./relay/
+COPY relay/src ./relay/src
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/work/relay/target \
+    cargo build --locked --manifest-path relay/Cargo.toml --release --target "$TARGET" \
+    && install -m 755 "relay/target/$TARGET/release/codex-hybrid-remote-relay" /tmp/ccodex-relay
+
+FROM scratch
+COPY --from=build /tmp/ccodex-relay /ccodex-relay

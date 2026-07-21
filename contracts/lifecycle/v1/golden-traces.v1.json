@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "lifecycle-v1",
+  "normalization": {
+    "ids": "stable semantic aliases such as <THREAD>, <TURN>, <ITEM>; provider UUIDs remain in a separate registry",
+    "time": "timestamps and durations removed except explicit ordering/latency assertions",
+    "deltas": "adjacent text/output deltas may be coalesced, but item start/completion and terminal cardinality may not"
+  },
+  "main": {
+    "basic": ["thread/started?", "thread/status/changed(active)", "turn/started×1", "item userMessage completed×1", "item agentMessage started×1", "agentMessage delta+", "item agentMessage completed×1", "thread/tokenUsage/updated≤1", "turn/completed(completed)×1", "thread/status/changed(idle)×1"],
+    "reasoningTool": ["item reasoning started×1", "summaryTextDelta+ with summaryPartAdded before part index>0", "item reasoning completed×1", "item commandExecution started×1", "outputDelta*", "item commandExecution completed×1"],
+    "background": ["turn/started×1", "background command started×1", "outputDelta+", "commentary agent items*", "background command completed×1", "final agent item×1", "turn/completed×1"],
+    "approval": ["command item started×1", "requestApproval×1", "server response×1", "serverRequest/resolved×1", "command item completed×1", "final agent item×1", "turn/completed×1"],
+    "deferredSettings": ["turn active", "settings/update response<500ms", "settings/updated×1 per accepted generation", "no idle/error", "original turn terminal×1", "silent runtime retirement", "next turn uses latest desired generation"],
+    "interrupt": ["turn/interrupt response", "owned command/child items terminalized", "turn/completed(interrupted)×1", "thread idle", "late provider events retained with zero visible lifecycle events"],
+    "rollback": ["rollback request", "staged provider fork", "validated UUID map", "atomic lineage+turn replacement", "resume response over replacement", "no source mutation on failed/raced preparation"],
+    "usage": ["aggregate usage updates cumulative total", "resident snapshot probe/fallback updates last", "compact boundary replaces last", "stale probe disposition only"],
+    "autonomous": ["task notification pending", "continuation request generation reserved", "message_start claims covered notifications", "same original turn continues", "one final terminal or one interrupted/failed terminal"],
+    "goal": ["goal mutation RPC response", "goal updated/cleared notification", "continuation without synthetic user item", "terminal quiescence", "next continuation at most once"],
+    "metadata": ["metadata/name/archive mutation persisted", "RPC response", "global thread notification×1", "all attached clients converge without a model turn"],
+    "durableFork": ["fork request", "provider lineage prepared", "atomic target thread+turn/item commit", "thread/started×1", "fork response×1", "source unchanged"],
+    "imageView": ["Read tool buffered until verified success", "imageView item/started×1", "imageView item/completed×1", "canonical provider replay deduplicated", "materialized replay contains one item"],
+    "rateLimits": ["foreground provider committed by successful navigation/turn RPC", "provider-labelled read response", "matching provider notification*", "late wrong-provider notification suppressed"],
+    "crossProviderFork": ["provider change staged", "source send rejected with visible instruction", "fork preparation notice", "target thread/started×1", "fork RPC result×1", "source unchanged"]
+  },
+  "child": {
+    "subagent": ["parent collabAgentToolCall started×1", "child thread/started×1", "child turn/started×1", "child user item×1", "child reasoning/tools/messages*", "child final agent item×1", "child turn/completed×1", "parent collabAgentToolCall completed×1"]
+  },
+  "ephemeral": {
+    "side": ["parent remains active", "fork response<500ms", "no durable sidebar broadcast", "snapshot no-query prelude ack", "inject_items no-query prelude ack", "side turn 1 terminal×1", "side turn 2 terminal×1", "parent terminal later×1", "ephemeral cleanup"],
+    "compact": ["compact RPC acknowledgement", "compact turn/started×1", "provider boundary resolved", "thread/compacted×1", "compact turn terminal×1", "late/duplicate boundary no-op"],
+    "title": ["system ephemeral fork/start", "no user notice/sidebar broadcast", "title worker turn", "one normalized agent delta/completion", "ephemeral cleanup"]
+  }
+}
