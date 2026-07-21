@@ -363,6 +363,7 @@ export class ClaudeService {
           rateLimits: this.rateLimits,
           invalidateModelCatalog: () => this.modelCatalog?.invalidate?.(),
           isClosing: () => this.closing,
+          persistUserSideSessions: this.config.features?.sideChatPromotion ?? true,
         },
       ),
     );
@@ -1121,7 +1122,15 @@ export class ClaudeService {
     this.requireIndependentThread(params.threadId, "fork");
     const source = await this.sessions.submit<SessionBranchSnapshot>(params.threadId, { type: "snapshotBranch" });
     const sourceRecord = source.record;
-    if (sourceRecord.thread.ephemeral) throw invalidParams("Forking an ephemeral Claude source thread is not supported.");
+    const sidePromotion = Boolean(
+      (this.config.features?.sideChatPromotion ?? true)
+      && sourceRecord.thread.ephemeral
+      && sourceRecord.thread.threadSource === "user"
+      && params.ephemeral !== true
+    );
+    if (sourceRecord.thread.ephemeral && !sidePromotion) {
+      throw invalidParams("Forking this ephemeral Claude source thread is not supported.");
+    }
     const modelPickerId = params.model ?? sourceRecord.modelPickerId;
     const claudeModelValue = resolveClaudeModel(this.config, modelPickerId);
     if (!claudeModelValue) throw invalidParams("Cannot fork a Claude thread to a Codex model.");
@@ -1140,11 +1149,14 @@ export class ClaudeService {
     if (params.lastTurnId && !selectedBoundaryIsStable(selectedTurn)) {
       throw invalidParams(`Claude turn '${params.lastTurnId}' is not completed and cannot be used as a fork boundary.`);
     }
-    const through = activeSideFork
+    const through = activeSideFork || sidePromotion
       ? activeIndex >= 0 ? activeIndex - 1 : sourceRecord.thread.turns.length - 1
       : params.lastTurnId
         ? selectedIndex
         : sourceRecord.thread.turns.length - 1;
+    if (sidePromotion && through < 0) {
+      throw invalidParams("Cannot promote a Claude side chat before it has a completed turn.");
+    }
     const sourceTurns = sourceRecord.thread.turns.slice(0, through + 1);
     const selectedIds = new Set(sourceTurns.map((turn) => turn.id));
     const unstableProjectionIds = new Set(sourceTurns
@@ -1224,6 +1236,7 @@ export class ClaudeService {
         throw error;
       }
     }
+    if (sidePromotion) this.scheduleEphemeralRelease(params.threadId);
     return threadResponse(responseRecord, !params.excludeTurns) as ThreadForkResponse;
   }
 

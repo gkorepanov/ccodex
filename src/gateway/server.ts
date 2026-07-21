@@ -27,6 +27,7 @@ import { StockStateTracker } from "../state/stockStateTracker.js";
 import { connectStock } from "../codex/stockConnection.js";
 import { StockRpc } from "./stockRpc.js";
 import { isRequest, parseRpcMessage } from "../protocol/envelopes.js";
+import { StockSideThreads } from "./stockSideThreads.js";
 
 export interface GatewayServer {
   stop(): Promise<void>;
@@ -92,6 +93,14 @@ async function startGatewayOwner(
   });
   await handoffStockRpc.initialize();
   handoffs.configureDaemonStock(handoffStockRpc);
+  const stockSideThreads = new StockSideThreads(
+    features.sideChatPromotion,
+    handoffStockRpc,
+    logger,
+  );
+  await stockSideThreads.recover().catch((error: unknown) => {
+    logger.warn("stock.side.recovery-failed", { error: String(error) });
+  });
   const webSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 64 * 1024 * 1024 });
   const connectionCleanups = new Set<Promise<void>>();
   const server = createServer((request, response) => {
@@ -127,6 +136,7 @@ async function startGatewayOwner(
         features,
         providerAvailability,
         stockState,
+        stockSideThreads,
       );
       connectionCleanups.add(connection.closed);
       const untrack = () => connectionCleanups.delete(connection.closed);
@@ -159,6 +169,7 @@ async function startGatewayOwner(
   try {
     if (remoteControl) relay = await startRemoteRelay(socketPath, remoteControl, logger);
   } catch (error) {
+    stockSideThreads.close();
     await closeConnections();
     await handoffs.drain();
     handoffStockRpc.close(new Error("Gateway startup failed."));
@@ -176,6 +187,7 @@ async function startGatewayOwner(
   return {
     async stop(): Promise<void> {
       await relay?.stop();
+      stockSideThreads.close();
       await closeConnections();
       await handoffs.drain();
       handoffStockRpc.close(new Error("Gateway shutting down."));

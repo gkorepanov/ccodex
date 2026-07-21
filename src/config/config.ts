@@ -32,6 +32,7 @@ export interface HybridConfig {
 
 export interface FeatureConfig {
   readonly statusCommand: boolean;
+  readonly sideChatPromotion: boolean;
 }
 
 interface ConfigFile {
@@ -58,6 +59,7 @@ interface ConfigFile {
 
 export const DEFAULT_FEATURES: FeatureConfig = {
   statusCommand: true,
+  sideChatPromotion: true,
 };
 
 export const DEFAULT_RENAME_PROMPT = `Create a concise, vivid, memorable title for the task.
@@ -74,6 +76,7 @@ ${DEFAULT_RENAME_PROMPT}
 
 [features]
 status_command = true
+side_chat_promotion = true
 `;
 }
 
@@ -117,13 +120,14 @@ function featureConfig(value: unknown): FeatureConfig {
     throw new Error("[features] must be a TOML table.");
   }
   const table = value as Record<string, unknown>;
-  for (const key of ["status_command"] as const) {
+  for (const key of ["status_command", "side_chat_promotion"] as const) {
     if (table[key] !== undefined && typeof table[key] !== "boolean") {
       throw new Error(`features.${key} must be a boolean.`);
     }
   }
   return {
     statusCommand: table.status_command as boolean | undefined ?? true,
+    sideChatPromotion: table.side_chat_promotion as boolean | undefined ?? true,
   };
 }
 

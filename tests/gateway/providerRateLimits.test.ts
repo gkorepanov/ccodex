@@ -18,6 +18,8 @@ import {
   type ClaudeRateLimitsResponse,
 } from "../../src/claude/rateLimits.js";
 import { DEFAULT_FEATURES, type FeatureConfig } from "../../src/config/config.js";
+import { STOCK_SIDE_THREAD_SOURCE, StockSideThreads } from "../../src/gateway/stockSideThreads.js";
+import { Logger } from "../../src/observability/logger.js";
 
 const claudeSnapshot: ClaudeRateLimitsResponse = mapClaudeUsage({
   session: {
@@ -225,6 +227,7 @@ async function makeHarness(
     refreshAll(): Promise<Record<"claude" | "codex", { provider: "claude" | "codex"; state: string; action?: string }>>;
   },
   stockForkResult: unknown | ((params: Record<string, any>) => unknown) = { thread: { id: "stock-fork" } },
+  sideThreads?: StockSideThreads,
 ): Promise<Harness> {
   const socket = join(tmpdir(), `ccodex-rate-${randomUUID()}.sock`);
   const server: Server = createServer();
@@ -346,6 +349,8 @@ async function makeHarness(
     undefined,
     features,
     availability as never,
+    undefined,
+    sideThreads,
   );
   while (stockClients.size === 0) await new Promise((resolve) => setTimeout(resolve, 1));
   const harness: Harness = {
@@ -357,6 +362,7 @@ async function makeHarness(
       await new Promise<void>((resolve) => server.close(() => resolve()));
       wss.close();
       await unlink(socket).catch(() => undefined);
+      sideThreads?.close();
     },
   };
   harnesses.push(harness);
@@ -922,7 +928,7 @@ describe("provider-aware rate-limit gateway routing", () => {
       claude,
       undefined,
       undefined,
-      { statusCommand: false },
+      { statusCommand: false, sideChatPromotion: true },
     );
 
     harness.client.request("status", "turn/start", {
@@ -1226,6 +1232,54 @@ describe("provider-aware rate-limit gateway routing", () => {
     expect(claude.scheduleEphemeralRelease).toHaveBeenCalledTimes(1);
     expect(claude.scheduleEphemeralRelease).toHaveBeenCalledWith("claude-ephemeral");
     expect(claude.releaseEphemeralThread).not.toHaveBeenCalled();
+  });
+
+  it("promotes a stock /side chat through a hidden native rollout without leaking its marker", async () => {
+    const cleanup = { request: vi.fn(async (method: string) =>
+      method === "thread/list" ? { data: [], nextCursor: null } : {}) };
+    const sides = new StockSideThreads(true, cleanup as never, new Logger("error"));
+    let fork = 0;
+    const harness = await makeHarness(
+      fakeClaude(), undefined, undefined, DEFAULT_FEATURES, {}, undefined,
+      (params: Record<string, any>) => {
+        fork += 1;
+        const projected = stockThread(fork === 1 ? "stock-side" : "stock-promoted");
+        return { thread: {
+          ...projected,
+          forkedFromId: params.threadId,
+          ephemeral: params.ephemeral,
+          threadSource: params.threadSource,
+          path: `/rollouts/${projected.id}.jsonl`,
+        } };
+      },
+      sides,
+    );
+
+    harness.client.request("side", "thread/fork", {
+      threadId: "stock-source", ephemeral: true, excludeTurns: true, threadSource: "user",
+    });
+    await settle();
+    expect(harness.stockRequests.find((request) => request.id === "side")?.params).toMatchObject({
+      ephemeral: false, excludeTurns: true, threadSource: STOCK_SIDE_THREAD_SOURCE,
+    });
+    expect(messages(harness, "side")[0]).toMatchObject({ result: { thread: {
+      id: "stock-side", ephemeral: true, path: null, threadSource: "user",
+    } } });
+
+    harness.client.request("promote", "thread/fork", {
+      threadId: "stock-side", path: null, cwd: "/tmp", threadSource: "user",
+    });
+    await settle();
+    expect(harness.stockRequests.find((request) => request.id === "promote")?.params).toMatchObject({
+      threadId: "stock-side", ephemeral: false, threadSource: "user",
+    });
+    expect(messages(harness, "promote")[0]).toMatchObject({ result: { thread: {
+      id: "stock-promoted", ephemeral: false, threadSource: "user",
+    } } });
+    expect(harness.client.rawSent.join("\n")).not.toContain(STOCK_SIDE_THREAD_SOURCE);
+    expect(harness.client.sent.some((message: any) =>
+      message.method === "item/agentMessage/delta" && String(message.params?.delta).includes("CCodex ERROR")))
+      .toBe(false);
   });
 
   it("does not let a late async fork completion resurrect a detached subscription", async () => {

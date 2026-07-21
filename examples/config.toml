@@ -30,6 +30,7 @@ Return only the title.
 # Optional status command interception. This does not affect provider routing or lifecycle.
 [features]
 status_command = true # intercept `/ccstatus`, `/ccstate`, and legacy status aliases without a model turn
+side_chat_promotion = true # allow Fork to promote a temporary `/side` chat into a durable sidebar thread
 
 # No aliases are configured by default. Every `gpt-*` model id stays stock.
 # Current Codex Mobile selects Claude through namespaced `claude:*` catalog ids.

@@ -241,6 +241,7 @@ export interface ClaudeSessionRuntimeDependencies {
   readonly rateLimits: ClaudeRateLimitCoordinator;
   readonly invalidateModelCatalog: () => void;
   readonly isClosing: () => boolean;
+  readonly persistUserSideSessions: boolean;
 }
 
 interface RuntimeLease {
@@ -994,6 +995,11 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       resume: resumeOverride ?? record.lastClaudeMessageUuid !== null,
       cwd: record.thread.cwd,
       ephemeral: record.thread.ephemeral,
+      persistSession: !record.thread.ephemeral || Boolean(
+        this.runtimeDependencies!.persistUserSideSessions
+        && !record.thread.parentThreadId
+        && record.thread.threadSource === "user"
+      ),
       claudeBinary: this.runtimeDependencies!.claudeBinary,
       model: record.claudeModelValue,
       settingsGeneration: settingsGeneration(record),

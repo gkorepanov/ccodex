@@ -14,6 +14,7 @@ const startup: RuntimeStartup = {
   resume: false,
   cwd: "/workspace",
   ephemeral: false,
+  persistSession: true,
   claudeBinary: "/bin/false",
   model: "sonnet",
   settingsGeneration: 0,

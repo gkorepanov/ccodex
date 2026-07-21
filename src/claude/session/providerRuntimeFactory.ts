@@ -112,6 +112,7 @@ export interface RuntimeStartup {
   readonly resume: boolean;
   readonly cwd: string;
   readonly ephemeral: boolean;
+  readonly persistSession: boolean;
   readonly claudeBinary: string;
   readonly model: string;
   readonly settingsGeneration: number;
@@ -151,7 +152,7 @@ export function createProviderRuntime(
         model: normalizeClaudeModelIdentifier(startup.model),
         ...(startup.resume ? { resume: startup.providerSessionId } : { sessionId: startup.providerSessionId }),
         pathToClaudeCodeExecutable: startup.claudeBinary,
-        persistSession: !startup.ephemeral,
+        persistSession: startup.persistSession,
         includePartialMessages: true,
         includeHookEvents: true,
         forwardSubagentText: true,

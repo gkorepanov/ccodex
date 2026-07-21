@@ -55,6 +55,7 @@ import type { ProviderAvailabilityService } from "../runtime/providerAvailabilit
 import { providerUnavailableMessage } from "../runtime/providerAvailability.js";
 import { formatCCodexState, isCCodexStateCommand } from "../state/stateCommand.js";
 import { StockStateTracker } from "../state/stockStateTracker.js";
+import { STOCK_SIDE_THREAD_SOURCE, type StockSideThreads } from "./stockSideThreads.js";
 
 type ForegroundProvider = "codex" | "claude";
 type FastSettings = Pick<ThreadSettings, "model" | "serviceTier">;
@@ -102,6 +103,7 @@ export function attachClientConnection(
   features: FeatureConfig = DEFAULT_FEATURES,
   providerAvailability?: Pick<ProviderAvailabilityService, "read" | "refresh" | "refreshAll">,
   sharedStockState?: StockStateTracker,
+  stockSideThreads?: StockSideThreads,
 ): ClientConnectionHandle {
   const connectionId = uuidv7();
   let resolveClosed!: () => void;
@@ -144,7 +146,8 @@ export function attachClientConnection(
       && (params.threadSource === "system" || (message.method === "thread/start" && params.threadSource !== "user"));
     const internalEphemeralThread = typeof params?.threadId === "string"
       && handoffs.ownsSystemEphemeral(connectionId, params.threadId);
-    const foreground = !systemEphemeral && !internalEphemeralThread
+    const stockSide = params?.threadSource === STOCK_SIDE_THREAD_SOURCE;
+    const foreground = !systemEphemeral && !internalEphemeralThread && !stockSide
       && ["thread/start", "thread/resume", "thread/fork", "turn/start"].includes(message.method)
       ? "codex" as const
       : undefined;
@@ -404,6 +407,7 @@ export function attachClientConnection(
             claude,
             cursors,
             handoffs,
+            stockSideThreads,
           ));
           return;
         }
@@ -414,6 +418,7 @@ export function attachClientConnection(
             claude,
             cursors,
             handoffs,
+            stockSideThreads,
           ));
           return;
         }
@@ -1047,6 +1052,9 @@ export function attachClientConnection(
         if (completed !== params) forwarded = { ...message, params: completed };
       }
     }
+    if (forwarded && stockSideThreads) {
+      forwarded = await stockSideThreads.prepareRequest(connectionId, forwarded, stockRpc);
+    }
     if (forwarded) stockState.observeRequest(connectionId, forwarded);
     trackForwardedRequest(forwarded);
     if (stock.readyState === WebSocketState.OPEN) {
@@ -1063,11 +1071,14 @@ export function attachClientConnection(
   });
 
   stock.on("message", (data, isBinary) => {
-    const message = isBinary ? undefined : parseRpcMessage(data);
+    const incoming = isBinary ? undefined : parseRpcMessage(data);
+    let message = incoming;
     if (message) {
       stockState.observeResponse(connectionId, message);
       stockState.observeNotification(message);
     }
+    if (message && stockRpc.handle(message)) return;
+    if (message && stockSideThreads) message = stockSideThreads.projectMessage(connectionId, message);
     let foregroundAfterForward: (() => void) | undefined;
     if (message && "method" in message && !("id" in message) && message.method === "remoteControl/status/changed" && remoteControl) {
       remoteControl.intercept(connectionId, notificationSink, message.params);
@@ -1101,7 +1112,6 @@ export function attachClientConnection(
         }
       }
     }
-    if (message && stockRpc.handle(message)) return;
     if (message && "method" in message) {
       if (!("id" in message) && message.method === "account/rateLimits/updated" && foreground?.provider === "claude") {
         publishForegroundRateLimits(foregroundGeneration);
@@ -1142,8 +1152,9 @@ export function attachClientConnection(
       }
     }
     if (client.readyState === WebSocketState.OPEN) {
-      recorder.frame(connectionId, "gateway_to_client", data, isBinary);
-      client.send(data, { binary: isBinary });
+      const outbound = message === incoming ? data : JSON.stringify(message);
+      recorder.frame(connectionId, "gateway_to_client", outbound, isBinary && message === incoming);
+      client.send(outbound, { binary: isBinary && message === incoming });
     }
     foregroundAfterForward?.();
   });
@@ -1179,6 +1190,7 @@ export function attachClientConnection(
         detach = error;
       }
       stockState.detach(connectionId);
+      stockSideThreads?.detachConnection(connectionId);
       stockRpc.close(new Error("Client connection closed."));
       if (stock.readyState === WebSocketState.OPEN || stock.readyState === WebSocketState.CONNECTING) {
         stock.close();

@@ -1575,6 +1575,91 @@ describe("ClaudeService", () => {
     await service.close();
   });
 
+  it("promotes a completed user side chat into a durable same-provider fork", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-side-promotion-"));
+    directories.push(directory);
+    const database = join(directory, "state.sqlite");
+    const fake = new FakeClaudeQuery();
+    const forkCalls: Array<{ source: string; boundary: string; expected: readonly string[] }> = [];
+    const transcripts: TranscriptBrancher = {
+      forkWithProvenance: async (source, boundary, _cwd, expected) => {
+        forkCalls.push({ source, boundary, expected });
+        return {
+          sessionId: randomUUID(),
+          uuidMap: new Map(expected.map((uuid) => [uuid, randomUUID()])),
+        };
+      },
+      resolveCompactionBoundary: async (_sessionId, _cwd, boundary) => boundary.uuid,
+      delete: async () => undefined,
+    };
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(database), fake.factory, undefined, undefined, transcripts,
+    );
+    const source = await service.startThread({
+      model: "claude:haiku", cwd: directory, serviceTier: null,
+      approvalPolicy: "on-request", threadSource: "user",
+    });
+    const side = await service.forkThread({
+      threadId: source.thread.id, ephemeral: true, excludeTurns: true, threadSource: "user",
+    });
+    for (const text of ["first side message", "second side message"]) {
+      const prepared = await service.prepareTurn({
+        threadId: side.thread.id,
+        input: [{ type: "text", text, text_elements: [] }],
+      });
+      prepared.announce();
+      prepared.start();
+      await waitFor(
+        () => service.readThread(side.thread.id, true).thread.turns.at(-1)?.status === "completed",
+        `${text} completion`,
+      );
+    }
+    expect(fake.inputs.at(-1)?.options.persistSession).toBe(true);
+
+    const promoted = await service.forkThread({ threadId: side.thread.id, threadSource: "user" });
+    expect(promoted.thread).toMatchObject({
+      ephemeral: false,
+      forkedFromId: side.thread.id,
+      modelProvider: "claude",
+      threadSource: "user",
+      status: { type: "notLoaded" },
+    });
+    expect(promoted.thread.turns).toHaveLength(2);
+    expect(promoted.thread.turns.map((turn) => turn.status)).toEqual(["completed", "completed"]);
+    expect(service.readThread(side.thread.id, true).thread.turns).toHaveLength(2);
+    expect(forkCalls).toHaveLength(1);
+    expect((service as unknown as { ephemeralReleaseTimers: Map<string, NodeJS.Timeout> })
+      .ephemeralReleaseTimers.has(side.thread.id)).toBe(true);
+    await service.close();
+
+    const resumed = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(database), new FakeClaudeQuery().factory, undefined, undefined, transcripts,
+    );
+    await resumed.ready();
+    expect(resumed.readThread(promoted.thread.id, true).thread.turns).toHaveLength(2);
+    expect(resumed.ownsThread(side.thread.id)).toBe(false);
+    await resumed.close();
+  });
+
+  it("honors the side promotion feature flag", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-side-promotion-disabled-"));
+    directories.push(directory);
+    const disabled = { ...config(directory), features: { statusCommand: true, sideChatPromotion: false } };
+    const service = new ClaudeService(
+      disabled, new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(join(directory, "state.sqlite")), new FakeClaudeQuery().factory,
+    );
+    const source = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const side = await service.forkThread({
+      threadId: source.thread.id, ephemeral: true, excludeTurns: true, threadSource: "user",
+    });
+    await expect(service.forkThread({ threadId: side.thread.id }))
+      .rejects.toThrow("Forking this ephemeral Claude source thread is not supported");
+    await service.close();
+  });
+
   it("acknowledges captured inject_items after enqueue while provider no-query results remain delayed", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-raw-inject-"));
     directories.push(directory);

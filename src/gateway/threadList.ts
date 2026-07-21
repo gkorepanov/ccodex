@@ -8,6 +8,7 @@ import type { ClaudeService } from "../claude/service.js";
 import type { StockRpc } from "./stockRpc.js";
 import { CursorCodec, queryFingerprint } from "../protocol/cursor.js";
 import { invalidParams } from "../protocol/errors.js";
+import type { StockSideThreads } from "./stockSideThreads.js";
 
 interface ThreadCursor {
   readonly query: string;
@@ -58,11 +59,13 @@ export async function mergedThreadList(
   claude: ClaudeService,
   cursors: CursorCodec,
   logical?: { projectThreadCatalog(stock: Thread[], claude: Thread[]): Thread[] },
+  sideThreads?: Pick<StockSideThreads, "filterThreads">,
 ): Promise<ThreadListResponse> {
-  const [stockThreads, claudeThreads] = await Promise.all([
+  const [stockCatalog, claudeThreads] = await Promise.all([
     allStockThreads(stock, { ...params, cursor: null }),
     Promise.resolve(claude.listThreads({ ...params, cursor: null })),
   ]);
+  const stockThreads = sideThreads?.filterThreads(stockCatalog) ?? stockCatalog;
   const key = threadKey(params);
   const direction = params.sortDirection === "asc" ? "asc" : "desc";
   const query = threadQuery(params);
@@ -103,12 +106,18 @@ export async function mergedLoadedList(
   claude: ClaudeService,
   cursors: CursorCodec,
   logical?: { projectLoadedThreadIds(stock: string[], claude: string[]): string[] },
+  sideThreads?: Pick<StockSideThreads, "hiddenIds">,
 ): Promise<ThreadLoadedListResponse> {
-  const stockIds = await allStockLoaded(stock);
+  const [stockIds, stockThreads] = await Promise.all([
+    allStockLoaded(stock),
+    sideThreads ? allStockThreads(stock, { cursor: null }) : Promise.resolve([]),
+  ]);
+  const hidden = sideThreads?.hiddenIds(stockThreads) ?? new Set<string>();
+  const visibleStockIds = stockIds.filter((id) => !hidden.has(id));
   const claudeIds = claude.loadedThreadIds();
   const data = logical
-    ? logical.projectLoadedThreadIds(stockIds, claudeIds)
-    : [...new Set([...stockIds, ...claudeIds])];
+    ? logical.projectLoadedThreadIds(visibleStockIds, claudeIds)
+    : [...new Set([...visibleStockIds, ...claudeIds])];
   const version = createHash("sha256").update(data.join("\0")).digest("hex").slice(0, 16);
   const query = queryFingerprint({});
   const cursor = cursors.decode<OffsetCursor>("loaded", params.cursor);
