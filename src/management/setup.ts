@@ -13,6 +13,7 @@ import { pinnedCodexExecutable, runtimePlatformKey } from "../runtime/dependenci
 import { probeAppServer } from "../daemon/probe.js";
 import { reconcileManagedProcess, stopManagedProcess } from "../daemon/supervisor.js";
 import { atomicSymlink, atomicWrite, ensureLayout, installLayout, type InstallLayout } from "./layout.js";
+import { managedShim } from "./shims.js";
 import {
   installRemoteCodexShim, relocatedDelegate, restoreRemoteCodexShim, type RemoteCodexShim,
 } from "./remoteShim.js";
@@ -162,9 +163,8 @@ function hashFile(path: string): string {
 }
 
 function installShims(layout: InstallLayout): Readonly<Record<string, string>> {
-  const script = `#!/bin/sh\nset -eu\nif [ "\${CCODEX_SHIM_ACTIVE:-}" = 1 ]; then\n  printf '%s\\n' 'CCodex recursion guard: managed shim attempted to invoke itself.' >&2\n  exit 70\nfi\nCCODEX_SHIM_ACTIVE=1\nCCODEX_HOME=\${CCODEX_HOME:-"$HOME/.ccodex"}\nexport CCODEX_SHIM_ACTIVE CCODEX_HOME\nexec "$CCODEX_HOME/current/node_modules/.bin/ccodex" "$@"\n`;
-  for (const name of ["ccodex", "codex"]) {
-    atomicWrite(join(layout.bin, name), script, 0o755);
+  for (const name of ["ccodex", "codex"] as const) {
+    atomicWrite(join(layout.bin, name), managedShim(name), 0o755);
     chmodSync(join(layout.bin, name), 0o755);
   }
   return Object.fromEntries(["ccodex", "codex"].map((name) => [name, hashFile(join(layout.bin, name))]));

@@ -1,6 +1,6 @@
 {
   "name": "@gkorepanov/ccodex",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Unofficial Codex App compatibility bridge for Codex CLI and Claude Code runtimes.",
   "homepage": "https://github.com/gkorepanov/ccodex#readme",
   "repository": {
@@ -33,6 +33,7 @@
     "README.md",
     "scripts/install.sh",
     "scripts/uninstall.sh",
+    "scripts/postinstall.mjs",
     "config/compatibility.json",
     "examples/config.toml",
     "legal/LICENSES.md",
@@ -41,6 +42,7 @@
   "scripts": {
     "build": "npm run build:ts && npm run build:relay",
     "clean:dist": "rm -rf dist",
+    "postinstall": "node scripts/postinstall.mjs",
     "build:ts": "npm run clean:dist && tsc -p config/tsconfig.build.json",
     "build:relay": "./scripts/build-relay.sh",
     "check": "tsc -p tsconfig.json --noEmit && npm run check:architecture && npm run check:public-tree",
@@ -76,9 +78,9 @@
     "zod": "4.4.3"
   },
   "optionalDependencies": {
-    "@gkorepanov/ccodex-relay-darwin-arm64": "0.4.0",
-    "@gkorepanov/ccodex-relay-linux-arm64-gnu": "0.4.0",
-    "@gkorepanov/ccodex-relay-linux-x64-gnu": "0.4.0"
+    "@gkorepanov/ccodex-relay-darwin-arm64": "0.4.1",
+    "@gkorepanov/ccodex-relay-linux-arm64-gnu": "0.4.1",
+    "@gkorepanov/ccodex-relay-linux-x64-gnu": "0.4.1"
   },
   "devDependencies": {
     "@types/node": "24.10.1",

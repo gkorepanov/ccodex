@@ -37,6 +37,7 @@ describe("release package build", () => {
       expect(files).toContain("examples/config.toml");
       expect(files).toContain("scripts/install.sh");
       expect(files).toContain("scripts/uninstall.sh");
+      expect(files).toContain("scripts/postinstall.mjs");
       expect(files).toContain("legal/LICENSES.md");
       expect(files).toContain("legal/THIRD_PARTY_NOTICES.md");
       expect(files).not.toContain("compatibility.json");

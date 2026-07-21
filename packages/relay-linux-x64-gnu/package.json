@@ -1,6 +1,6 @@
 {
   "name": "@gkorepanov/ccodex-relay-linux-x64-gnu",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "CCodex remote-control relay for Linux x64 glibc.",
   "repository": {
     "type": "git",
