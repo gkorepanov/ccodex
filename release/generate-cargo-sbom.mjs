@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const output = resolve(process.argv[2] ?? "release-artifacts/cargo-sbom.cdx.json");
-const productVersion = JSON.parse(readFileSync(resolve(root, "compatibility.json"), "utf8")).productVersion;
+const productVersion = JSON.parse(readFileSync(resolve(root, "config", "compatibility.json"), "utf8")).productVersion;
 const metadata = JSON.parse(execFileSync("cargo", [
   "metadata", "--locked", "--format-version", "1", "--manifest-path", "relay/Cargo.toml",
 ], { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }));

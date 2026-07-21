@@ -4,7 +4,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 
 const root = resolve(import.meta.dirname, "..");
 const main = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-const compatibility = JSON.parse(readFileSync(join(root, "compatibility.json"), "utf8"));
+const compatibility = JSON.parse(readFileSync(join(root, "config", "compatibility.json"), "utf8"));
 const compatibilitySchema = JSON.parse(readFileSync(join(root, "release", "compatibility.schema.json"), "utf8"));
 if (!new Ajv2020().validate(compatibilitySchema, compatibility)) throw new Error("compatibility.json does not match its release schema");
 const packages = [

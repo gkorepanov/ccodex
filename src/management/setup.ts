@@ -139,7 +139,7 @@ async function startupSmoke(staged: string, layout: InstallLayout): Promise<void
 }
 
 function stagedCompatibility(staged: string): ReturnType<typeof compatibilityManifest> {
-  const path = join(staged, "node_modules", "@gkorepanov", "ccodex", "compatibility.json");
+  const path = join(staged, "node_modules", "@gkorepanov", "ccodex", "config", "compatibility.json");
   const value = JSON.parse(readFileSync(path, "utf8")) as ReturnType<typeof compatibilityManifest>;
   return value;
 }

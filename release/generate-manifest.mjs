@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
 const directory = resolve(process.argv[2] ?? "release-artifacts");
-const compatibility = JSON.parse(readFileSync(new URL("../compatibility.json", import.meta.url), "utf8"));
+const compatibility = JSON.parse(readFileSync(new URL("../config/compatibility.json", import.meta.url), "utf8"));
 const artifacts = readdirSync(directory).filter((name) => name.endsWith(".tgz")).sort().map((name) => {
   const bytes = readFileSync(join(directory, name));
   return { name: basename(name), bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };

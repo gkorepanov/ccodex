@@ -23,7 +23,7 @@ export interface CompatibilityManifest {
 }
 
 export function compatibilityManifest(): CompatibilityManifest {
-  const path = fileURLToPath(new URL("../../compatibility.json", import.meta.url));
+  const path = fileURLToPath(new URL("../../config/compatibility.json", import.meta.url));
   return JSON.parse(readFileSync(path, "utf8")) as CompatibilityManifest;
 }
 

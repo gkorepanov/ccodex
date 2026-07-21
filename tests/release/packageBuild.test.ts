@@ -33,8 +33,16 @@ describe("release package build", () => {
       const files = packed[0]!.files.map((file) => file.path);
       expect(files).toContain("vendor/codex/continuation.md");
       expect(files).toContain("assets/ccodex/goals/continuation.md");
+      expect(files).toContain("config/compatibility.json");
+      expect(files).toContain("examples/config.toml");
+      expect(files).toContain("scripts/install.sh");
+      expect(files).toContain("scripts/uninstall.sh");
       expect(files).toContain("legal/LICENSES.md");
       expect(files).toContain("legal/THIRD_PARTY_NOTICES.md");
+      expect(files).not.toContain("compatibility.json");
+      expect(files).not.toContain("config.example.toml");
+      expect(files).not.toContain("install.sh");
+      expect(files).not.toContain("uninstall.sh");
       const expected = [
         readFileSync(resolve(root, "vendor/codex/continuation.md"), "utf8").trim(),
         readFileSync(resolve(root, "assets/ccodex/goals/continuation.md"), "utf8").trim(),

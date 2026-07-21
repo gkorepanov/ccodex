@@ -13,6 +13,12 @@ Codex desktop and mobile apps to run Claude models.*
 curl -fsSL https://github.com/gkorepanov/ccodex/releases/latest/download/install.sh | sh
 ```
 
+<p align="center">
+  <img src="docs/screenshots/mobile-claude-model-picker.png" width="30%" alt="Claude models in the Codex App mobile model picker" />
+  <img src="docs/screenshots/mobile-fable-response.png" width="30%" alt="Claude Fable responding in the Codex App mobile chat" />
+  <img src="docs/screenshots/mobile-claude-usage-status.png" width="30%" alt="Claude usage limits in the Codex App mobile status sheet" />
+</p>
+
 > [!NOTE]
 > CCodex is an independent, unofficial, community project. It is not affiliated with,
 > sponsored, or endorsed by OpenAI or Anthropic. *Codex*, *Claude*, and related marks
@@ -63,14 +69,6 @@ lives on your machine, and the entire codebase is MIT-licensed and open.
 > [!WARNING]
 > CCodex is very early and not extensively tested yet. Expect bugs — and please
 > [report them](https://github.com/gkorepanov/ccodex/issues).
-
-## Screenshots
-
-<p align="center">
-  <img src="docs/screenshots/mobile-claude-model-picker.png" width="30%" alt="Claude models in the Codex App mobile model picker" />
-  <img src="docs/screenshots/mobile-fable-response.png" width="30%" alt="Claude Fable responding in the Codex App mobile chat" />
-  <img src="docs/screenshots/mobile-claude-usage-status.png" width="30%" alt="Claude usage limits in the Codex App mobile status sheet" />
-</p>
 
 ## Install
 

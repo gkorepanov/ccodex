@@ -93,7 +93,7 @@ jobs:
       - run: npm run check
       - run: npm run check:codex-assets
       - run: npm run check:protocol-generated
-      - run: npx vitest run
+      - run: npx vitest run --config config/vitest.config.ts
       - run: npm run test:contracts
       - run: node release/verify-packages.mjs
       - run: mkdir -p artifacts && npm pack --pack-destination artifacts
@@ -125,7 +125,7 @@ jobs:
       - run: npm sbom --omit=dev --sbom-format cyclonedx > release-artifacts/npm-sbom.cdx.json
       - run: node release/generate-cargo-sbom.mjs release-artifacts/cargo-sbom.cdx.json
       - run: node release/generate-notices.mjs && cp legal/THIRD_PARTY_NOTICES.md release-artifacts/
-      - run: cp install.sh uninstall.sh release-artifacts/
+      - run: cp scripts/install.sh scripts/uninstall.sh release-artifacts/
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: release-artifacts/*

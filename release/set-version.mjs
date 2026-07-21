@@ -22,7 +22,7 @@ for (const directory of platformDirectories) {
   manifest.version = version;
   writeJson(path, manifest);
 }
-const compatibilityPath = join(root, "compatibility.json");
+const compatibilityPath = join(root, "config", "compatibility.json");
 const compatibility = JSON.parse(readFileSync(compatibilityPath, "utf8"));
 compatibility.productVersion = version;
 writeJson(compatibilityPath, compatibility);
