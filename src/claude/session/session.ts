@@ -128,6 +128,7 @@ import {
   type ClaudeProviderFact,
   type RuntimeFactContext,
 } from "./providerFacts.js";
+import { normalizeClaudeModelIdentifier } from "../modelSelection.js";
 
 const nullSource = { providerEventId: null, providerEventType: null } as const;
 const providerJournalMaxEvents = 20_000;
@@ -246,6 +247,10 @@ export interface ClaudeSessionRuntimeDependencies {
   readonly isClosing: () => boolean;
   readonly persistUserSideSessions: boolean;
   readonly interactiveQuestions?: boolean;
+  readonly resolveChildModel?: (model: string) => {
+    readonly modelPickerId: string;
+    readonly claudeModelValue: string;
+  } | undefined;
 }
 
 interface RuntimeLease {
@@ -7422,7 +7427,8 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           }, source);
         }
         if (subagent && item.type === "collabAgentToolCall") {
-          childThread = this.createChildScope(state.ownerThreadId, fact, source);
+          const requestedModel = typeof tool?.input.model === "string" ? tool.input.model : undefined;
+          childThread = this.createChildScope(state.ownerThreadId, fact, source, requestedModel);
           task.childThreadId = childThread.id; item.receiverThreadIds = [childThread.id];
           item.agentsStates = { [childThread.id]: { status: "running", message: fact.description } };
         }
@@ -7643,6 +7649,15 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     if (!item || state.completedItems.has(item.id)) return;
     const projection = projectToolCompletion(item, tool, output, isError, result, state.record.thread.cwd);
     turn.items[index] = projection.completed; state.completedItems.add(item.id);
+    if (projection.completed.type === "collabAgentToolCall"
+      && projection.completed.tool === "spawnAgent" && projection.completed.model) {
+      const childThreadId = projection.completed.receiverThreadIds[0];
+      const child = childThreadId ? this.repository.read(childThreadId, false) : undefined;
+      if (child) this.repository.update({
+        ...child,
+        resolvedModel: normalizeClaudeModelIdentifier(projection.completed.model),
+      });
+    }
     if (!tool.started) {
       tool.started = true;
       this.publishTurn(turn, "item/started", {
@@ -7660,9 +7675,18 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
 
   private createChildScope(
     parentThreadId: string, fact: Extract<MainStreamFact, { kind: "taskStart" }>, source: RuntimeFactSource,
+    requestedModel?: string,
   ): ClaudeThreadRecord["thread"] {
     const parent = this.repository.read(parentThreadId, false)!;
-    const { record, turn, item } = newChildScope(parent, parentThreadId, fact);
+    const normalized = requestedModel && requestedModel !== "inherit"
+      ? normalizeClaudeModelIdentifier(requestedModel) : undefined;
+    const model = normalized
+      ? this.runtimeDependencies?.resolveChildModel?.(normalized) ?? {
+          modelPickerId: `claude:${normalized}`,
+          claudeModelValue: normalized,
+        }
+      : undefined;
+    const { record, turn, item } = newChildScope(parent, parentThreadId, fact, model);
     const { thread } = record;
     const childThreadId = thread.id;
     this.repository.create(record); this.repository.createTurn(childThreadId, turn);

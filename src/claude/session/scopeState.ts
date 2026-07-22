@@ -103,6 +103,7 @@ export function newChildScope(
   parent: ClaudeThreadRecord,
   parentThreadId: string,
   fact: Extract<MainStreamFact, { kind: "taskStart" }>,
+  model?: { readonly modelPickerId: string; readonly claudeModelValue: string },
 ): { record: ClaudeThreadRecord; turn: Turn; item: ThreadItem } {
   const childThreadId = uuidv7();
   const createdAt = Math.floor(Date.now() / 1_000);
@@ -122,7 +123,8 @@ export function newChildScope(
     agentRole: null, name: null, turns: [],
   };
   const record: ClaudeThreadRecord = {
-    ...parent, thread, lastClaudeMessageUuid: null, lastCompletedTurnId: null,
+    ...parent, ...model, thread, resolvedModel: model ? null : parent.resolvedModel,
+    lastClaudeMessageUuid: null, lastCompletedTurnId: null,
     tokenUsageTotal: {
       totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0,
     },

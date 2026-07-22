@@ -70,6 +70,7 @@ import { isClaudeStatusCommand } from "./statusCommand.js";
 import { systemNoticeText } from "../gateway/transientNotice.js";
 import {
   claudeCatalogId,
+  normalizeClaudeModelIdentifier,
   normalizeClaudeServiceTier,
   resolveClaudeModel,
 } from "./modelSelection.js";
@@ -366,6 +367,13 @@ export class ClaudeService {
           isClosing: () => this.closing,
           persistUserSideSessions: this.config.features?.sideChatPromotion ?? true,
           interactiveQuestions: this.config.features?.interactiveQuestions ?? true,
+          resolveChildModel: (model) => {
+            const value = normalizeClaudeModelIdentifier(model);
+            const modelPickerId = value.startsWith(this.config.modelPrefix)
+              ? value : `${this.config.modelPrefix}${value}`;
+            const claudeModelValue = resolveClaudeModel(this.config, modelPickerId);
+            return claudeModelValue ? { modelPickerId, claudeModelValue } : undefined;
+          },
         },
       ),
     );

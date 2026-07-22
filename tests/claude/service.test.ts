@@ -2885,6 +2885,88 @@ describe("ClaudeService", () => {
     await service.close();
   });
 
+  it("reports an explicitly selected Sonnet child instead of the Fable parent model", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-child-model-"));
+    directories.push(directory);
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    const base = { session_id: "fable-parent-session" };
+    const agentTool = "sonnet-agent-tool";
+    const agentTask = "sonnet-agent-task";
+    const messages = [
+      {
+        type: "stream_event", parent_tool_use_id: null, uuid: randomUUID(), ...base,
+        event: {
+          type: "content_block_start", index: 0,
+          content_block: {
+            type: "tool_use", id: agentTool, name: "Agent",
+            input: { description: "Use Sonnet", prompt: "Inspect the project", model: "sonnet" },
+          },
+        },
+      },
+      {
+        type: "system", subtype: "task_started", task_id: agentTask, tool_use_id: agentTool,
+        task_type: "agent", subagent_type: "general-purpose", description: "Use Sonnet",
+        uuid: randomUUID(), ...base,
+      },
+      {
+        type: "user", parent_tool_use_id: null, uuid: randomUUID(), ...base,
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: agentTool, content: "Async agent launched successfully." }],
+        },
+        tool_use_result: {
+          isAsync: true, status: "async_launched", agentId: agentTask,
+          resolvedModel: "claude-sonnet-5", outputFile: "/tmp/sonnet-agent.output",
+        },
+      },
+      {
+        type: "assistant", parent_tool_use_id: agentTool, uuid: randomUUID(), ...base,
+        message: {
+          role: "assistant", model: "claude-sonnet-5",
+          content: [{ type: "text", text: "Sonnet child answer." }],
+        },
+      },
+      {
+        type: "system", subtype: "task_notification", task_id: agentTask, tool_use_id: agentTool,
+        status: "completed", output_file: "/tmp/sonnet-agent.output", summary: "Sonnet child answer.",
+        uuid: randomUUID(), ...base,
+      },
+    ] as unknown as SDKMessage[];
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), store,
+      new FakeClaudeQuery(undefined, undefined, [], false, undefined, undefined, undefined, messages).factory,
+    );
+    const started = await service.startThread({ model: "claude:claude-fable-5", cwd: directory });
+    const prepared = await service.prepareTurn({
+      threadId: started.thread.id,
+      input: [{ type: "text", text: "Spawn Sonnet", text_elements: [] }],
+    });
+    prepared.announce();
+    prepared.start();
+    await waitFor(
+      () => service.readThread(started.thread.id, true).thread.turns[0]?.status === "completed",
+      "Fable parent with Sonnet child",
+    );
+
+    const parentCall = service.readThread(started.thread.id, true).thread.turns[0]?.items
+      .find((item) => item.type === "collabAgentToolCall");
+    expect(parentCall).toMatchObject({
+      type: "collabAgentToolCall", model: "claude-sonnet-5", status: "completed",
+    });
+    const childThreadId = parentCall?.type === "collabAgentToolCall"
+      ? parentCall.receiverThreadIds[0]! : "";
+    expect(store.getThreadRecord(childThreadId)).toMatchObject({
+      modelPickerId: "claude:sonnet",
+      claudeModelValue: "sonnet",
+      resolvedModel: "claude-sonnet-5",
+    });
+    await expect(service.resumeThread({ threadId: childThreadId })).resolves.toMatchObject({
+      model: "claude:sonnet",
+      thread: { id: childThreadId, parentThreadId: started.thread.id },
+    });
+    await service.close();
+  });
+
   it("projects Claude subagent retry progress without creating another item", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-subagent-retry-"));
     directories.push(directory);
