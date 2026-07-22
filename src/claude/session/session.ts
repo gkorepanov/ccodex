@@ -77,7 +77,7 @@ import {
 } from "../toolMapper.js";
 import { isFileMutationTool, toolPolicy } from "../permissionPolicy.js";
 import {
-  newChildScope, newMainStreamState, scopeProjection, streamItem, toolAt,
+  newChildScope, newMainStreamState, scopeProjection, streamItem, taskUsesProvider, toolAt,
   type MainStreamState, type ScopeTask, type SessionTool,
 } from "./scopeState.js";
 import { systemNoticeText } from "../../gateway/transientNotice.js";
@@ -245,6 +245,7 @@ export interface ClaudeSessionRuntimeDependencies {
   readonly invalidateModelCatalog: () => void;
   readonly isClosing: () => boolean;
   readonly persistUserSideSessions: boolean;
+  readonly interactiveQuestions?: boolean;
 }
 
 interface RuntimeLease {
@@ -1033,6 +1034,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       reasoningSummary: record.reasoningSummary,
       collaborationMode: record.collaborationMode,
       outputSchema: record.outputSchema,
+      interactiveQuestions: this.runtimeDependencies!.interactiveQuestions ?? true,
     };
   }
 
@@ -1772,7 +1774,6 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           }
         } catch (error) {
           failure = error instanceof Error ? error.message : String(error);
-          throw error;
         } finally {
           await this.submitProviderProjection(fact.runtimeGeneration, {
             type: "providerEventFinished",
@@ -1782,6 +1783,15 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
             disposition: failure ? "failed" : disposition,
             ...(failure ? { error: failure } : {}),
           });
+        }
+        if (failure) {
+          await this.submitProviderProjection(fact.runtimeGeneration, {
+            type: "runtimeExited",
+            runtimeGeneration: fact.runtimeGeneration,
+            message: `Claude provider projection failed: ${failure}`,
+            codexErrorInfo: null,
+          });
+          runtime.beginClose();
         }
       },
     );
@@ -2532,6 +2542,12 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     }
     if (name === "AskUserQuestion") {
       return this.askProviderUser(projection, runtimeGeneration, input, options);
+    }
+    if (providerPermissionMode(settings) === "auto") {
+      return {
+        behavior: "deny",
+        message: options.decisionReason ?? options.description ?? `Claude Auto did not allow tool '${name}'.`,
+      };
     }
     if (name === "ExitPlanMode") {
       return {
@@ -6242,7 +6258,13 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       this.pendingNoQuery = this.pendingInputs = 0;
       this.preparedRuntimeInputs.clear();
       this.disposeRuntimeOperations();
-      if (active) active.commandCompleted = true;
+      if (active) {
+        active.commandCompleted = true;
+        active.acknowledged = active.notifications;
+        active.goals = 0;
+        active.goalInFlight = false;
+        delete active.request;
+      }
       this.settleForcedScopes(source);
       if (fact.type === "runtimeExit" && generation !== undefined) {
         this.runtimeGeneration = undefined;
@@ -6815,7 +6837,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     if (!owner && command.ownerProviderId) {
       owner = this.toolOwner(command.ownerProviderId);
       const task = [...this.tasks.values()].find((candidate) =>
-        candidate.providerId === command.ownerProviderId || candidate.taskId === command.ownerProviderId);
+        taskUsesProvider(candidate, command.ownerProviderId!) || candidate.taskId === command.ownerProviderId);
       if (task?.childThreadId) owner = this.scopes.get(task.childThreadId);
     }
     owner ??= this.scopes.get(this.threadId);
@@ -6942,7 +6964,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     if (command.providerId) {
       const scope = [...this.scopes.values()].find((candidate) => candidate.tools.has(command.providerId!));
       providerTask = [...this.tasks.values()].find((candidate) =>
-        candidate.providerId === command.providerId || candidate.taskId === command.providerId);
+        taskUsesProvider(candidate, command.providerId!) || candidate.taskId === command.providerId);
       ownerThreadId = providerTask?.ownerThreadId ?? scope?.ownerThreadId ?? ownerThreadId;
       targetThreadId = providerTask?.childThreadId ?? ownerThreadId;
     }
@@ -6981,7 +7003,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       taskIds,
       childThreadId: command.providerId
         ? [...this.tasks.values()].find((task) =>
-          task.providerId === command.providerId || task.taskId === command.providerId)?.childThreadId ?? null
+          taskUsesProvider(task, command.providerId!) || task.taskId === command.providerId)?.childThreadId ?? null
         : null,
       taskId: childTask?.taskId ?? null,
       quiescent: this.isQuiescent(),
@@ -7376,8 +7398,9 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       const existing = tool && turn.items.find((item) => item.id === tool.itemId);
       const subagent = Boolean(fact.subagentType) || fact.taskType === "agent" || fact.taskType === "subagent";
       if (!task && !existing && !subagent) {
+        const providerId = fact.providerId ?? fact.taskId;
         task = { taskId: fact.taskId, ownerThreadId: state.ownerThreadId,
-          itemId: `claude-task:${fact.taskId}`, providerId: fact.providerId ?? fact.taskId,
+          itemId: `claude-task:${fact.taskId}`, providerId, providerIds: new Set([providerId]),
           turnId: turn.id, childThreadId: undefined, outputFile: fact.outputFile, terminal: false };
         this.tasks.set(task.taskId, task);
       }
@@ -7387,8 +7410,9 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           status: "inProgress", senderThreadId: state.ownerThreadId, receiverThreadIds: [],
           prompt: fact.prompt ?? fact.description, model: null, reasoningEffort: null, agentsStates: {},
         };
+        const providerId = fact.providerId ?? item.id;
         const createdTask: ScopeTask = { taskId: fact.taskId, ownerThreadId: state.ownerThreadId, itemId: item.id,
-          providerId: fact.providerId ?? item.id, turnId: turn.id, childThreadId: undefined,
+          providerId, providerIds: new Set([providerId]), turnId: turn.id, childThreadId: undefined,
           outputFile: fact.outputFile, terminal: false };
         task = createdTask; this.tasks.set(createdTask.taskId, createdTask);
         if (!existing) {
@@ -7401,6 +7425,24 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           childThread = this.createChildScope(state.ownerThreadId, fact, source);
           task.childThreadId = childThread.id; item.receiverThreadIds = [childThread.id];
           item.agentsStates = { [childThread.id]: { status: "running", message: fact.description } };
+        }
+      }
+      const resumed = task?.terminal && subagent && task.childThreadId && fact.providerId
+        && !taskUsesProvider(task, fact.providerId);
+      if (resumed && task?.childThreadId) {
+        childThread = this.resumeChildScope(task.childThreadId, fact, source);
+        task.terminal = false;
+        task.providerId = fact.providerId!;
+        task.providerIds.add(fact.providerId!);
+        task.itemId = existing?.id ?? task.itemId;
+        task.turnId = turn.id;
+        task.outputFile = fact.outputFile;
+        if (existing?.type === "collabAgentToolCall") {
+          existing.receiverThreadIds = [task.childThreadId];
+          existing.agentsStates = {
+            [task.childThreadId]: { status: "running", message: fact.description },
+          };
+          if (tool) this.beginTool(turn, state, tool, true, source);
         }
       }
       if (task && tool) {
@@ -7476,10 +7518,12 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
             status: fact.status === "completed" ? "completed" : fact.status === "stopped" ? "interrupted" : "errored",
             message: fact.summary,
           };
-          ownerState.completedItems.add(item.id);
-          this.publishTurn(ownerTurn, "item/completed", {
-            item, threadId: task.ownerThreadId, turnId: ownerTurn.id, completedAtMs: Date.now(),
-          }, source);
+          if (item.tool !== "sendInput" || !ownerState.completedItems.has(item.id)) {
+            ownerState.completedItems.add(item.id);
+            this.publishTurn(ownerTurn, "item/completed", {
+              item, threadId: task.ownerThreadId, turnId: ownerTurn.id, completedAtMs: Date.now(),
+            }, source);
+          }
         }
         if (task.childThreadId) this.finishChildScope(task.childThreadId, fact.status, fact.summary, source);
       }
@@ -7545,6 +7589,17 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     const item = turn.items.find((candidate) => candidate.id === tool.itemId);
     if (!item) return;
     updateToolInput(item, tool, input, state.record.thread.cwd);
+    if (item.type === "collabAgentToolCall" && item.tool === "sendInput") {
+      const target = typeof input.to === "string" ? input.to
+        : typeof input.recipient === "string" ? input.recipient : undefined;
+      const task = target ? this.tasks.get(target) : undefined;
+      if (task?.childThreadId) {
+        item.receiverThreadIds = [task.childThreadId];
+        item.agentsStates = {
+          [task.childThreadId]: { status: task.terminal ? "completed" : "running", message: null },
+        };
+      }
+    }
     if (tool.name === "TaskOutput") {
       const id = typeof input.task_id === "string" ? input.task_id
         : typeof input.taskId === "string" ? input.taskId : undefined;
@@ -7562,6 +7617,8 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     const record = state.record;
     if (!item || tool.started || tool.foldedTaskId || isImageRead(tool, record.thread.cwd)
       || item.type === "commandExecution" && !item.command) return;
+    if (item.type === "collabAgentToolCall" && item.tool === "sendInput"
+      && (!item.prompt || item.receiverThreadIds.length === 0)) return;
     if (tool.name === "Bash" && tool.input.run_in_background === true && !tool.backgroundTaskId) return;
     if (!force
       && toolPolicy(tool.name, tool.input, record.thread.cwd, record.approvalPolicy, record.sandboxPolicy).decision === "ask") return;
@@ -7619,6 +7676,54 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     this.publishAt(childThreadId, turn.id, "item/completed",
       { item, threadId: childThreadId, turnId: turn.id, completedAtMs: Date.now() }, source);
     return thread;
+  }
+
+  private resumeChildScope(
+    childThreadId: string,
+    fact: Extract<MainStreamFact, { kind: "taskStart" }>,
+    source: RuntimeFactSource,
+  ): ClaudeThreadRecord["thread"] {
+    const record = this.repository.read(childThreadId, false);
+    if (!record) throw new Error(`Unknown Claude child thread '${childThreadId}'.`);
+    const startedAt = Math.floor(Date.now() / 1_000);
+    const text = fact.prompt ?? fact.description;
+    const item: ThreadItem = {
+      type: "userMessage", id: uuidv7(), clientId: null,
+      content: [{ type: "text", text, text_elements: [] }],
+    };
+    const turn: Turn = {
+      id: uuidv7(), items: [item], itemsView: "full", status: "inProgress", error: null,
+      startedAt, completedAt: null, durationMs: null,
+    };
+    const updated: ClaudeThreadRecord = {
+      ...record,
+      thread: {
+        ...record.thread,
+        preview: text,
+        status: { type: "active", activeFlags: [] },
+        updatedAt: startedAt,
+        recencyAt: startedAt,
+      },
+    };
+    const status = { threadId: childThreadId, status: updated.thread.status };
+    this.commitState(updated, [{
+      turnId: turn.id,
+      method: "thread/status/changed",
+      params: status,
+      providerEventId: source.providerEventId,
+      providerEventType: source.providerEventType,
+    }], turn, true);
+    const state = newMainStreamState(childThreadId, turn.id, updated);
+    state.completedItems.add(item.id);
+    this.scopes.set(childThreadId, state);
+    this.publishAt(childThreadId, turn.id, "turn/started", { threadId: childThreadId, turn }, source);
+    this.publishAt(childThreadId, turn.id, "item/started", {
+      item, threadId: childThreadId, turnId: turn.id, startedAtMs: Date.now(),
+    }, source);
+    this.publishAt(childThreadId, turn.id, "item/completed", {
+      item, threadId: childThreadId, turnId: turn.id, completedAtMs: Date.now(),
+    }, source);
+    return updated.thread;
   }
 
   private finishChildScope(

@@ -897,6 +897,7 @@ describe("ClaudeService", () => {
       input: [{ type: "text", text: "materialize", text_elements: [] }],
     });
     expect(ask.fake.inputs[0]?.options.permissionMode).toBe("default");
+    expect(ask.fake.inputs[0]?.options.canUseTool).toBeTypeOf("function");
     await ask.service.close();
 
     const fullFake = new FakeClaudeQuery({ name: "Bash", input: { command: "printf ok" } });
@@ -913,6 +914,7 @@ describe("ClaudeService", () => {
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
     });
+    expect(full.fake.inputs[0]?.options.canUseTool).toBeTypeOf("function");
     prepared.start();
     await new Promise<void>((resolve) => {
       const poll = () => fullFake.permissionResults.length ? resolve() : setTimeout(poll, 5);
@@ -932,9 +934,26 @@ describe("ClaudeService", () => {
       input: [{ type: "text", text: "materialize", text_elements: [] }],
     });
     expect(restricted.fake.inputs[0]?.options.permissionMode).toBe("dontAsk");
+    expect(restricted.fake.inputs[0]?.options.canUseTool).toBeTypeOf("function");
     await restricted.service.close();
 
-    const autoFake = new FakeClaudeQuery(undefined, { name: "Bash", input: { command: "printf ok" }, execute: () => undefined });
+    const ephemeral = make("ephemeral");
+    const ephemeralThread = await ephemeral.service.startThread({
+      model: "claude:haiku",
+      cwd: ephemeral.directory,
+      ephemeral: true,
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+    });
+    await ephemeral.service.prepareTurn({
+      threadId: ephemeralThread.thread.id,
+      input: [{ type: "text", text: "materialize", text_elements: [] }],
+    });
+    expect(ephemeral.fake.inputs[0]?.options.permissionMode).toBe("auto");
+    expect(ephemeral.fake.inputs[0]?.options.canUseTool).toBeTypeOf("function");
+    await ephemeral.service.close();
+
+    const autoFake = new FakeClaudeQuery({ name: "Bash", input: { command: "printf ok" } });
     const automatic = make("auto", autoFake);
     const autoThread = await automatic.service.startThread({
       model: "claude:haiku", cwd: automatic.directory, approvalPolicy: "on-request", approvalsReviewer: "auto_review",
@@ -946,7 +965,7 @@ describe("ClaudeService", () => {
       input: [{ type: "text", text: "run", text_elements: [] }],
     });
     expect(automatic.fake.inputs[0]?.options.permissionMode).toBe("auto");
-    expect(automatic.fake.inputs[0]?.options.canUseTool).toBeUndefined();
+    expect(automatic.fake.inputs[0]?.options.canUseTool).toBeTypeOf("function");
     autoTurn.start();
     await new Promise<void>((resolve) => {
       const poll = () => automatic.service.readThread(autoThread.thread.id, true).thread.turns.at(-1)?.status === "completed"
@@ -955,6 +974,10 @@ describe("ClaudeService", () => {
       poll();
     });
     expect(autoFake.preToolHookResults[0]).toEqual({ continue: true });
+    expect(autoFake.permissionResults[0]).toMatchObject({
+      behavior: "deny",
+      message: "Claude Auto did not allow tool 'Bash'.",
+    });
     await automatic.service.close();
 
     const resumedFake = new FakeClaudeQuery();
@@ -966,7 +989,7 @@ describe("ClaudeService", () => {
     expect(response.approvalsReviewer).toBe("auto_review");
     expect(response.activePermissionProfile).toEqual({ id: ":workspace", extends: null });
     expect(resumedFake.inputs[0]?.options.permissionMode).toBe("auto");
-    expect(resumedFake.inputs[0]?.options.canUseTool).toBeUndefined();
+    expect(resumedFake.inputs[0]?.options.canUseTool).toBeTypeOf("function");
     await resumed.close();
   });
 
@@ -1736,7 +1759,10 @@ describe("ClaudeService", () => {
   it("honors the side promotion feature flag", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-side-promotion-disabled-"));
     directories.push(directory);
-    const disabled = { ...config(directory), features: { statusCommand: true, sideChatPromotion: false } };
+    const disabled = {
+      ...config(directory),
+      features: { statusCommand: true, sideChatPromotion: false, interactiveQuestions: true },
+    };
     const service = new ClaudeService(
       disabled, new SubscriptionHub(), new Logger("error"),
       new SqliteHybridStore(join(directory, "state.sqlite")), new FakeClaudeQuery().factory,
@@ -3799,6 +3825,217 @@ describe("ClaudeService", () => {
       status: "interrupted", error: null,
     });
     releaseProvider();
+    await service.close();
+  });
+
+  it("resumes a completed subagent through native SendMessage without stranding the parent", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-resumed-child-"));
+    directories.push(directory);
+    const base = { session_id: "resumed-child-session" };
+    const spawnToolId = "spawn-tool";
+    const sendToolId = "send-tool";
+    const taskId = "stable-provider-task";
+    const resumedText = "The resumed child finished the conversion.";
+    const messages = [
+      { type: "stream_event", event: { type: "message_start", message: {} }, parent_tool_use_id: null, uuid: randomUUID(), ...base },
+      {
+        type: "stream_event", parent_tool_use_id: null, uuid: randomUUID(), ...base,
+        event: { type: "content_block_start", index: 0, content_block: {
+          type: "tool_use", id: spawnToolId, name: "Agent", input: { prompt: "Convert the data" },
+        } },
+      },
+      {
+        type: "system", subtype: "task_started", task_id: taskId, tool_use_id: spawnToolId,
+        task_type: "agent", subagent_type: "general-purpose", description: "Convert the data",
+        prompt: "Convert the data", uuid: randomUUID(), ...base,
+      },
+      {
+        type: "assistant", parent_tool_use_id: spawnToolId, uuid: randomUUID(), ...base,
+        message: { role: "assistant", content: [{ type: "text", text: "Initial child pass completed." }] },
+      },
+      {
+        type: "system", subtype: "task_notification", task_id: taskId, tool_use_id: spawnToolId,
+        status: "completed", summary: "Initial child pass completed.", uuid: randomUUID(), ...base,
+      },
+      {
+        type: "assistant", parent_tool_use_id: null, uuid: randomUUID(), ...base,
+        message: { role: "assistant", content: [{ type: "tool_use", id: sendToolId, name: "SendMessage", input: {
+          to: taskId, message: "Continue and finish the conversion", summary: "Continue conversion",
+        } }] },
+      },
+      {
+        type: "system", subtype: "task_started", task_id: taskId, tool_use_id: sendToolId,
+        task_type: "local_agent", subagent_type: "general-purpose", description: "Convert the data",
+        prompt: "Continue and finish the conversion", uuid: randomUUID(), ...base,
+      },
+      {
+        type: "user", parent_tool_use_id: null, uuid: randomUUID(), ...base,
+        message: { role: "user", content: [{
+          type: "tool_result", tool_use_id: sendToolId, content: "Agent resumed in the background.",
+        }] },
+        tool_use_result: { success: true },
+      },
+      { type: "stream_event", event: { type: "message_start", message: {} }, parent_tool_use_id: spawnToolId, uuid: randomUUID(), ...base },
+      {
+        type: "stream_event", parent_tool_use_id: spawnToolId, uuid: randomUUID(), ...base,
+        event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      },
+      {
+        type: "stream_event", parent_tool_use_id: spawnToolId, uuid: randomUUID(), ...base,
+        event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: resumedText } },
+      },
+      { type: "stream_event", event: { type: "content_block_stop", index: 0 }, parent_tool_use_id: spawnToolId, uuid: randomUUID(), ...base },
+      {
+        type: "assistant", parent_tool_use_id: spawnToolId, uuid: randomUUID(), ...base,
+        message: { role: "assistant", content: [{ type: "text", text: resumedText }] },
+      },
+      {
+        type: "system", subtype: "task_notification", task_id: taskId, tool_use_id: sendToolId,
+        status: "completed", summary: resumedText, uuid: randomUUID(), ...base,
+      },
+      {
+        type: "assistant", parent_tool_use_id: null, uuid: randomUUID(), ...base,
+        message: { role: "assistant", content: [{ type: "text", text: "Parent received the resumed result." }] },
+      },
+    ] as unknown as SDKMessage[];
+    const fake = new FakeClaudeQuery(
+      undefined, undefined, [], false, undefined, undefined, undefined, messages,
+    );
+    const hub = new SubscriptionHub();
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    const service = new ClaudeService(config(directory), hub, new Logger("error"), store, fake.factory);
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const prepared = await service.prepareTurn({
+      threadId: started.thread.id,
+      input: [{ type: "text", text: "spawn, then resume the child", text_elements: [] }],
+    });
+    prepared.announce();
+    prepared.start();
+    await waitFor(
+      () => service.readThread(started.thread.id, true).thread.turns[0]?.status === "completed",
+      "resumed child parent completion",
+    );
+
+    const parent = service.readThread(started.thread.id, true).thread;
+    const spawn = parent.turns[0]!.items.find((item) =>
+      item.type === "collabAgentToolCall" && item.tool === "spawnAgent");
+    const send = parent.turns[0]!.items.find((item) =>
+      item.type === "collabAgentToolCall" && item.tool === "sendInput");
+    expect(spawn).toMatchObject({ type: "collabAgentToolCall", status: "completed" });
+    const childThreadId = spawn?.type === "collabAgentToolCall" ? spawn.receiverThreadIds[0] : undefined;
+    expect(send).toMatchObject({
+      type: "collabAgentToolCall", status: "completed", receiverThreadIds: [childThreadId],
+      prompt: "Continue and finish the conversion",
+    });
+    expect(parent.turns[0]!.items.some((item) =>
+      item.type === "dynamicToolCall" && item.tool === "SendMessage")).toBe(false);
+    const parentEvents = service.eventsAfter(started.thread.id, 0);
+    expect(parentEvents.filter((event) => event.method === "item/started"
+      && (event.params as { item?: { id?: string } }).item?.id === sendToolId)).toEqual([
+      expect.objectContaining({ params: expect.objectContaining({
+        item: expect.objectContaining({
+          type: "collabAgentToolCall", tool: "sendInput", receiverThreadIds: [childThreadId],
+        }),
+      }) }),
+    ]);
+    expect(parentEvents.filter((event) => event.method === "item/completed"
+      && (event.params as { item?: { id?: string } }).item?.id === sendToolId)).toHaveLength(1);
+    const child = service.readThread(childThreadId!, true).thread;
+    expect(child.turns).toHaveLength(2);
+    expect(child.turns).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "completed" }),
+      expect.objectContaining({
+        status: "completed",
+        items: expect.arrayContaining([
+          expect.objectContaining({ type: "userMessage" }),
+          expect.objectContaining({ type: "agentMessage", text: resumedText, phase: "final_answer" }),
+        ]),
+      }),
+    ]));
+    expect(service.eventsAfter(childThreadId!, 0).filter((event) => event.method === "turn/started")).toHaveLength(2);
+    expect(store.listProviderEvents(started.thread.id).some((event) => event.disposition === "failed")).toBe(false);
+    await service.close();
+  });
+
+  it("terminalizes the parent when provider projection fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-projection-failure-"));
+    directories.push(directory);
+    const base = { session_id: "projection-failure-session" };
+    const spawnToolId = "spawn-tool";
+    const sendToolId = "send-tool";
+    const taskId = "provider-task";
+    const messages = [
+      { type: "stream_event", event: { type: "message_start", message: {} }, parent_tool_use_id: null, uuid: randomUUID(), ...base },
+      {
+        type: "stream_event", parent_tool_use_id: null, uuid: randomUUID(), ...base,
+        event: { type: "content_block_start", index: 0, content_block: {
+          type: "tool_use", id: spawnToolId, name: "Agent", input: { prompt: "Initial work" },
+        } },
+      },
+      {
+        type: "system", subtype: "task_started", task_id: taskId, tool_use_id: spawnToolId,
+        task_type: "agent", subagent_type: "general-purpose", description: "Initial work",
+        uuid: randomUUID(), ...base,
+      },
+      {
+        type: "system", subtype: "task_notification", task_id: taskId, tool_use_id: spawnToolId,
+        status: "completed", summary: "Initial work completed.", uuid: randomUUID(), ...base,
+      },
+      {
+        type: "assistant", parent_tool_use_id: null, uuid: randomUUID(), ...base,
+        message: { role: "assistant", content: [{ type: "tool_use", id: sendToolId, name: "SendMessage", input: {
+          to: taskId, message: "Resume after projection corruption",
+        } }] },
+      },
+      {
+        type: "system", subtype: "task_started", task_id: taskId, tool_use_id: sendToolId,
+        task_type: "local_agent", subagent_type: "general-purpose", description: "Initial work",
+        prompt: "Resume after projection corruption", uuid: randomUUID(), ...base,
+      },
+    ] as unknown as SDKMessage[];
+    let release!: () => void;
+    const pause = new Promise<void>((resolve) => { release = resolve; });
+    const fake = new FakeClaudeQuery(
+      undefined, undefined, [], false, undefined, undefined, undefined, messages,
+      { afterIndex: 3, wait: pause },
+    );
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), store, fake.factory,
+    );
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const prepared = await service.prepareTurn({
+      threadId: started.thread.id,
+      input: [{ type: "text", text: "projection failure", text_elements: [] }],
+    });
+    prepared.announce();
+    prepared.start();
+    await waitFor(() => {
+      const call = service.readThread(started.thread.id, true).thread.turns[0]?.items
+        .find((item) => item.type === "collabAgentToolCall");
+      return call?.type === "collabAgentToolCall" && call.status === "completed";
+    }, "initial child completion before projection failure");
+    const call = service.readThread(started.thread.id, true).thread.turns[0]!.items
+      .find((item) => item.type === "collabAgentToolCall");
+    const childThreadId = call?.type === "collabAgentToolCall" ? call.receiverThreadIds[0]! : "";
+    store.deleteThread(childThreadId);
+    release();
+    await waitFor(
+      () => store.listProviderEvents(started.thread.id).some((event) => event.disposition === "failed"),
+      "failed provider projection journal",
+    );
+    await waitFor(
+      () => service.readThread(started.thread.id, true).thread.turns[0]?.status !== "inProgress",
+      "projection failure terminal lifecycle",
+    );
+    const root = service.readThread(started.thread.id, true).thread.turns[0]!;
+    expect(root).toMatchObject({
+      status: "failed",
+      error: { message: expect.stringContaining("Claude provider projection failed") },
+    });
+    expect(store.listProviderEvents(started.thread.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ disposition: "failed", error: expect.stringContaining("Unknown Claude child thread") }),
+    ]));
     await service.close();
   });
 

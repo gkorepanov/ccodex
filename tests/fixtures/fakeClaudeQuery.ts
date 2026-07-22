@@ -57,6 +57,9 @@ export class FakeClaudeQuery {
   public deferPermissionResultUntilAfterPrimaryResult = false;
   public permissionSuggestions: PermissionUpdate[] | undefined;
   public permissionMatchedAskRule: Parameters<CanUseTool>[2]["matchedAskRule"];
+  public permissionDecisionReason: string | undefined;
+  public permissionAgentID: string | undefined;
+  public readonly beforePermissionMessages: SDKMessage[] = [];
   public noQueryAcknowledgementBatchSize = 1;
   private permissionToolSequence = 0;
   private readonly outputs: AsyncQueue<SDKMessage>[] = [];
@@ -201,10 +204,16 @@ export class FakeClaudeQuery {
       }
       let deferredPermission: Promise<unknown> | undefined;
       let deferredPermissionToolId: string | undefined;
+      for (const message of this.beforePermissionMessages) output.push(message);
+      if (this.beforePermissionMessages.length > 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
       const preToolHook = input.options.hooks?.PreToolUse?.[0]?.hooks[0];
+      const permissionToolId = this.toolRequest
+        ? `tool-permission-${++this.permissionToolSequence}`
+        : undefined;
       let hookAllowed = false;
       if (this.toolRequest && preToolHook) {
-        const toolUseId = `tool-permission-${++this.permissionToolSequence}`;
         const result = await preToolHook({
           session_id: sessionId,
           transcript_path: "/tmp/fake.jsonl",
@@ -213,8 +222,9 @@ export class FakeClaudeQuery {
           hook_event_name: "PreToolUse",
           tool_name: this.toolRequest.name,
           tool_input: this.toolRequest.input,
-          tool_use_id: toolUseId,
-        }, toolUseId, { signal: new AbortController().signal });
+          tool_use_id: permissionToolId!,
+          ...(this.permissionAgentID ? { agent_id: this.permissionAgentID } : {}),
+        }, permissionToolId, { signal: new AbortController().signal });
         this.preToolHookResults.push(result);
         hookAllowed = Boolean(result && "hookSpecificOutput" in result
           && result.hookSpecificOutput?.hookEventName === "PreToolUse"
@@ -224,7 +234,6 @@ export class FakeClaudeQuery {
       if (this.toolRequest && !hookAllowed && input.options.allowedTools?.includes(this.toolRequest.name)) {
         this.providerAllowedTools.push(this.toolRequest.name);
       } else if (this.toolRequest && !hookAllowed && input.options.canUseTool) {
-        const permissionToolId = `tool-permission-${++this.permissionToolSequence}`;
         if (this.streamPermissionTool) {
           output.push({
             type: "stream_event", event: { type: "message_start", message: {} },
@@ -250,7 +259,9 @@ export class FakeClaudeQuery {
           signal: new AbortController().signal,
           ...(this.permissionSuggestions ? { suggestions: this.permissionSuggestions } : {}),
           ...(this.permissionMatchedAskRule ? { matchedAskRule: this.permissionMatchedAskRule } : {}),
-          toolUseID: permissionToolId,
+          ...(this.permissionDecisionReason ? { decisionReason: this.permissionDecisionReason } : {}),
+          ...(this.permissionAgentID ? { agentID: this.permissionAgentID } : {}),
+          toolUseID: permissionToolId!,
           requestId: `claude-permission-${this.permissionToolSequence}`,
         });
         if (this.deferPermissionResultUntilAfterPrimaryResult) {

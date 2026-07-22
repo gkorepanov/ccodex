@@ -55,6 +55,7 @@ import { settingsGeneration, withSettingsFrom } from "../store/HybridStore.js";
 import { SqliteHybridStore } from "../store/sqliteStore.js";
 import { LayeredHybridStore } from "../store/memoryStore.js";
 import { createClaudeQuery, type ClaudeQueryFactory } from "./queryFactory.js";
+import { claudeEnvironment } from "./environment.js";
 import type { Model } from "../codex/generated/v2/Model.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
 import { invalidParams } from "../protocol/errors.js";
@@ -364,6 +365,7 @@ export class ClaudeService {
           invalidateModelCatalog: () => this.modelCatalog?.invalidate?.(),
           isClosing: () => this.closing,
           persistUserSideSessions: this.config.features?.sideChatPromotion ?? true,
+          interactiveQuestions: this.config.features?.interactiveQuestions ?? true,
         },
       ),
     );
@@ -1883,7 +1885,7 @@ export class ClaudeService {
         abortController: abort,
         allowedTools: [],
         settingSources: ["user", "project", "local"],
-        env: process.env,
+        env: claudeEnvironment(),
         stderr: (line) => this.logger.debug("claude.usage-probe.stderr", { output: line }),
       },
     });

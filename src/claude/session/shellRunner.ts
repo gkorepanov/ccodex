@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { claudeEnvironment } from "../environment.js";
 
 export interface ShellProcess {
   readonly done: Promise<void>;
@@ -32,7 +33,7 @@ export class ShellRunner {
       payload,
     ], {
       cwd,
-      env: process.env,
+      env: claudeEnvironment(),
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe", "pipe"],
     });

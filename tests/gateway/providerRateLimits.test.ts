@@ -928,7 +928,7 @@ describe("provider-aware rate-limit gateway routing", () => {
       claude,
       undefined,
       undefined,
-      { statusCommand: false, sideChatPromotion: true },
+      { statusCommand: false, sideChatPromotion: true, interactiveQuestions: true },
     );
 
     harness.client.request("status", "turn/start", {

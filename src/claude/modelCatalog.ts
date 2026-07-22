@@ -4,6 +4,7 @@ import type { HybridConfig } from "../config/config.js";
 import type { Logger } from "../observability/logger.js";
 import { MetricsRegistry } from "../observability/metrics.js";
 import { modelCatalogValue } from "./modelSelection.js";
+import { claudeEnvironment } from "./environment.js";
 
 const effortDescriptions: Record<string, string> = {
   low: "Faster responses with less reasoning.",
@@ -98,7 +99,7 @@ export class ClaudeModelCatalog {
         abortController: abort,
         allowedTools: [],
         settingSources: ["user", "project", "local"],
-        env: process.env,
+        env: claudeEnvironment(),
         stderr: (line) => this.logger.debug("claude.model-probe.stderr", { output: line }),
       },
     });

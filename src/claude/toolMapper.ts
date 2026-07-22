@@ -19,7 +19,7 @@ export interface ActiveTool {
 
 const fileTools = new Set(["Edit", "Write", "NotebookEdit"]);
 const commandTools = new Set(["Bash"]);
-const collabTools = new Set(["Agent", "Task"]);
+const collabTools = new Set(["Agent", "Task", "SendMessage"]);
 const imageExtensions = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
 
 function text(value: unknown): string {
@@ -160,9 +160,11 @@ export function startTool(
   const native = nativeCommand(name, input, cwd);
   if (native) return { state, item: commandItem(state, native.command, native.actions, cwd) };
   if (collabTools.has(name)) {
+    const sendInput = name === "SendMessage";
     return { state, item: {
-      type: "collabAgentToolCall", id: state.itemId, tool: "spawnAgent", status: "inProgress",
-      senderThreadId: threadId, receiverThreadIds: [], prompt: text(input.prompt) || text(input.description) || null,
+      type: "collabAgentToolCall", id: state.itemId, tool: sendInput ? "sendInput" : "spawnAgent", status: "inProgress",
+      senderThreadId: threadId, receiverThreadIds: [],
+      prompt: text(input.message) || text(input.content) || text(input.prompt) || text(input.description) || null,
       model: text(input.model) || null, reasoningEffort: null, agentsStates: {},
     } };
   }
@@ -186,6 +188,9 @@ export function updateToolInput(
     item.commandActions = native?.actions ?? (item.command ? [{ type: "unknown", command: item.command }] : []);
   }
   else if (item.type === "dynamicToolCall" || item.type === "mcpToolCall") item.arguments = input as JsonValue;
+  else if (item.type === "collabAgentToolCall" && item.tool === "sendInput") {
+    item.prompt = text(input.message) || text(input.content) || item.prompt;
+  }
   else if (item.type === "plan") item.text = planText(input);
   return item;
 }

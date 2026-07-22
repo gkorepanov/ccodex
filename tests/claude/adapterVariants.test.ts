@@ -30,29 +30,47 @@ afterEach(() => {
 async function runInteraction(
   fake: FakeClaudeQuery,
   response: unknown,
+  approvalsReviewer: "user" | "auto_review" = "user",
+  interactiveQuestions = true,
+  ephemeral = false,
 ): Promise<{
   methods: string[];
   service: ClaudeService;
   threadId: string;
   events: Array<{ method: string; params: unknown }>;
+  requests: Array<{ method: string; params: unknown }>;
 }> {
   const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-adapter-variant-"));
   directories.push(directory);
   const hub = new SubscriptionHub();
   const service = new ClaudeService(
-    config(directory), hub, new Logger("error"), new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory,
+    {
+      ...config(directory),
+      features: { statusCommand: true, sideChatPromotion: true, interactiveQuestions },
+    },
+    hub, new Logger("error"), new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory,
   );
-  const started = await service.startThread({ model: "claude:haiku", cwd: directory, approvalPolicy: "on-request" });
+  const started = await service.startThread({
+    model: "claude:haiku",
+    cwd: directory,
+    approvalPolicy: "on-request",
+    approvalsReviewer,
+    ephemeral,
+  });
   const methods: string[] = [];
+  const requests: Array<{ method: string; params: unknown }> = [];
   const events: Array<{ method: string; params: unknown }> = [];
   let terminal = false;
+  const requestSink = (id: string, method: string, params: unknown) => {
+    methods.push(method);
+    requests.push({ method, params });
+    void service.resolveServerRequest(id, response);
+  };
+  hub.attach("test", () => undefined, requestSink);
   hub.subscribe(started.thread.id, "test", (method, params) => {
     events.push({ method, params });
     if (method === "turn/completed") terminal = true;
-  }, (id, method) => {
-    methods.push(method);
-    void service.resolveServerRequest(id, response);
-  });
+  }, requestSink);
   const prepared = await service.prepareTurn({
     threadId: started.thread.id, input: [{ type: "text", text: "fixture interaction", text_elements: [] }],
   });
@@ -62,7 +80,7 @@ async function runInteraction(
     const poll = () => terminal ? resolve() : setTimeout(poll, 5);
     poll();
   });
-  return { methods, service, threadId: started.thread.id, events };
+  return { methods, service, threadId: started.thread.id, events, requests };
 }
 
 describe("Claude adapter golden variants", () => {
@@ -107,12 +125,110 @@ describe("Claude adapter golden variants", () => {
 
   it("round-trips AskUserQuestion through the Codex user-input request", async () => {
     const fake = new FakeClaudeQuery({ name: "AskUserQuestion", input: variants.askUser.input });
-    const { methods, service } = await runInteraction(fake, variants.askUser.response);
+    const { methods, service } = await runInteraction(fake, variants.askUser.response, "auto_review");
     expect(methods).toEqual([variants.askUser.expectedMethod]);
     expect(fake.permissionResults).toEqual([{
       behavior: "allow",
       updatedInput: { ...variants.askUser.input, answers: variants.askUser.expectedAnswers },
     }]);
+    await service.close();
+  });
+
+  it("disables Claude structured questions without changing the legacy Auto callback behavior", async () => {
+    const fake = new FakeClaudeQuery({ name: "AskUserQuestion", input: variants.askUser.input });
+    const { methods, service } = await runInteraction(fake, variants.askUser.response, "auto_review", false);
+    expect(methods).toEqual([]);
+    expect(fake.permissionResults).toEqual([]);
+    expect(fake.inputs[0]?.options.canUseTool).toBeUndefined();
+    expect(fake.inputs[0]?.options.disallowedTools).toEqual([
+      "SendFeedback",
+      "ProposeSkills",
+      "AskUserQuestion",
+    ]);
+    await service.close();
+  });
+
+  it.each([
+    ["Bash", { command: "curl example.com" }],
+    ["Edit", { file_path: "/workspace/a.ts", old_string: "a", new_string: "b" }],
+    ["mcp__project__write", { value: "x" }],
+  ])("keeps Auto headless when %s reaches the permission callback", async (name, input) => {
+    const fake = new FakeClaudeQuery({ name, input });
+    fake.permissionDecisionReason = `${name} was not approved by Claude Auto`;
+    const { methods, service } = await runInteraction(fake, undefined, "auto_review");
+    expect(methods).toEqual([]);
+    expect(fake.permissionResults).toEqual([{
+      behavior: "deny",
+      message: `${name} was not approved by Claude Auto`,
+    }]);
+    await service.close();
+  });
+
+  it("returns a cancelled App question to Claude without leaking an error RPC", async () => {
+    const fake = new FakeClaudeQuery({ name: "AskUserQuestion", input: variants.askUser.input });
+    const { methods, events, service } = await runInteraction(fake, { cancelled: true }, "auto_review");
+    expect(methods).toEqual([variants.askUser.expectedMethod]);
+    expect(fake.permissionResults).toEqual([{ behavior: "deny", message: "User cancelled the question." }]);
+    expect(events.some((event) => event.method === "error")).toBe(false);
+    await service.close();
+  });
+
+  it("routes an Auto question from an ephemeral side runtime to that side thread", async () => {
+    const fake = new FakeClaudeQuery({ name: "AskUserQuestion", input: variants.askUser.input });
+    const { requests, service, threadId } = await runInteraction(
+      fake, variants.askUser.response, "auto_review", true, true,
+    );
+    expect(requests).toEqual([expect.objectContaining({
+      method: variants.askUser.expectedMethod,
+      params: expect.objectContaining({ threadId }),
+    })]);
+    expect(service.readThread(threadId, false).thread.ephemeral).toBe(true);
+    await service.close();
+  });
+
+  it("routes a subagent question to the child projection while the root owns the runtime", async () => {
+    const taskId = "question-agent-task";
+    const fake = new FakeClaudeQuery(
+      { name: "AskUserQuestion", input: variants.askUser.input },
+      undefined,
+      [],
+      false,
+      undefined,
+      undefined,
+      undefined,
+      [{
+        type: "system",
+        subtype: "task_notification",
+        task_id: taskId,
+        tool_use_id: "question-agent-tool",
+        status: "completed",
+        summary: "Question answered",
+        uuid: randomUUID(),
+        session_id: "session",
+      } as unknown as SDKMessage],
+    );
+    fake.permissionAgentID = taskId;
+    fake.beforePermissionMessages.push({
+      type: "system",
+      subtype: "task_started",
+      task_id: taskId,
+      tool_use_id: "question-agent-tool",
+      task_type: "agent",
+      subagent_type: "Explore",
+      description: "Ask one question",
+      uuid: randomUUID(),
+      session_id: "session",
+    } as unknown as SDKMessage);
+    const { requests, service, threadId } = await runInteraction(
+      fake, variants.askUser.response, "auto_review",
+    );
+    const child = service.listThreads({ limit: 10, parentThreadId: threadId })[0];
+    expect(child).toBeDefined();
+    expect(requests).toEqual([expect.objectContaining({
+      method: variants.askUser.expectedMethod,
+      params: expect.objectContaining({ threadId: child!.id }),
+    })]);
+    expect(fake.permissionResults).toEqual([expect.objectContaining({ behavior: "allow" })]);
     await service.close();
   });
 

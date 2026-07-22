@@ -31,6 +31,7 @@ Return only the title.
 [features]
 status_command = true # intercept `/ccstatus`, `/ccstate`, and legacy status aliases without a model turn
 side_chat_promotion = true # allow Fork to promote a temporary `/side` chat into a durable sidebar thread
+interactive_questions = true # render Claude's structured questions as native Codex App controls
 
 # No aliases are configured by default. Every `gpt-*` model id stays stock.
 # Current Codex Mobile selects Claude through namespaced `claude:*` catalog ids.

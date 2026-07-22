@@ -11,6 +11,7 @@ import type { Logger } from "../../observability/logger.js";
 import type { ClaudeQueryFactory } from "../queryFactory.js";
 import { invalidParams } from "../../protocol/errors.js";
 import { normalizeClaudeModelIdentifier } from "../modelSelection.js";
+import { claudeEnvironment } from "../environment.js";
 import {
   ProviderRuntime,
   type ProviderRuntimeFact,
@@ -129,6 +130,7 @@ export interface RuntimeStartup {
   readonly reasoningSummary: string | null;
   readonly collaborationMode: unknown | null;
   readonly outputSchema: unknown | null;
+  readonly interactiveQuestions: boolean;
 }
 
 export function createProviderRuntime(
@@ -156,7 +158,9 @@ export function createProviderRuntime(
         includePartialMessages: true,
         includeHookEvents: true,
         forwardSubagentText: true,
-        disallowedTools: unsupportedProviderReviewTools,
+        disallowedTools: startup.interactiveQuestions
+          ? unsupportedProviderReviewTools
+          : [...unsupportedProviderReviewTools, "AskUserQuestion"],
         settingSources: ["user", "project", "local"],
         ...(goalEvents ? { mcpServers: { ccodex_goal: goalEvents.mcpServer } } : {}),
         systemPrompt: { type: "preset", preset: "claude_code", ...(append ? { append } : {}) },
@@ -164,7 +168,7 @@ export function createProviderRuntime(
         ...(startup.ephemeral || selectedPermissionMode === "bypassPermissions"
           ? { allowDangerouslySkipPermissions: true }
           : {}),
-        ...(selectedPermissionMode === "auto" && !startup.ephemeral
+        ...(!startup.interactiveQuestions && selectedPermissionMode === "auto" && !startup.ephemeral
           ? {}
           : {
               canUseTool: (
@@ -190,7 +194,7 @@ export function createProviderRuntime(
         ...(outputSchema
           ? { outputFormat: { type: "json_schema", schema: outputSchema } as const }
           : {}),
-        env: process.env,
+        env: claudeEnvironment(),
         stderr: (line) => logger.debug("claude.stderr", { threadId: startup.threadId, output: line }),
     },
     queryFactory,

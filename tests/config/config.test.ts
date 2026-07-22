@@ -72,10 +72,16 @@ describe("opinionated feature configuration", () => {
   }
 
   it("enables UX overrides when [features] or individual keys are absent", () => {
-    expect(configured().features).toEqual({ statusCommand: true, sideChatPromotion: true });
+    expect(configured().features).toEqual({
+      statusCommand: true,
+      sideChatPromotion: true,
+      interactiveQuestions: true,
+    });
     expect(configured().renamePrompt).toBeUndefined();
     expect(configured("[features]\nstatus_command = false\n").features)
-      .toEqual({ statusCommand: false, sideChatPromotion: true });
+      .toEqual({ statusCommand: false, sideChatPromotion: true, interactiveQuestions: true });
+    expect(configured("[features]\ninteractive_questions = false\n").features)
+      .toEqual({ statusCommand: true, sideChatPromotion: true, interactiveQuestions: false });
   });
 
   it("uses rename_prompt presence as the title UX switch and ignores the retired feature key", () => {
@@ -88,14 +94,14 @@ title_generation_ux = true
 status_command = true
 `)).toMatchObject({
       renamePrompt: "Use one rare emoji and a vivid title.",
-      features: { statusCommand: true, sideChatPromotion: true },
+      features: { statusCommand: true, sideChatPromotion: true, interactiveQuestions: true },
     });
     expect(configured(`
 [features]
 title_generation_ux = false
 status_command = false
 `)).toMatchObject({
-      features: { statusCommand: false, sideChatPromotion: true },
+      features: { statusCommand: false, sideChatPromotion: true, interactiveQuestions: true },
     });
     expect(configured(`
 # rename_prompt = "disabled"
@@ -109,6 +115,8 @@ status_command = false
       .toThrow("features.status_command must be a boolean.");
     expect(() => configured("[features]\nside_chat_promotion = 1\n"))
       .toThrow("features.side_chat_promotion must be a boolean.");
+    expect(() => configured("[features]\ninteractive_questions = 1\n"))
+      .toThrow("features.interactive_questions must be a boolean.");
     expect(() => configured("rename_prompt = \"\"\n"))
       .toThrow("rename_prompt must be a non-empty string.");
     expect(() => configured("rename_prompt = false\n"))

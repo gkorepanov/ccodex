@@ -130,4 +130,18 @@ describe("Claude tool projection", () => {
       type: "collabAgentToolCall", status: "completed", model: "claude-opus-4-8",
     });
   });
+
+  it("maps SendMessage to the native collaboration input item", () => {
+    const { state, item } = startTool(0, {
+      type: "tool_use", id: "send", name: "SendMessage",
+      input: { to: "provider-task", message: "Continue the conversion" },
+    }, "/tmp/project", "thread-1");
+    expect(item).toMatchObject({
+      type: "collabAgentToolCall", tool: "sendInput", status: "inProgress",
+      senderThreadId: "thread-1", receiverThreadIds: [], prompt: "Continue the conversion",
+    });
+    expect(completeTool(item, "delivered", false, undefined, state.startedAtMs)).toMatchObject({
+      type: "collabAgentToolCall", tool: "sendInput", status: "completed",
+    });
+  });
 });

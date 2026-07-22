@@ -27,9 +27,10 @@ export interface SessionTool extends ActiveTool {
 export interface ScopeTask {
   readonly taskId: string;
   readonly ownerThreadId: string;
-  readonly itemId: string;
-  readonly providerId: string;
-  readonly turnId: string;
+  itemId: string;
+  providerId: string;
+  readonly providerIds: Set<string>;
+  turnId: string;
   childThreadId: string | undefined;
   outputFile: string | undefined;
   terminal: boolean;
@@ -41,6 +42,10 @@ export interface ScopeTask {
     reading?: Promise<void> | undefined;
     stopped: boolean;
   };
+}
+
+export function taskUsesProvider(task: ScopeTask, providerId: string): boolean {
+  return task.providerIds.has(providerId);
 }
 
 export function newMainStreamState(

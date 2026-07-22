@@ -31,6 +31,7 @@ const startup: RuntimeStartup = {
   reasoningSummary: null,
   collaborationMode: null,
   outputSchema: null,
+  interactiveQuestions: true,
 };
 
 describe("Claude provider projection boundary", () => {
@@ -61,5 +62,32 @@ describe("Claude provider projection boundary", () => {
       kind: "exit",
       runtimeGeneration: startup.runtimeGeneration,
     }));
+  });
+
+  it("does not leak the managed-shim recursion marker into Claude", async () => {
+    vi.stubEnv("CCODEX_SHIM_ACTIVE", "1");
+    const query = new FakeClaudeQuery();
+    const runtime = createProviderRuntime(
+      startup,
+      new Logger("error"),
+      query.factory,
+      async () => undefined,
+      {
+        canUseTool: async () => null,
+        onElicitation: async () => ({ action: "cancel" }),
+        beforeToolUse: async () => ({ continue: true }),
+        captureFileAfter: async () => ({ continue: true }),
+        afterCompact: async () => ({ continue: true }),
+      },
+    );
+    try {
+      runtime.start();
+      await vi.waitFor(() => expect(query.inputs).toHaveLength(1));
+      expect(query.inputs[0]!.options.env?.CCODEX_SHIM_ACTIVE).toBeUndefined();
+    } finally {
+      runtime.beginClose();
+      await runtime.close();
+      vi.unstubAllEnvs();
+    }
   });
 });
