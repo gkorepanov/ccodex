@@ -134,6 +134,7 @@ describe("HandoffStore provider epochs", () => {
       id: "switch-1", status: "targetCreated", targetBackendThreadId: "claude-backend",
       summary: "portable", targetProviderTurnId: "claude-turn",
     }]);
+    expect(store.hiddenProviderSwitchTargetIds()).toEqual(["claude-backend"]);
     const logical = store.getLogicalThread("public")!;
     expect(store.updateLogicalThread("public", logical.revision, {
       ...logical.thread,
@@ -161,6 +162,7 @@ describe("HandoffStore provider epochs", () => {
       status: "committed", summary: "portable", targetProviderTurnId: "claude-turn",
     });
     expect(store.recoverableProviderSwitchJobs()).toEqual([]);
+    expect(store.hiddenProviderSwitchTargetIds()).toEqual([]);
     expect(store.listBackendMappings()).toHaveLength(2);
     store.close();
   });

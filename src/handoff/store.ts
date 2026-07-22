@@ -626,6 +626,13 @@ export class HandoffStore {
     `).all() as unknown as ProviderSwitchJobRow[]).map((row) => this.providerSwitchJobFromRow(row));
   }
 
+  public hiddenProviderSwitchTargetIds(): string[] {
+    return (this.database.prepare(`
+      SELECT DISTINCT target_backend_thread_id AS thread_id FROM provider_switch_jobs
+      WHERE target_backend_thread_id IS NOT NULL AND status != 'committed'
+    `).all() as unknown as Array<{ thread_id: string }>).map((row) => row.thread_id);
+  }
+
   public claimProviderSwitchJob(jobId: string): ProviderSwitchJob | undefined {
     const result = this.database.prepare(`
       UPDATE provider_switch_jobs SET status = 'running', updated_at = ?

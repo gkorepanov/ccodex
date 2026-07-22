@@ -234,7 +234,11 @@ export class CrossProviderForks {
   public projectThreadCatalog(stockThreads: Thread[], claudeThreads: Thread[]): Thread[] {
     const physical = new Map([...stockThreads, ...claudeThreads].map((thread) => [thread.id, thread]));
     const mappings = this.store.listBackendMappings();
-    const hidden = new Set(mappings.map((mapping) => mapping.backendThreadId));
+    const hidden = new Set([
+      ...mappings.map((mapping) => mapping.backendThreadId),
+      ...this.store.hiddenProviderSwitchTargetIds(),
+      ...[...physical.keys()].filter((threadId) => this.subscriptions?.isSuppressed(threadId)),
+    ]);
     const ordinary = [...physical.values()].filter((thread) => !hidden.has(thread.id));
     const logical = mappings.flatMap((mapping) => {
       if (mapping.state !== "current") return [];
@@ -252,7 +256,11 @@ export class CrossProviderForks {
   public projectLoadedThreadIds(stockIds: string[], claudeIds: string[]): string[] {
     const loaded = new Set([...stockIds, ...claudeIds]);
     const mappings = this.store.listBackendMappings();
-    const hidden = new Set(mappings.map((mapping) => mapping.backendThreadId));
+    const hidden = new Set([
+      ...mappings.map((mapping) => mapping.backendThreadId),
+      ...this.store.hiddenProviderSwitchTargetIds(),
+      ...[...loaded].filter((threadId) => this.subscriptions?.isSuppressed(threadId)),
+    ]);
     const ordinary = [...loaded].filter((threadId) => !hidden.has(threadId));
     const logical = mappings.flatMap((mapping) =>
       mapping.state === "current" && loaded.has(mapping.backendThreadId) ? [mapping.publicThreadId] : []);
@@ -775,6 +783,7 @@ export class CrossProviderForks {
       if (mapping.state === "current") subscriptions.aliasThread(mapping.backendThreadId, mapping.publicThreadId);
       else subscriptions.suppress(mapping.backendThreadId);
     }
+    for (const threadId of this.store.hiddenProviderSwitchTargetIds()) subscriptions.suppress(threadId);
   }
 
   public claimFailedFork(threadId: string): string | undefined {
@@ -829,20 +838,20 @@ export class CrossProviderForks {
         await this.providerSwitchMaterial(job, stock, workerConnectionId);
 
       if (job.targetProvider === "claude") {
-        const started = await this.claude.startThread(this.targetThreadStart(
+        const started = await this.claude.startHiddenThread(this.targetThreadStart(
           job, source.thread, developerInstructions,
         ));
         target = { provider: "claude", threadId: started.thread.id };
+        if (!this.store.checkpointProviderSwitchTarget(job.id, {
+          backendThreadId: started.thread.id,
+          summary,
+        })) throw new Error("Provider switch target lost its durable checkpoint.");
         await this.claude.updateThreadSettings({
           ...job.settings,
           threadId: started.thread.id,
           model: job.targetModel,
         });
         const prepared = await this.claude.prepareTurn({ ...params, threadId: started.thread.id });
-        if (!this.store.checkpointProviderSwitchTarget(job.id, {
-          backendThreadId: started.thread.id,
-          summary,
-        })) throw new Error("Provider switch target lost its durable checkpoint.");
         await prepared.startAndWait();
         if (!this.store.checkpointProviderSwitchTarget(job.id, {
           backendThreadId: started.thread.id,
@@ -895,7 +904,8 @@ export class CrossProviderForks {
       if (committed) return;
       this.store.failProviderSwitch(job.id, failure.message);
       if (target?.provider === "claude") {
-        await this.claude.deleteThread(target.threadId).catch(() => undefined);
+        const deleted = await this.claude.deleteThread(target.threadId).then(() => true, () => false);
+        if (deleted) this.subscriptions?.unsuppress(target.threadId);
       } else if (target) {
         await stock.request("thread/delete", { threadId: target.threadId }).catch(() => undefined);
       }
@@ -908,6 +918,9 @@ export class CrossProviderForks {
   }
 
   private async recoverProviderSwitch(job: ProviderSwitchJob, stock: StockRpc): Promise<void> {
+    if (job.targetProvider === "claude" && job.targetBackendThreadId) {
+      this.subscriptions?.suppress(job.targetBackendThreadId);
+    }
     if (job.targetBackendThreadId && job.targetProviderTurnId) {
       const target = job.targetProvider === "claude"
         ? this.claude.readThread(job.targetBackendThreadId, true).thread
@@ -927,7 +940,8 @@ export class CrossProviderForks {
     }
     if (job.targetBackendThreadId) {
       if (job.targetProvider === "claude") {
-        await this.claude.deleteThread(job.targetBackendThreadId).catch(() => undefined);
+        await this.claude.deleteThread(job.targetBackendThreadId);
+        this.subscriptions?.unsuppress(job.targetBackendThreadId);
       } else {
         await stock.request("thread/delete", { threadId: job.targetBackendThreadId }).catch(() => undefined);
       }
@@ -1623,7 +1637,7 @@ export class CrossProviderForks {
     if (!committed) throw new Error("Provider switch lost its atomic commit boundary.");
     const source = this.store.getEpoch(job.expectedEpochId)!;
     this.subscriptions?.suppress(source.backendThreadId);
-    this.subscriptions?.aliasThread(target.id, job.publicThreadId);
+    this.subscriptions?.revealAs(target.id, job.publicThreadId);
     this.subscriptions?.emitPublic(job.publicThreadId, "thread/settings/updated", {
       threadId: job.publicThreadId,
       threadSettings: settings,

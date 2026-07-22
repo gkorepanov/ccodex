@@ -104,6 +104,27 @@ describe("SubscriptionHub", () => {
     })]);
   });
 
+  it("reveals a suppressed backend only through its public alias", () => {
+    const hub = new SubscriptionHub();
+    const events: Array<{ method: string; params: unknown }> = [];
+    hub.attach("desktop", (method, params) => events.push({ method, params }));
+    hub.subscribe("public-thread", "desktop", (method, params) => events.push({ method, params }));
+    hub.suppress("backend-thread");
+
+    hub.emit("backend-thread", "thread/status/changed", {
+      threadId: "backend-thread", status: { type: "active" },
+    });
+    hub.revealAs("backend-thread", "public-thread");
+    hub.emit("backend-thread", "thread/status/changed", {
+      threadId: "backend-thread", status: { type: "idle" },
+    });
+
+    expect(events).toEqual([{
+      method: "thread/status/changed",
+      params: { threadId: "public-thread", status: { type: "idle" } },
+    }]);
+  });
+
   it("hides the migrated target user item until the target turn completes", () => {
     const hub = new SubscriptionHub();
     const received: Array<{ method: string; params: any }> = [];

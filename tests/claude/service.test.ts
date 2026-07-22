@@ -105,6 +105,27 @@ afterEach(() => {
 });
 
 describe("ClaudeService", () => {
+  it("creates hidden threads under suppression before they become durable", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-hidden-thread-"));
+    directories.push(directory);
+    const hub = new SubscriptionHub();
+    const events: Array<{ method: string; params: unknown }> = [];
+    hub.attach("app", (method, params) => events.push({ method, params }));
+    const service = new ClaudeService(
+      config(directory), hub, new Logger("error"), new SqliteHybridStore(join(directory, "state.sqlite")),
+      new FakeClaudeQuery().factory,
+    );
+
+    const started = await service.startHiddenThread({ model: "claude:haiku", cwd: directory });
+    expect(hub.isSuppressed(started.thread.id)).toBe(true);
+    hub.emit(started.thread.id, "thread/status/changed", {
+      threadId: started.thread.id, status: { type: "active" },
+    });
+    expect(events).toEqual([]);
+    expect(service.readThread(started.thread.id, false).thread.id).toBe(started.thread.id);
+    await service.close();
+  });
+
   it("projects streamed image Reads atomically and durably without duplicate lifecycle items", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-image-view-"));
     directories.push(directory);

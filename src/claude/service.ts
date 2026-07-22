@@ -539,6 +539,18 @@ export class ClaudeService {
     return threadResponse(record, false);
   }
 
+  public async startHiddenThread(params: ThreadStartParams): Promise<ThreadStartResponse> {
+    let record = await this.newThreadRecord(params);
+    this.sessionOutput.suppress(record.thread.id);
+    try {
+      record = await this.sessions.submit(record.thread.id, { type: "createThread", record });
+      return threadResponse(record, false);
+    } catch (error) {
+      this.sessionOutput.unsuppress(record.thread.id);
+      throw error;
+    }
+  }
+
   public async announceThread(thread: Thread): Promise<void> {
     this.requireIndependentThread(thread.id, "announce");
     await this.sessions.submit(thread.id, { type: "announceThread" });

@@ -158,6 +158,10 @@ export class SubscriptionHub {
   public suppress(threadId: string): void { this.suppressedThreads.add(threadId); }
   public unsuppress(threadId: string): void { this.suppressedThreads.delete(threadId); }
   public isSuppressed(threadId: string): boolean { return this.suppressedThreads.has(threadId); }
+  public revealAs(threadId: string, publicThreadId: string): void {
+    this.aliasThread(threadId, publicThreadId);
+    this.suppressedThreads.delete(threadId);
+  }
   public threadDeleted(threadId: string): void {
     this.emit(threadId, "thread/deleted", { threadId });
     this.hiddenUserMessageTurns.delete(threadId);

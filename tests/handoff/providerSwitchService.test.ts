@@ -228,18 +228,43 @@ describe("provider switch service", () => {
     const sourceTurn = turn("stock-source-turn", "stock answer");
     const source = thread("stock-public", "openai", [sourceTurn]);
     const target = thread("claude-target", "claude");
+    const targetTurn = turn("claude-target-turn", "claude answer");
     const order: string[] = [];
+    const hub = new SubscriptionHub();
+    const appEvents: Array<{ method: string; params: unknown }> = [];
+    const sink = (method: string, params: unknown) => appEvents.push({ method, params });
+    hub.attach("app", sink);
+    hub.subscribe(source.id, "app", sink);
     const prepared = {
-      response: { turn: { id: "claude-target-turn" } },
-      announce: vi.fn(async () => { order.push("announce"); }),
+      response: { turn: targetTurn },
+      announce: vi.fn(async () => {
+        order.push("announce");
+        hub.emit(target.id, "turn/started", { threadId: target.id, turn: targetTurn });
+      }),
       start: vi.fn(() => { order.push("start"); }),
-      startAndWait: vi.fn(async () => { order.push("start"); }),
+      startAndWait: vi.fn(async () => {
+        order.push("start");
+        hub.emit(target.id, "thread/status/changed", {
+          threadId: target.id, status: { type: "active" },
+        });
+      }),
     };
+    let service!: CrossProviderForks;
     const claude = {
       ownsModel: (model: string) => model.startsWith("claude:"),
       ownsThread: () => false,
-      startThread: vi.fn(async () => ({ thread: target, model: "claude:sonnet" })),
-      updateThreadSettings: vi.fn(async () => ({})),
+      startHiddenThread: vi.fn(async () => {
+        hub.suppress(target.id);
+        hub.emit(target.id, "thread/started", { thread: target });
+        expect(service.projectThreadCatalog([], [target])).toEqual([]);
+        return { thread: target, model: "claude:sonnet" };
+      }),
+      updateThreadSettings: vi.fn(async () => {
+        hub.emit(target.id, "thread/settings/updated", {
+          threadId: target.id, threadSettings: { model: "claude:sonnet" },
+        });
+        return {};
+      }),
       prepareTurn: vi.fn(async () => prepared),
       deleteThread: vi.fn(async () => ({})),
     };
@@ -257,7 +282,8 @@ describe("provider switch service", () => {
       }),
     };
     const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
-    const service = new CrossProviderForks(store, claude as never);
+    service = new CrossProviderForks(store, claude as never);
+    service.configureSubscriptions(hub);
     (service as unknown as { providerSwitchSummary: () => Promise<string> }).providerSwitchSummary =
       vi.fn(async () => "stock compact summary");
     service.interceptSettings({ threadId: source.id, model: "claude:sonnet", effort: "high" });
@@ -271,6 +297,16 @@ describe("provider switch service", () => {
 
     expect(claude.prepareTurn).toHaveBeenCalledWith(expect.objectContaining({ threadId: target.id, input }));
     expect(order).toEqual(["start", "compact-completed", "announce"]);
+    const serializedEvents = JSON.stringify(appEvents);
+    expect(serializedEvents).not.toContain(`"threadId":"${target.id}"`);
+    expect(serializedEvents).not.toContain(`"id":"${target.id}"`);
+    expect(appEvents).toContainEqual({
+      method: "turn/started",
+      params: expect.objectContaining({ threadId: source.id }),
+    });
+    expect(service.projectThreadCatalog([], [{ ...target, turns: [targetTurn] }])).toMatchObject([{
+      id: source.id,
+    }]);
     expect(service.logical(source.id)?.epoch).toMatchObject({
       provider: "claude", backendThreadId: target.id, model: "claude:sonnet",
     });
@@ -449,7 +485,7 @@ describe("provider switch service", () => {
       ownsThread: (id: string) => id === target.id,
       readThread: vi.fn(() => ({ thread: target })),
       deleteThread: vi.fn(async () => ({})),
-      startThread: vi.fn(),
+      startHiddenThread: vi.fn(),
       prepareTurn: vi.fn(),
     };
     const stock = {
@@ -463,25 +499,53 @@ describe("provider switch service", () => {
       }),
     };
     const service = new CrossProviderForks(store, claude as never);
+    const hub = new SubscriptionHub();
+    const appEvents: Array<{ method: string; params: unknown }> = [];
+    const sink = (method: string, params: unknown) => appEvents.push({ method, params });
+    hub.attach("app", sink);
+    hub.subscribe(source.id, "app", sink);
+    service.configureSubscriptions(hub);
+    expect(hub.isSuppressed(target.id)).toBe(true);
+    hub.emit(target.id, "thread/status/changed", {
+      threadId: target.id, status: { type: "active" },
+    });
+    expect(appEvents).toEqual([]);
+    expect(service.projectThreadCatalog([source], [target])).toMatchObject([{ id: source.id }]);
     service.configureDaemonStock(stock as never);
     await service.drain();
+
+    hub.emit(target.id, "turn/started", {
+      threadId: target.id, turn: targetTurn,
+    });
 
     expect(store.getProviderSwitchJob("recovery-job")?.status).toBe("committed");
     expect(service.logical(source.id)?.epoch).toMatchObject({
       provider: "claude", backendThreadId: target.id,
     });
-    expect(claude.startThread).not.toHaveBeenCalled();
+    expect(claude.startHiddenThread).not.toHaveBeenCalled();
     expect(claude.prepareTurn).not.toHaveBeenCalled();
     expect(stock.request).not.toHaveBeenCalledWith("turn/start", expect.anything());
+    expect(appEvents).toContainEqual({
+      method: "turn/started",
+      params: expect.objectContaining({ threadId: source.id }),
+    });
+    expect(JSON.stringify(appEvents)).not.toContain(`"threadId":"${target.id}"`);
     service.close();
   });
 
-  it("keeps the source epoch current and clears the staged switch when target creation fails", async () => {
+  it("keeps a failed Claude target hidden when cleanup cannot delete it", async () => {
     const source = thread("failed-public", "openai", [turn("source-turn", "source")]);
+    const target = thread("failed-claude-target", "claude");
+    const hub = new SubscriptionHub();
     const claude = {
       ownsModel: (model: string) => model.startsWith("claude:"),
       ownsThread: () => false,
-      startThread: vi.fn(async () => { throw new Error("target unavailable"); }),
+      startHiddenThread: vi.fn(async () => {
+        hub.suppress(target.id);
+        return { thread: target };
+      }),
+      updateThreadSettings: vi.fn(async () => { throw new Error("target unavailable"); }),
+      deleteThread: vi.fn(async () => { throw new Error("cleanup unavailable"); }),
     };
     const stock = {
       request: vi.fn(async (method: string) => {
@@ -495,6 +559,7 @@ describe("provider switch service", () => {
     };
     const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
     const service = new CrossProviderForks(store, claude as never);
+    service.configureSubscriptions(hub);
     (service as unknown as { providerSwitchSummary: () => Promise<string> }).providerSwitchSummary =
       vi.fn(async () => "portable summary");
     service.interceptSettings({ threadId: source.id, model: "claude:sonnet" });
@@ -509,7 +574,12 @@ describe("provider switch service", () => {
       provider: "stock", backendThreadId: source.id,
     });
     expect(service.pending(source.id)).toBeUndefined();
-    expect(store.getProviderSwitchJob("failed-compact")?.status).toBe("failed");
+    expect(store.getProviderSwitchJob("failed-compact")).toMatchObject({
+      status: "failed", targetBackendThreadId: target.id,
+    });
+    expect(claude.deleteThread).toHaveBeenCalledOnce();
+    expect(hub.isSuppressed(target.id)).toBe(true);
+    expect(service.projectThreadCatalog([source], [target])).toMatchObject([{ id: source.id }]);
     expect(stock.request).not.toHaveBeenCalledWith("turn/start", expect.anything());
     service.close();
   });
