@@ -1,6 +1,10 @@
 import type { SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
-import { ClaudeRuntime, type ClaudeRuntimeFact } from "../../../src/claude/session/runtime.js";
+import {
+  ClaudeRuntime,
+  ClaudeRuntimeStartupError,
+  type ClaudeRuntimeFact,
+} from "../../../src/claude/session/runtime.js";
 import { FakeClaudeQuery } from "../../fixtures/fakeClaudeQuery.js";
 
 const message = {
@@ -63,6 +67,41 @@ describe("ClaudeRuntime", () => {
     expect(delivered[0]?.type).toBe("system");
     release();
     await vi.waitFor(() => expect(delivered.some((value) => value.type === "result")).toBe(true));
+    await runtime.close();
+  });
+
+  it("preserves bounded stderr and classifies an output-free early exit as retryable", async () => {
+    const base = new FakeClaudeQuery();
+    const runtime = new ClaudeRuntime(
+      3,
+      {
+        cwd: "/workspace",
+        model: "haiku",
+        stderr: () => undefined,
+      },
+      (input) => {
+        input.options.stderr?.("provider bootstrap failed\n");
+        const query = base.factory(input);
+        return new Proxy(query, {
+          get(target, property) {
+            if (property === "initializationResult") {
+              return async () => { throw new Error("Query closed before response received"); };
+            }
+            if (property === Symbol.asyncIterator) return async function* () { /* no provider output */ };
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      },
+      async () => undefined,
+    );
+
+    runtime.start();
+    await expect(runtime.initializationResult()).rejects.toMatchObject({
+      name: "ClaudeRuntimeStartupError",
+      retryableEarlyExit: true,
+      message: expect.stringContaining("provider bootstrap failed"),
+    } satisfies Partial<ClaudeRuntimeStartupError>);
     await runtime.close();
   });
 });

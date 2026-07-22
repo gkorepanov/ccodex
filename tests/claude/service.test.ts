@@ -1575,6 +1575,96 @@ describe("ClaudeService", () => {
     await service.close();
   });
 
+  it("retries an output-free /side runtime exit once and keeps only the successful target", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-side-runtime-retry-"));
+    directories.push(directory);
+    const fake = new FakeClaudeQuery();
+    let attempts = 0;
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(join(directory, "state.sqlite")),
+      (input) => {
+        const query = fake.factory(input);
+        if (attempts++ > 0) return query;
+        input.options.stderr?.("temporary Claude bootstrap failure\n");
+        return new Proxy(query, {
+          get(target, property) {
+            if (property === "initializationResult") {
+              return async () => { throw new Error("Query closed before response received"); };
+            }
+            if (property === Symbol.asyncIterator) return async function* () { /* no provider output */ };
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      },
+    );
+    const source = await service.startThread({ model: "claude:haiku", cwd: directory });
+
+    const fork = await service.forkThread({
+      threadId: source.thread.id,
+      ephemeral: true,
+      excludeTurns: true,
+      threadSource: "user",
+    });
+
+    expect(attempts).toBe(2);
+    expect(fork.thread).toMatchObject({ ephemeral: true, forkedFromId: source.thread.id });
+    expect(service.listThreads({ limit: 100 }).map((thread) => thread.id).sort())
+      .toEqual([source.thread.id, fork.thread.id].sort());
+    expect(service.loadedThreadIds()).toContain(fork.thread.id);
+    await service.close();
+  });
+
+  it("reports the final /side startup cause and cleans a twice-failed target exactly once", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-side-runtime-failure-"));
+    directories.push(directory);
+    const fake = new FakeClaudeQuery();
+    const removeTranscript = vi.fn(async () => undefined);
+    const transcripts: TranscriptBrancher = {
+      forkWithProvenance: async () => ({ sessionId: "failed-side-session", uuidMap: new Map() }),
+      resolveCompactionBoundary: async (_sessionId, _cwd, boundary) => boundary.uuid,
+      delete: removeTranscript,
+    };
+    let attempts = 0;
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(join(directory, "state.sqlite")),
+      (input) => {
+        attempts += 1;
+        input.options.stderr?.(`side bootstrap attempt ${attempts} failed\n`);
+        const query = fake.factory(input);
+        return new Proxy(query, {
+          get(target, property) {
+            if (property === "initializationResult") {
+              return async () => { throw new Error("Query closed before response received"); };
+            }
+            if (property === Symbol.asyncIterator) return async function* () { /* no provider output */ };
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      },
+      undefined,
+      undefined,
+      transcripts,
+    );
+    const source = await service.startThread({ model: "claude:haiku", cwd: directory });
+
+    await expect(service.forkThread({
+      threadId: source.thread.id,
+      ephemeral: true,
+      excludeTurns: true,
+      threadSource: "user",
+    })).rejects.toThrow(/Query closed before response received[\s\S]*side bootstrap attempt 2 failed/u);
+
+    expect(attempts).toBe(2);
+    expect(service.listThreads({ limit: 100 }).map((thread) => thread.id)).toEqual([source.thread.id]);
+    expect(removeTranscript).toHaveBeenCalledTimes(1);
+    expect(removeTranscript).toHaveBeenCalledWith(expect.any(String), directory);
+    await service.close();
+  });
+
   it("promotes a completed user side chat into a durable same-provider fork", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-side-promotion-"));
     directories.push(directory);
@@ -3608,6 +3698,107 @@ describe("ClaudeService", () => {
     })).resolves.toBeUndefined();
     expect(fake.stoppedTaskIds).toEqual([taskId]);
     expect(service.readThread(started.thread.id, true).thread.turns[0]?.status).toBe("completed");
+    await service.close();
+  });
+
+  it("retains late output from an already completed subagent without failing the active parent turn", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-late-child-output-"));
+    directories.push(directory);
+    const base = { session_id: "late-child-session" };
+    const toolUseId = "late-child-tool";
+    const taskId = "late-child-task";
+    const backgroundToolId = "late-child-background-tool";
+    const backgroundTaskId = "late-child-background-task";
+    const lateStreamId = randomUUID();
+    const lateAssistantId = randomUUID();
+    const lateTaskNotificationId = randomUUID();
+    const messages = [
+      { type: "stream_event", event: { type: "message_start", message: {} }, parent_tool_use_id: null, uuid: randomUUID(), ...base },
+      {
+        type: "stream_event", parent_tool_use_id: null, uuid: randomUUID(), ...base,
+        event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: toolUseId, name: "Agent", input: { prompt: "run child" } } },
+      },
+      {
+        type: "system", subtype: "task_started", task_id: taskId, tool_use_id: toolUseId,
+        task_type: "agent", subagent_type: "general-purpose", description: "run child", uuid: randomUUID(), ...base,
+      },
+      {
+        type: "assistant", parent_tool_use_id: toolUseId, uuid: randomUUID(), ...base,
+        message: { role: "assistant", content: [{ type: "text", text: "first child result" }] },
+      },
+      {
+        type: "assistant", parent_tool_use_id: toolUseId, uuid: randomUUID(), ...base,
+        message: { role: "assistant", content: [{
+          type: "tool_use", id: backgroundToolId, name: "Bash",
+          input: { command: "sleep 45; echo CHILD_OK", run_in_background: true },
+        }] },
+      },
+      {
+        type: "system", subtype: "task_started", task_id: backgroundTaskId, tool_use_id: backgroundToolId,
+        task_type: "local_bash", description: "sleep 45; echo CHILD_OK", uuid: randomUUID(), ...base,
+      },
+      {
+        type: "system", subtype: "task_notification", task_id: taskId, tool_use_id: toolUseId,
+        status: "completed", output_file: join(directory, "unused-child-output"),
+        summary: "first child result", uuid: randomUUID(), ...base,
+      },
+      {
+        type: "stream_event", parent_tool_use_id: toolUseId, uuid: lateStreamId, ...base,
+        event: { type: "message_start", message: {} },
+      },
+      {
+        type: "assistant", parent_tool_use_id: toolUseId, uuid: lateAssistantId, ...base,
+        message: { role: "assistant", content: [{ type: "text", text: "late resumed child result" }] },
+      },
+      {
+        type: "system", subtype: "task_notification", task_id: backgroundTaskId,
+        tool_use_id: backgroundToolId, status: "completed",
+        output_file: join(directory, "late-child-background.output"),
+        summary: "Background command completed (exit code 0)", uuid: lateTaskNotificationId, ...base,
+      },
+    ] as unknown as SDKMessage[];
+    let releaseProvider!: () => void;
+    const providerPause = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    const fake = new FakeClaudeQuery(
+      undefined, undefined, [], false, undefined, undefined, undefined, messages,
+      { afterIndex: messages.length - 1, wait: providerPause },
+    );
+    const hub = new SubscriptionHub();
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    const service = new ClaudeService(config(directory), hub, new Logger("error"), store, fake.factory);
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const events: Array<{ method: string; params: unknown }> = [];
+    hub.subscribe(started.thread.id, "late-child", (method, params) => events.push({ method, params }));
+    const prepared = await service.prepareTurn({
+      threadId: started.thread.id,
+      input: [{ type: "text", text: "spawn and resume child", text_elements: [] }],
+    });
+    prepared.announce();
+    prepared.start();
+    await waitFor(
+      () => [lateStreamId, lateAssistantId].every((id) => store.listProviderEvents(started.thread.id)
+        .some((event) => event.providerEventId === id && event.disposition === "retainedOnly"))
+        && store.listProviderEvents(started.thread.id).some((event) =>
+          event.providerEventId === lateTaskNotificationId && event.disposition === "projected"),
+      "late child output retention",
+    );
+
+    const turn = service.readThread(started.thread.id, true).thread.turns[0]!;
+    expect(turn).toMatchObject({ status: "inProgress", error: null });
+    expect(events.some((event) => event.method === "item/agentMessage/delta"
+      && JSON.stringify(event.params).includes("has no active turn"))).toBe(false);
+    const childId = turn.items.find((item) => item.type === "collabAgentToolCall")?.receiverThreadIds[0];
+    expect(service.readThread(childId!, true).thread.turns[0]).toMatchObject({ status: "completed" });
+    expect(store.listProviderEvents(started.thread.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerEventId: lateStreamId, disposition: "retainedOnly" }),
+      expect.objectContaining({ providerEventId: lateAssistantId, disposition: "retainedOnly" }),
+      expect.objectContaining({ providerEventId: lateTaskNotificationId, disposition: "projected", error: null }),
+    ]));
+    await service.interruptTurn({ threadId: started.thread.id, turnId: prepared.response.turn.id });
+    expect(service.readThread(started.thread.id, true).thread.turns[0]).toMatchObject({
+      status: "interrupted", error: null,
+    });
+    releaseProvider();
     await service.close();
   });
 

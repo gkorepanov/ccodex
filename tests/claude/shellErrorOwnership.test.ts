@@ -658,7 +658,7 @@ describe("Claude session shell/error ownership", () => {
     },
   );
 
-  it("persists generic errors before live delivery for active and idle threads", async () => {
+  it("projects generic errors into an active turn without inventing a terminal lifecycle", async () => {
     const root = directory("report-error");
     const store = new SqliteHybridStore(join(root, "state.sqlite"));
     const hub = new SubscriptionHub();
@@ -668,16 +668,9 @@ describe("Claude session shell/error ownership", () => {
       model: "claude:sonnet", cwd: root, approvalPolicy: "on-request",
     });
     let requestId: string | undefined;
-    const seen: Array<{ threadId: string; turnId: string }> = [];
-    hub.subscribe(active.thread.id, "active-error", (method, params) => {
-      if (method !== "error") return;
-      const error = params as { threadId: string; turnId: string };
-      expect(store.listEventsAfter(error.threadId, 0).at(-1)).toMatchObject({
-        method: "error",
-        turnId: error.turnId,
-        params,
-      });
-      seen.push(error);
+    const methods: string[] = [];
+    hub.subscribe(active.thread.id, "active-error", (method) => {
+      methods.push(method);
     }, (id) => { requestId = id; });
     const turn = await service.prepareTurn({
       threadId: active.thread.id,
@@ -686,30 +679,21 @@ describe("Claude session shell/error ownership", () => {
     turn.announce();
     turn.start();
     await waitFor(() => requestId !== undefined, "active error turn");
-    await service.reportError(active.thread.id, undefined, "active failure", "badRequest");
-    expect(seen).toMatchObject([{
-      threadId: active.thread.id,
-      turnId: turn.response.turn.id,
-    }]);
-    await service.resolveServerRequest(requestId!, { decision: "decline" });
-    await waitFor(
-      () => service.readThread(active.thread.id, true).thread.turns[0]?.status !== "inProgress",
-      "active error cleanup",
-    );
+    expect(await service.reportError(active.thread.id, undefined, "active failure", "badRequest")).toBe(true);
+    const activeTurn = service.readThread(active.thread.id, true).thread.turns[0]!;
+    expect(activeTurn).toMatchObject({ id: turn.response.turn.id, status: "inProgress" });
+    expect(activeTurn.items).toContainEqual(expect.objectContaining({
+      type: "agentMessage",
+      text: expect.stringContaining("active failure"),
+    }));
+    expect(methods).not.toContain("turn/completed");
+    expect(methods).not.toContain("error");
+    await service.interruptTurn({ threadId: active.thread.id, turnId: turn.response.turn.id });
+    expect(service.readThread(active.thread.id, true).thread.turns[0]?.status).toBe("interrupted");
+    expect(methods.filter((method) => method === "turn/completed")).toHaveLength(1);
 
     const idle = await service.startThread({ model: "claude:sonnet", cwd: root });
-    hub.subscribe(idle.thread.id, "idle-error", (method, params) => {
-      if (method !== "error") return;
-      const error = params as { threadId: string; turnId: string };
-      expect(store.listEventsAfter(error.threadId, 0).at(-1)).toMatchObject({
-        method: "error",
-        turnId: error.turnId,
-        params,
-      });
-      seen.push(error);
-    });
-    await service.reportError(idle.thread.id, undefined, "idle failure", "internalServerError");
-    expect(seen[1]).toMatchObject({ threadId: idle.thread.id, turnId: expect.any(String) });
+    expect(await service.reportError(idle.thread.id, undefined, "idle failure", "internalServerError")).toBe(false);
     expect(store.listTurns(idle.thread.id)).toEqual([]);
     await service.close();
   });

@@ -206,7 +206,7 @@ function fakeClaude() {
     releaseEphemeralThread: vi.fn(async () => undefined),
     scheduleEphemeralRelease: vi.fn(),
     cancelEphemeralRelease: vi.fn(),
-    reportError: vi.fn(async () => undefined),
+    reportError: vi.fn(async () => false),
     announceThread: vi.fn(),
     eventHighWatermark: () => 0,
     latestTokenUsage: () => undefined,
@@ -1322,5 +1322,27 @@ describe("provider-aware rate-limit gateway routing", () => {
         diagnosticError: "Claude session registry is closed.",
       }),
     );
+  });
+
+  it("keeps an active Claude turn active when an App RPC fails", async () => {
+    const claude = fakeClaude();
+    claude.threads.add("claude-active");
+    claude.reportError.mockResolvedValue(true);
+    const harness = await makeHarness(claude);
+
+    harness.client.request("bad-rpc", "thread/metadata/update", {
+      threadId: "claude-active",
+      gitInfo: null,
+    });
+    await settle();
+
+    expect(messages(harness, "bad-rpc")[0]).toMatchObject({
+      id: "bad-rpc",
+      error: { message: expect.any(String) },
+    });
+    expect(claude.reportError).toHaveBeenCalledTimes(1);
+    expect(harness.client.sent).not.toContainEqual(expect.objectContaining({ method: "turn/started" }));
+    expect(harness.client.sent).not.toContainEqual(expect.objectContaining({ method: "turn/completed" }));
+    expect(harness.client.sent).not.toContainEqual(expect.objectContaining({ method: "item/agentMessage/delta" }));
   });
 });

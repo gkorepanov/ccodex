@@ -23,6 +23,21 @@ export interface ClaudeRuntimeSettings {
   readonly thinkingDisplay: "summarized" | "omitted" | null;
 }
 
+export class ClaudeRuntimeStartupError extends Error {
+  public constructor(
+    message: string,
+    public readonly retryableEarlyExit: boolean,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "ClaudeRuntimeStartupError";
+  }
+}
+
+export function isRetryableClaudeRuntimeStartupError(error: unknown): boolean {
+  return error instanceof ClaudeRuntimeStartupError && error.retryableEarlyExit;
+}
+
 export class ClaudeRuntime {
   private readonly input: AsyncQueue<SDKUserMessage>;
   private readonly abort = new AbortController();
@@ -35,6 +50,8 @@ export class ClaudeRuntime {
   private exited = false;
   private readonly capabilities = new Set<string>();
   private readonly ownedMessageIds = new Set<string>();
+  private stderrTail = "";
+  private providerOutputSeen = false;
 
   public constructor(
     private readonly runtimeGeneration: number,
@@ -53,9 +70,17 @@ export class ClaudeRuntime {
         pendingInputs: this.input.pendingCount,
       });
     });
+    const stderr = options.stderr;
     this.query = queryFactory({
       prompt: this.input,
-      options: { ...options, abortController: this.abort },
+      options: {
+        ...options,
+        abortController: this.abort,
+        stderr: (line) => {
+          this.stderrTail = `${this.stderrTail}${line}`.slice(-8_192);
+          stderr?.(line);
+        },
+      },
     });
   }
 
@@ -67,7 +92,19 @@ export class ClaudeRuntime {
     return Promise.race([
       this.query.initializationResult(),
       this.initializationExit,
-    ]) as ReturnType<Query["initializationResult"]>;
+    ]).catch((error) => Promise.reject(this.initializationFailure(error))) as ReturnType<Query["initializationResult"]>;
+  }
+
+  public initializationFailure(error: unknown): ClaudeRuntimeStartupError {
+    if (error instanceof ClaudeRuntimeStartupError) return error;
+    const cause = error instanceof Error ? error : new Error(String(error));
+    const stderr = this.stderrTail.trim();
+    const message = stderr ? `${cause.message}\nClaude stderr: ${stderr}` : cause.message;
+    return new ClaudeRuntimeStartupError(
+      message,
+      !this.providerOutputSeen && /Query closed before response received|exited during initialization|became unavailable during initialization/iu.test(cause.message),
+      { cause },
+    );
   }
 
   public start(): void {
@@ -150,6 +187,7 @@ export class ClaudeRuntime {
     let exitSubmitted = false;
     try {
       for await (const message of this.query) {
+        this.providerOutputSeen = true;
         await this.submitFact(normalizeProviderMessage(this.runtimeGeneration, message));
       }
       this.markExited();
@@ -171,10 +209,8 @@ export class ClaudeRuntime {
 
   private markExited(error?: unknown): void {
     this.exited = true;
-    this.rejectInitializationExit(
-      error instanceof Error
-        ? error
-        : new Error(`Claude runtime generation ${this.runtimeGeneration} exited during initialization.`),
-    );
+    this.rejectInitializationExit(this.initializationFailure(
+      error ?? new Error(`Claude runtime generation ${this.runtimeGeneration} exited during initialization.`),
+    ));
   }
 }

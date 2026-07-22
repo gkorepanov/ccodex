@@ -397,7 +397,7 @@ describe("Claude autonomous continuation lifecycle", () => {
     await service.close();
   });
 
-  it("reports a signal-less legacy provider exactly once without fabricating success", async () => {
+  it("keeps a signal-less legacy provider active without fabricating UI output or success", async () => {
     vi.useFakeTimers();
     const { service, provider, threadId, turnId, events } = await fixture();
     primeInitialResult(provider, ["signal-less"]);
@@ -411,7 +411,7 @@ describe("Claude autonomous continuation lifecycle", () => {
     const thread = service.readThread(threadId, true).thread;
     expect(thread.turns).toEqual([expect.objectContaining({ id: turnId, status: "inProgress" })]);
     expect(terminalEvents(events)).toHaveLength(0);
-    expect(JSON.stringify(thread).match(/did not emit a request/g)).toHaveLength(1);
+    expect(JSON.stringify(thread)).not.toContain("did not emit a request");
     await service.interruptTurn({ threadId, turnId });
     expect(service.readThread(threadId, true).thread.turns[0]?.status).toBe("interrupted");
     await service.close();

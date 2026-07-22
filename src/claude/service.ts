@@ -506,11 +506,11 @@ export class ClaudeService {
     requestedTurnId: string | undefined,
     message: string,
     codexErrorInfo: CodexErrorInfo,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (this.closing || !this.ownsThread(threadId)
-      || this.pendingThreadRemoval(threadId) || this.terminalAdmins.has(threadId)) return;
+      || this.pendingThreadRemoval(threadId) || this.terminalAdmins.has(threadId)) return false;
     try {
-      await this.sessions.submit(threadId, {
+      return await this.sessions.submit<boolean>(threadId, {
         type: "reportError",
         threadId,
         ...(requestedTurnId ? { requestedTurnId } : {}),
@@ -519,6 +519,7 @@ export class ClaudeService {
       });
     } catch (error) {
       if (!this.closing && this.ownsThread(threadId)) throw error;
+      return false;
     }
   }
 
@@ -1223,7 +1224,7 @@ export class ClaudeService {
     if (thread.ephemeral) {
       try {
         const targetSession = await this.sessions.getOrCreate(thread.id);
-        await targetSession.ensureRuntime();
+        await targetSession.ensureEphemeralRuntime();
         const activeTurn = activeIndex >= 0 ? sourceRecord.thread.turns[activeIndex] : undefined;
         if (activeSideFork && activeTurn) {
           await targetSession.injectRuntimeItems([sideReferenceSnapshot(sourceRecord.thread.id, activeTurn)]);

@@ -1000,32 +1000,34 @@ export function attachClientConnection(
           : undefined;
         const threadId = typeof params?.threadId === "string" ? params.threadId : undefined;
         const childProjection = Boolean(threadId && claude.isChildProjection(threadId));
-        if (message.method === "turn/start" && threadId && !childProjection) {
+        let attachedToActiveTurn = false;
+        if (threadId && !childProjection && claude.ownsThread(threadId)) {
+          attachedToActiveTurn = await claude.reportError(
+            threadId,
+            typeof params?.turnId === "string" ? params.turnId : undefined,
+            failure.message,
+            rpcCodexErrorInfo(failure.code),
+          ).catch((diagnosticError: unknown) => {
+            logger.warn("claude.request.error-report-failed", {
+              connectionId,
+              method: message.method,
+              originalError: failure.message,
+              diagnosticError: diagnosticError instanceof Error
+                ? diagnosticError.message
+                : String(diagnosticError),
+            });
+            return false;
+          });
+        }
+        if (message.method === "turn/start" && threadId && !childProjection && !attachedToActiveTurn) {
           const notice = transientSystemNotice(threadId, failure.message, "error");
           sendResult(message.id, notice.response);
           emitNotice(notice);
           return;
         }
-        if (threadId && !childProjection) emitSystemError(threadId, failure.message);
+        if (threadId && !childProjection && !attachedToActiveTurn) emitSystemError(threadId, failure.message);
         sendError(message.id, failure.code, failure.message);
-        if (threadId && !childProjection) {
-          if (claude.ownsThread(threadId)) {
-            await claude.reportError(
-              threadId,
-              typeof params?.turnId === "string" ? params.turnId : undefined,
-              failure.message,
-              rpcCodexErrorInfo(failure.code),
-            ).catch((diagnosticError: unknown) => {
-              logger.warn("claude.request.error-report-failed", {
-                connectionId,
-                method: message.method,
-                originalError: failure.message,
-                diagnosticError: diagnosticError instanceof Error
-                  ? diagnosticError.message
-                  : String(diagnosticError),
-              });
-            });
-          } else {
+        if (threadId && !childProjection && !claude.ownsThread(threadId)) {
             sendJson({
               method: "error",
               params: {
@@ -1035,7 +1037,6 @@ export function attachClientConnection(
                 turnId: typeof params?.turnId === "string" ? params.turnId : uuidv7(),
               },
             });
-          }
         }
         return;
       }

@@ -1677,7 +1677,7 @@ describe("ClaudeSession Phase 3 slice", () => {
     await registry.close();
   });
 
-  it("does not leak provider provenance into an out-of-band lifecycle timer", async () => {
+  it("keeps an out-of-band lifecycle diagnostic out of the App event stream", async () => {
     const store = new ProvenanceStore();
     const { registry } = harness(() => undefined, store);
     await registry.submit("thread-1", { type: "createThread", record: record("thread-1") });
@@ -1707,10 +1707,7 @@ describe("ClaudeSession Phase 3 slice", () => {
       fact: { type: "timer", generation: 1 },
     });
 
-    const timerEvents = store.sources.slice(beforeTimer);
-    expect(timerEvents.length).toBeGreaterThan(0);
-    expect(timerEvents.every((event) =>
-      event.providerEventId === null && event.providerEventType === null)).toBe(true);
+    expect(store.sources.slice(beforeTimer)).toEqual([]);
     await registry.close();
   });
 
@@ -2336,6 +2333,43 @@ describe("ClaudeSession Phase 3 slice", () => {
     const empty = await start("empty");
     await command({ type: "noQueryAck" });
     expect(store.getTurn("thread-1", empty.turn.id)?.status).toBe("completed");
+    await registry.close();
+  });
+
+  it("stops a nested task whose child owner already completed without crashing the runtime", async () => {
+    const { store, registry } = harness();
+    const source: RuntimeFactSource = { providerEventId: "nested-stop", providerEventType: "test" };
+    await registry.submit("thread-1", { type: "createThread", record: record("thread-1") });
+    await registry.submit("thread-1", { type: "attachRuntime", runtimeGeneration: 1 });
+    const prepared = await registry.submit<{ turn: Turn }>("thread-1", {
+      type: "prepareTurn",
+      params: { threadId: "thread-1", input: [{ type: "text", text: "nested stop", text_elements: [] }] },
+    });
+    const outer = await registry.submit<{ childThreadId: string }>("thread-1", {
+      type: "mainStream", runtimeGeneration: 1, source,
+      fact: {
+        kind: "taskStart", taskId: "outer-task", providerId: "outer-tool",
+        description: "outer child", subagentType: "general-purpose", taskType: "agent",
+      },
+    });
+    await registry.submit("thread-1", {
+      type: "mainStream", runtimeGeneration: 1, ownerThreadId: outer.childThreadId, source,
+      fact: { kind: "taskStart", taskId: "nested-task", description: "nested background" },
+    });
+    await registry.submit("thread-1", {
+      type: "mainStream", runtimeGeneration: 1, source,
+      fact: {
+        kind: "taskComplete", taskId: "outer-task", status: "completed", summary: "outer done",
+      },
+    });
+
+    await registry.submit("thread-1", {
+      type: "lifecycle", runtimeGeneration: 1, fact: { type: "interrupt" }, source,
+    });
+    await expect(registry.submit("thread-1", {
+      type: "lifecycle", runtimeGeneration: 1, fact: { type: "interruptAck" }, source,
+    })).resolves.toBeUndefined();
+    expect(store.getTurn("thread-1", prepared.turn.id)?.status).toBe("interrupted");
     await registry.close();
   });
 
