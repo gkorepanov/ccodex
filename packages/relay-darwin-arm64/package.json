@@ -1,6 +1,6 @@
 {
   "name": "@gkorepanov/ccodex-relay-darwin-arm64",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "CCodex remote-control relay for macOS arm64.",
   "repository": {
     "type": "git",

@@ -1197,7 +1197,7 @@ export function attachClientConnection(
           return;
         }
         if (params.threadId && message.method === "thread/rollback" && handoffs.logical?.(params.threadId)) {
-          sendResult(message.id, await handoffs.rollbackLogicalFork(
+          sendResult(message.id, await handoffs.rollbackLogicalThread(
             (message.params ?? {}) as ThreadRollbackParams,
             stockRpc,
             connectionId,
@@ -1207,17 +1207,6 @@ export function attachClientConnection(
         if (params.threadId && handoffs.overlay(params.threadId)) {
           if (message.method === "thread/rollback") {
             const rollback = (message.params ?? {}) as ThreadRollbackParams;
-            const logicalRollback = (handoffs as CrossProviderForks & {
-              rollbackLogicalFork?: (
-                params: ThreadRollbackParams,
-                stock: StockRpc,
-                connectionId?: string,
-              ) => Promise<unknown>;
-            }).rollbackLogicalFork;
-            if (logicalRollback) {
-              sendResult(message.id, await logicalRollback.call(handoffs, rollback, stockRpc, connectionId));
-              return;
-            }
             const overlay = handoffs.overlay(params.threadId) as unknown as {
               epochs?: Array<{ provider: "stock" | "claude"; backendThreadId: string; publicTurnIds: string[] }>;
             };

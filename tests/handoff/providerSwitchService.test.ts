@@ -32,6 +32,52 @@ function thread(id: string, provider: string, turns: Turn[] = []): Thread {
 }
 
 describe("provider switch service", () => {
+  it("rolls back an established logical Claude thread with ordinary App edit semantics", async () => {
+    const first = turn("claude-turn-1", "first answer");
+    const second = turn("claude-turn-2", "answer being edited");
+    const backend = thread("claude-backend", "claude", [first, second]);
+    const publicThread = { ...backend, id: "public-thread", sessionId: "public-thread" };
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    store.createLogicalThread({
+      thread: publicThread,
+      epoch: {
+        id: "claude-epoch",
+        provider: "claude",
+        backendThreadId: backend.id,
+        model: "claude:sonnet",
+        settings: { effort: "high" },
+      },
+    });
+    const claude = {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: (id: string) => id === backend.id,
+      readThread: vi.fn(() => ({ thread: backend })),
+      rollbackThread: vi.fn(async () => ({ thread: { ...backend, turns: [first] } })),
+    };
+    const stock = { request: vi.fn() };
+    const service = new CrossProviderForks(store, claude as never);
+
+    const rolled = await service.rollbackLogicalThread({
+      threadId: publicThread.id,
+      numTurns: 1,
+    }, stock as never);
+
+    expect(claude.rollbackThread).toHaveBeenCalledWith({
+      threadId: backend.id,
+      numTurns: 1,
+    });
+    expect(stock.request).not.toHaveBeenCalled();
+    expect(rolled.thread.id).toBe(publicThread.id);
+    expect(rolled.thread.turns.map((value) => value.id)).toEqual([first.id]);
+    expect(service.logical(publicThread.id)?.epoch).toMatchObject({
+      id: "claude-epoch",
+      backendThreadId: backend.id,
+      state: "current",
+    });
+    expect(store.getForkSelection(publicThread.id)).toBeUndefined();
+    service.close();
+  });
+
   it("lets an explicit source-provider turn cancel a switch staged by another client", () => {
     const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
     const claude = {
@@ -212,7 +258,7 @@ describe("provider switch service", () => {
       .toEqual([sourceTurn.id, compact.id, targetTurn.id]);
     expect(requests.some((request) => String(request.params?.threadId).startsWith("ccodex-provisional:")))
       .toBe(false);
-    const rolledBack = await service.rollbackLogicalFork({
+    const rolledBack = await service.rollbackLogicalThread({
       threadId: forked.thread.id,
       numTurns: 2,
     }, stock as never);
@@ -370,7 +416,7 @@ describe("provider switch service", () => {
 
     const provisional = await service.forkLogical({ threadId: source.id }, stock as never);
     started.length = 0;
-    await service.rollbackLogicalFork({
+    await service.rollbackLogicalThread({
       threadId: provisional.thread.id,
       numTurns: 0,
     }, stock as never, "client");

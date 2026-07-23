@@ -696,27 +696,52 @@ export class CrossProviderForks {
     return response;
   }
 
-  public async rollbackLogicalFork(
+  public async rollbackLogicalThread(
     params: ThreadRollbackParams,
     clientStock: StockRpc,
     connectionId?: string,
   ): Promise<ThreadRollbackResponse> {
     const selection = this.store.getForkSelection(params.threadId);
     const target = this.epochs.resolve(params.threadId);
-    if (!selection || selection.status !== "pending" || !target) {
-      throw invalidParams(`Thread '${params.threadId}' is not awaiting a logical fork selection.`);
+    if (!target) throw invalidParams(`Unknown logical thread '${params.threadId}'.`);
+    if (!Number.isInteger(params.numTurns) || params.numTurns < 0) {
+      throw invalidParams("numTurns must be a non-negative integer.");
     }
-    const turns = this.store.listLogicalTurns(params.threadId);
+    const pendingFork = selection?.status === "pending" ? selection : undefined;
+    const currentTurns = await this.currentBackendTurns(target, this.daemonStock ?? clientStock);
+    const turns = this.epochs.snapshotTurns(params.threadId, currentTurns);
     const keep = turns.length - params.numTurns;
-    if (keep <= 0) throw invalidParams("Fork rollback removed every provider turn.");
+    if (keep <= 0) throw invalidParams("Rollback removed every provider turn.");
     const retained = turns.slice(0, keep);
     const boundary = [...retained].reverse().find((turn) => turn.epochId && turn.providerTurnId);
     if (!boundary?.epochId || !boundary.providerTurnId) {
-      throw invalidParams("Fork selection has no provider-backed turn boundary.");
+      throw invalidParams("Rollback has no provider-backed turn boundary.");
     }
     const selectedEpoch = this.store.getEpoch(boundary.epochId);
-    if (!selectedEpoch || selectedEpoch.publicThreadId !== selection.sourcePublicThreadId) {
-      throw invalidParams("Fork selection points outside the source provider lineage.");
+    const selectedLineage = pendingFork?.sourcePublicThreadId ?? params.threadId;
+    if (!selectedEpoch || !this.store.epochBelongsToLineage(selectedLineage, selectedEpoch.id)) {
+      throw invalidParams("Rollback points outside the thread's provider lineage.");
+    }
+    if (!pendingFork && selectedEpoch.id === target.epoch.id) {
+      if (params.numTurns === 0) {
+        const backend = target.epoch.provider === "claude"
+          ? this.claude.readThread(target.epoch.backendThreadId, true).thread
+          : (await clientStock.request("thread/read", {
+            threadId: target.epoch.backendThreadId,
+            includeTurns: true,
+          }) as ThreadReadResponse).thread;
+        return { thread: this.epochs.projectThread(params.threadId, backend, true) };
+      }
+      const rolled = target.epoch.provider === "claude"
+        ? await this.claude.rollbackThread({
+          threadId: target.epoch.backendThreadId,
+          numTurns: params.numTurns,
+        })
+        : await clientStock.request("thread/rollback", {
+          threadId: target.epoch.backendThreadId,
+          numTurns: params.numTurns,
+        }) as ThreadRollbackResponse;
+      return { thread: this.epochs.projectThread(params.threadId, rolled.thread, true) };
     }
     let forked: ThreadForkResponse;
     let stockBuildOwner: string | undefined;
@@ -754,16 +779,17 @@ export class CrossProviderForks {
       ...forked.thread,
       id: params.threadId,
       sessionId: target.logical.thread.sessionId,
-      forkedFromId: selection.sourcePublicThreadId,
-      parentThreadId: null,
+      forkedFromId: target.logical.thread.forkedFromId,
+      parentThreadId: target.logical.thread.parentThreadId,
       createdAt: target.logical.thread.createdAt,
       name: target.logical.thread.name,
       turns: [],
     };
-    const committed = this.store.commitForkSelection({
+    const committed = this.store.commitLogicalRollback({
       targetPublicThreadId: params.threadId,
-      expectedProvisionalEpochId: selection.provisionalEpochId,
-      selectedSourceEpochId: selectedEpoch.id,
+      expectedCurrentEpochId: target.epoch.id,
+      expectedThreadRevision: target.logical.revision,
+      selectedEpochId: selectedEpoch.id,
       targetEpoch: {
         id: uuidv7(),
         provider: selectedEpoch.provider,
@@ -782,15 +808,17 @@ export class CrossProviderForks {
     });
     if (!committed) {
       if (stockBuildOwner) this.stockTargetBuilds.delete(stockBuildOwner);
-      throw new Error("Logical fork selection lost its atomic commit boundary.");
+      throw new Error("Logical rollback lost its atomic commit boundary.");
     }
     this.subscriptions?.suppress(target.epoch.backendThreadId);
     this.subscriptions?.aliasThread(forked.thread.id, params.threadId);
     if (stockBuildOwner) this.stockTargetBuilds.delete(stockBuildOwner);
-    if (selectedEpoch.provider === "claude") await this.claude.announceThread(forked.thread);
-    else this.subscriptions?.emitPublic(params.threadId, "thread/started", {
-      thread: this.epochs.projectThread(params.threadId, forked.thread, true),
-    });
+    if (pendingFork) {
+      if (selectedEpoch.provider === "claude") await this.claude.announceThread(forked.thread);
+      else this.subscriptions?.emitPublic(params.threadId, "thread/started", {
+        thread: this.epochs.projectThread(params.threadId, forked.thread, true),
+      });
+    }
     this.subscriptions?.emitPublic(params.threadId, "thread/settings/updated", {
       threadId: params.threadId,
       threadSettings: {

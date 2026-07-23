@@ -1307,13 +1307,13 @@ describe("provider-aware rate-limit gateway routing", () => {
       expect(compactionItemIds(harness, provisional.id)).toEqual([]);
     });
 
-    it("routes App rollback for a provisional logical fork to the epoch selector", async () => {
-      const rollbackLogicalFork = vi.fn(async () => ({
+    it("routes App rollback for every logical thread to the universal history rollback", async () => {
+      const rollbackLogicalThread = vi.fn(async () => ({
         thread: stockThread("public-fork"),
       }));
       const harness = await makeHarness(fakeClaude(), undefined, undefined, DEFAULT_FEATURES, {
         logical: (threadId: string) => threadId === "public-fork" ? { epoch: { provider: "stock" } } : undefined,
-        rollbackLogicalFork,
+        rollbackLogicalThread,
       });
 
       harness.client.request("select-history-boundary", "thread/rollback", {
@@ -1322,7 +1322,7 @@ describe("provider-aware rate-limit gateway routing", () => {
       });
       await settle();
 
-      expect(rollbackLogicalFork).toHaveBeenCalledWith(
+      expect(rollbackLogicalThread).toHaveBeenCalledWith(
         { threadId: "public-fork", numTurns: 2 },
         expect.anything(),
         expect.any(String),

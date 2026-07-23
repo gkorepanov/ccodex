@@ -238,10 +238,11 @@ describe("HandoffStore provider epochs", () => {
       provisionalEpochId: "target-provisional", createdAt: 10,
     });
 
-    const committed = store.commitForkSelection({
+    const committed = store.commitLogicalRollback({
       targetPublicThreadId: "target",
-      expectedProvisionalEpochId: "target-provisional",
-      selectedSourceEpochId: "source-epoch",
+      expectedCurrentEpochId: "target-provisional",
+      expectedThreadRevision: 1,
+      selectedEpochId: "source-epoch",
       targetEpoch: {
         id: "target-selected", provider: "stock", backendThreadId: "selected-native-fork",
         model: "gpt-5.6-sol", settings: { effort: "medium" }, createdAt: 20,
@@ -262,9 +263,27 @@ describe("HandoffStore provider epochs", () => {
     expect(store.getForkSelection("target")).toMatchObject({
       status: "finalized", selectedEpochId: "source-epoch",
     });
-    expect(store.commitForkSelection({
-      targetPublicThreadId: "target", expectedProvisionalEpochId: "target-provisional",
-      selectedSourceEpochId: "source-epoch",
+    expect(store.epochBelongsToLineage("target", "source-epoch")).toBe(true);
+    const replayed = store.commitLogicalRollback({
+      targetPublicThreadId: "target",
+      expectedCurrentEpochId: "target-selected",
+      expectedThreadRevision: 2,
+      selectedEpochId: "source-epoch",
+      targetEpoch: {
+        id: "target-reselected", provider: "stock", backendThreadId: "selected-native-fork-2",
+        model: "gpt-5.6-sol", settings: { effort: "medium" }, createdAt: 30,
+      },
+      turns: [],
+      thread: { ...thread("target"), forkedFromId: "source", updatedAt: 30 },
+      committedAt: 30,
+    });
+    expect(replayed).toMatchObject({ currentEpochId: "target-reselected", revision: 3 });
+    expect(store.getForkSelection("target")).toMatchObject({
+      status: "finalized", selectedEpochId: "source-epoch",
+    });
+    expect(store.commitLogicalRollback({
+      targetPublicThreadId: "target", expectedCurrentEpochId: "target-provisional",
+      expectedThreadRevision: 1, selectedEpochId: "source-epoch",
       targetEpoch: {
         id: "duplicate", provider: "stock", backendThreadId: "duplicate",
         model: "gpt-5.6-sol", settings: {},

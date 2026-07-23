@@ -138,10 +138,11 @@ export interface ProviderSwitchCommit {
   readonly committedAt?: number;
 }
 
-export interface ForkSelectionCommit {
+export interface LogicalRollbackCommit {
   readonly targetPublicThreadId: string;
-  readonly expectedProvisionalEpochId: string;
-  readonly selectedSourceEpochId: string;
+  readonly expectedCurrentEpochId: string;
+  readonly expectedThreadRevision: number;
+  readonly selectedEpochId: string;
   readonly targetEpoch: NewProviderEpoch;
   readonly turns: readonly NewLogicalTurn[];
   readonly thread: Thread;
@@ -760,6 +761,19 @@ export class HandoffStore {
     return row ? this.forkSelectionFromRow(row) : undefined;
   }
 
+  public epochBelongsToLineage(publicThreadId: string, epochId: string): boolean {
+    const epoch = this.getEpoch(epochId);
+    if (!epoch) return false;
+    const visited = new Set<string>();
+    let threadId: string | undefined = publicThreadId;
+    while (threadId && !visited.has(threadId)) {
+      if (epoch.publicThreadId === threadId) return true;
+      visited.add(threadId);
+      threadId = this.getForkSelection(threadId)?.sourcePublicThreadId;
+    }
+    return false;
+  }
+
   public finalizeForkSelection(
     targetPublicThreadId: string,
     expectedProvisionalEpochId: string,
@@ -780,19 +794,25 @@ export class HandoffStore {
     });
   }
 
-  public commitForkSelection(input: ForkSelectionCommit): LogicalThread | undefined {
+  public commitLogicalRollback(input: LogicalRollbackCommit): LogicalThread | undefined {
     return this.transaction(() => {
+      const target = this.getLogicalThread(input.targetPublicThreadId);
+      const current = this.getEpoch(input.expectedCurrentEpochId);
+      const selected = this.getEpoch(input.selectedEpochId);
       const selection = this.getForkSelection(input.targetPublicThreadId);
-      const target = selection && this.getLogicalThread(selection.targetPublicThreadId);
-      const selected = this.getEpoch(input.selectedSourceEpochId);
-      const provisional = this.getEpoch(input.expectedProvisionalEpochId);
-      if (!selection || selection.status !== "pending" || !target
-        || selection.provisionalEpochId !== input.expectedProvisionalEpochId
-        || selection.expectedTargetRevision !== target.revision
-        || target.currentEpochId !== input.expectedProvisionalEpochId
-        || selected?.publicThreadId !== selection.sourcePublicThreadId
-        || provisional?.publicThreadId !== target.publicThreadId || provisional.state !== "current"
+      const pending = selection?.status === "pending" ? selection : undefined;
+      if (!target || target.revision !== input.expectedThreadRevision
+        || target.currentEpochId !== input.expectedCurrentEpochId
+        || current?.publicThreadId !== target.publicThreadId || current.state !== "current"
+        || !selected
         || input.targetEpoch.provider !== selected.provider) return undefined;
+      if (pending) {
+        if (pending.expectedTargetRevision !== input.expectedThreadRevision
+          || input.expectedCurrentEpochId !== pending.provisionalEpochId
+          || !this.epochBelongsToLineage(pending.sourcePublicThreadId, selected.id)) return undefined;
+      } else if (!this.epochBelongsToLineage(target.publicThreadId, selected.id)) {
+        return undefined;
+      }
       const committedAt = input.committedAt ?? Date.now();
       const ordinal = (this.database.prepare(`
         SELECT COALESCE(MAX(ordinal), -1) + 1 AS ordinal FROM provider_epochs WHERE public_thread_id = ?
@@ -800,7 +820,7 @@ export class HandoffStore {
       this.database.prepare(`
         UPDATE provider_epochs SET state = 'sealed', sealed_at = ?
         WHERE epoch_id = ? AND public_thread_id = ? AND state = 'current'
-      `).run(committedAt, provisional.id, target.publicThreadId);
+      `).run(committedAt, current.id, target.publicThreadId);
       this.insertEpoch(target.publicThreadId, ordinal, input.targetEpoch, "current", committedAt);
       this.replaceTurns(target.publicThreadId, input.turns);
       const updated = this.database.prepare(`
@@ -808,14 +828,16 @@ export class HandoffStore {
         WHERE public_thread_id = ? AND current_epoch_id = ? AND revision = ?
       `).run(
         input.targetEpoch.id, JSON.stringify({ ...input.thread, turns: [] }), committedAt,
-        target.publicThreadId, provisional.id, selection.expectedTargetRevision,
+        target.publicThreadId, current.id, input.expectedThreadRevision,
       );
-      if (Number(updated.changes) !== 1) throw new Error("Fork selection lost its logical-thread CAS during commit.");
-      const finalized = this.database.prepare(`
-        UPDATE fork_selections SET selected_epoch_id = ?, status = 'finalized', updated_at = ?
-        WHERE target_public_thread_id = ? AND provisional_epoch_id = ? AND status = 'pending'
-      `).run(selected.id, committedAt, target.publicThreadId, provisional.id);
-      if (Number(finalized.changes) !== 1) throw new Error("Fork selection lost its finalize CAS during commit.");
+      if (Number(updated.changes) !== 1) throw new Error("Rollback lost its logical-thread CAS during commit.");
+      if (pending) {
+        const finalized = this.database.prepare(`
+          UPDATE fork_selections SET selected_epoch_id = ?, status = 'finalized', updated_at = ?
+          WHERE target_public_thread_id = ? AND provisional_epoch_id = ? AND status = 'pending'
+        `).run(selected.id, committedAt, target.publicThreadId, pending.provisionalEpochId);
+        if (Number(finalized.changes) !== 1) throw new Error("Rollback lost its fork finalize CAS during commit.");
+      }
       return this.getLogicalThread(target.publicThreadId)!;
     });
   }
