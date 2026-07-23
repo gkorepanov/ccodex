@@ -33,8 +33,15 @@ export const CCODEX_SHIM = `${prelude}case "\${1:-}" in
 esac
 ${current}`;
 
-export function managedShim(name: "ccodex" | "codex"): string {
-  return name === "ccodex" ? CCODEX_SHIM : CODEX_SHIM;
+// CODEX_CLI_PATH entrypoint for the local Codex App: marks the invocation so the
+// bare `app-server` launch routes to the stdio<->socket bridge, then execs managed ccodex.
+export const CODEX_DESKTOP_SHIM = `${prelude}CCODEX_DESKTOP=1 exec "$CCODEX_HOME/current/node_modules/.bin/ccodex" "$@"
+`;
+
+export type ManagedShim = "ccodex" | "codex" | "codex-desktop";
+
+export function managedShim(name: ManagedShim): string {
+  return name === "ccodex" ? CCODEX_SHIM : name === "codex-desktop" ? CODEX_DESKTOP_SHIM : CODEX_SHIM;
 }
 
 function sha256(content: string): string {

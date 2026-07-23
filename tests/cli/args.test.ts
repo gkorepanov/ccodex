@@ -76,4 +76,22 @@ describe("classifyInvocation", () => {
     expect(classifyInvocation(["app-server", "generate-ts", "--out", "schemas"], config))
       .toEqual({ kind: "delegate" });
   });
+
+  it("routes the marked local Codex App launch to the stdio bridge", () => {
+    const previous = process.env.CCODEX_DESKTOP;
+    process.env.CCODEX_DESKTOP = "1";
+    try {
+      expect(classifyInvocation(["app-server", "--listen", "unix://"], config))
+        .toEqual({ kind: "bridge", socketPath: "/tmp/hybrid.sock" });
+      expect(classifyInvocation(["app-server", "--stdio"], config))
+        .toEqual({ kind: "bridge", socketPath: "/tmp/hybrid.sock" });
+      // The marker never hijacks the daemon / proxy / schema shapes.
+      expect(classifyInvocation(["app-server", "daemon", "start"], config)).toMatchObject({ kind: "daemon" });
+      expect(classifyInvocation(["app-server", "proxy"], config)).toMatchObject({ kind: "proxy" });
+      expect(classifyInvocation(["app-server", "generate-ts"], config)).toEqual({ kind: "delegate" });
+    } finally {
+      if (previous === undefined) delete process.env.CCODEX_DESKTOP;
+      else process.env.CCODEX_DESKTOP = previous;
+    }
+  });
 });

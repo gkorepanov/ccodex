@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { compatibilityManifest } from "../../src/compatibility/probe.js";
 import { installLayout } from "../../src/management/layout.js";
+import { posixManagedBlock } from "../../src/management/shellRouting.js";
 import { rollback, uninstall } from "../../src/management/lifecycle.js";
 import type { InstallManifest } from "../../src/management/setup.js";
 
@@ -33,8 +34,7 @@ function fixture(): { root: string; layout: ReturnType<typeof installLayout>; ma
   symlinkSync(join("versions", "0.3.0"), layout.current);
   symlinkSync(join("versions", "0.2.9"), layout.previous);
   const shell = join(root, ".zshrc");
-  const block = `# >>> ccodex >>>\nexport PATH="${layout.bin}:$PATH"\n# <<< ccodex <<<\n`;
-  writeFileSync(shell, `user config\n${block}`);
+  writeFileSync(shell, `user config\n${posixManagedBlock(layout)}`);
   const shimHashes: Record<string, string> = {};
   for (const name of ["ccodex", "codex"]) {
     const path = join(layout.bin, name);

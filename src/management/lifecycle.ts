@@ -10,18 +10,10 @@ import { atomicSymlink, atomicWrite, ensureLayout, installLayout } from "./layou
 import { readInstallManifest, setup, type InstallManifest } from "./setup.js";
 import { reconcileManagedProcess } from "../daemon/supervisor.js";
 import { uninstallRemoteCodexShim } from "./remoteShim.js";
+import { uninstallDesktopApp } from "../desktop/install.js";
+import { fishManagedBlock as fishBlock, posixManagedBlock as posixBlock } from "./shellRouting.js";
 
 const execute = promisify(execFile);
-const BEGIN = "# >>> ccodex >>>";
-const END = "# <<< ccodex <<<";
-
-function posixBlock(layout: ReturnType<typeof installLayout>): string {
-  return `${BEGIN}\nexport PATH="${layout.bin}:$PATH"\n${END}\n`;
-}
-
-function fishBlock(layout: ReturnType<typeof installLayout>): string {
-  return `${BEGIN}\nfish_add_path --move --prepend "${layout.bin}"\n${END}\n`;
-}
 
 async function registryVersion(channel: string): Promise<string> {
   const { stdout } = await execute("npm", ["view", "@gkorepanov/ccodex", `dist-tags.${channel}`, "--json"], {
@@ -139,6 +131,7 @@ export async function uninstall(args: readonly string[]): Promise<number> {
   if (manifest.remoteCodexShim && !uninstallRemoteCodexShim(manifest.remoteCodexShim)) {
     preserved.push(manifest.remoteCodexShim.path);
   }
+  if (manifest.desktopApp) preserved.push(...uninstallDesktopApp(manifest.desktopApp));
   for (const [name, expected] of Object.entries(manifest.shimHashes)) {
     const path = join(layout.bin, name);
     if (!existsSync(path)) continue;

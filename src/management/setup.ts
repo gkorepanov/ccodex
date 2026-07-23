@@ -13,14 +13,19 @@ import { pinnedCodexExecutable, runtimePlatformKey } from "../runtime/dependenci
 import { probeAppServer } from "../daemon/probe.js";
 import { reconcileManagedProcess, stopManagedProcess } from "../daemon/supervisor.js";
 import { atomicSymlink, atomicWrite, ensureLayout, installLayout, type InstallLayout } from "./layout.js";
+import {
+  fishManagedBlock as fishBlock, MANAGED_BLOCK_BEGIN as BEGIN, MANAGED_BLOCK_END as END,
+  posixManagedBlock as posixBlock,
+} from "./shellRouting.js";
 import { managedShim } from "./shims.js";
 import {
   installRemoteCodexShim, relocatedDelegate, restoreRemoteCodexShim, type RemoteCodexShim,
 } from "./remoteShim.js";
+import {
+  installDesktopApp, restoreDesktopApp, startDesktopApp, stopDesktopApp, type DesktopAppInstall,
+} from "../desktop/install.js";
 
 const execute = promisify(execFile);
-const BEGIN = "# >>> ccodex >>>";
-const END = "# <<< ccodex <<<";
 
 interface ShellRouting {
   readonly managed: string[];
@@ -38,6 +43,7 @@ export interface InstallManifest {
   readonly managedShellFiles: string[];
   readonly shimHashes: Readonly<Record<string, string>>;
   readonly remoteCodexShim?: RemoteCodexShim;
+  readonly desktopApp?: DesktopAppInstall;
   readonly platformPackage: string;
   readonly compatibility: ReturnType<typeof compatibilityManifest>;
   readonly doctor: { readonly ok: true; readonly checkedAt: string };
@@ -163,11 +169,12 @@ function hashFile(path: string): string {
 }
 
 function installShims(layout: InstallLayout): Readonly<Record<string, string>> {
-  for (const name of ["ccodex", "codex"] as const) {
+  const names = ["ccodex", "codex", "codex-desktop"] as const;
+  for (const name of names) {
     atomicWrite(join(layout.bin, name), managedShim(name), 0o755);
     chmodSync(join(layout.bin, name), 0o755);
   }
-  return Object.fromEntries(["ccodex", "codex"].map((name) => [name, hashFile(join(layout.bin, name))]));
+  return Object.fromEntries(names.map((name) => [name, hashFile(join(layout.bin, name))]));
 }
 
 function appendManagedBlock(path: string, block: string): void {
@@ -178,14 +185,6 @@ function appendManagedBlock(path: string, block: string): void {
   }
   const mode = existsSync(path) ? statSync(path).mode & 0o777 : 0o600;
   atomicWrite(path, `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${block}`, mode);
-}
-
-function posixBlock(layout: InstallLayout): string {
-  return `${BEGIN}\nexport PATH="${layout.bin}:$PATH"\n${END}\n`;
-}
-
-function fishBlock(layout: InstallLayout): string {
-  return `${BEGIN}\nfish_add_path --move --prepend "${layout.bin}"\n${END}\n`;
 }
 
 function installShellPaths(layout: InstallLayout): ShellRouting {
@@ -356,6 +355,7 @@ export async function setup(args: readonly string[]): Promise<number> {
   let installedShellFiles: string[] = [];
   let installedShimHashes: Readonly<Record<string, string>> = {};
   let installedRemoteShim: RemoteCodexShim | undefined;
+  let installedDesktopApp: DesktopAppInstall | undefined;
   const configPath = join(layout.home, "config.toml");
   let installedConfig = false;
   try {
@@ -368,6 +368,12 @@ export async function setup(args: readonly string[]): Promise<number> {
     installedRemoteShim = installRemoteCodexShim(layout, previousManifest?.remoteCodexShim);
     delegateCodex = relocatedDelegate(installedRemoteShim, delegateCodex);
     installedConfig = installInitialConfig(layout);
+    // The local Codex App only exists on macOS; the LaunchAgent + control socket are
+    // never touched elsewhere so Linux/CI stays byte-identical.
+    const desktopApp = process.platform === "darwin"
+      ? installDesktopApp(layout, publicSocket, previousManifest?.desktopApp)
+      : undefined;
+    installedDesktopApp = desktopApp;
     const manifest: InstallManifest = {
       schemaVersion: 1,
       method: supplied ? "curl" : "npm",
@@ -379,15 +385,25 @@ export async function setup(args: readonly string[]): Promise<number> {
       managedShellFiles: shellRouting.managed,
       shimHashes,
       ...(installedRemoteShim ? { remoteCodexShim: installedRemoteShim } : {}),
+      ...(desktopApp ? { desktopApp } : {}),
       platformPackage: compatibility.relayPackages[runtimePlatformKey()] ?? "unsupported",
       compatibility,
       doctor: { ok: true, checkedAt: new Date().toISOString() },
       installedAt: new Date().toISOString(),
     };
     atomicWrite(layout.manifest, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
-    // setup is the ownership boundary: after the remote shim is in place, always
-    // leave one detached PID-managed gateway ready for App and proxy reconnects.
-    await replaceRunningDaemon(layout, requestedVersion);
+    // setup is the ownership boundary: after the remote shim is in place, leave exactly
+    // one persistent gateway owning the control socket. On macOS the KeepAlive LaunchAgent
+    // is that owner (not a detached PID daemon), so unload it before retiring any stale
+    // detached daemon — otherwise KeepAlive races the socket takeover — then start it back
+    // up; startup-lock + owner-file fencing (gateway/socket.ts) keep a single live gateway.
+    if (desktopApp) {
+      stopDesktopApp(desktopApp);
+      await stopDaemon(layout, requestedVersion);
+      startDesktopApp(desktopApp);
+    } else {
+      await replaceRunningDaemon(layout, requestedVersion);
+    }
   } catch (error) {
     await stopDaemon(layout, requestedVersion).catch(async () => {
       const managed = reconcileManagedProcess(daemonPidFile());
@@ -398,13 +414,18 @@ export async function setup(args: readonly string[]): Promise<number> {
     if (installedConfig) rmSync(configPath, { force: true });
     if (before) {
       atomicSymlink(join("versions", before), layout.current);
-      if (daemonWasRunning || gatewayWasRunning) await replaceRunningDaemon(layout, before).catch(() => undefined);
+      // Skip the detached-daemon restore when a previous LaunchAgent owns the socket;
+      // restoreDesktopApp below reloads it, and a detached daemon would flap against it.
+      if ((daemonWasRunning || gatewayWasRunning) && !previousManifest?.desktopApp) {
+        await replaceRunningDaemon(layout, before).catch(() => undefined);
+      }
     }
     else {
       removeActivationLink(layout.current);
       restoreRemoteCodexShim(installedRemoteShim, previousManifest?.remoteCodexShim);
       removeFirstInstallRouting(layout, installedShellFiles, installedShimHashes);
     }
+    restoreDesktopApp(installedDesktopApp, previousManifest?.desktopApp);
     if (before) restoreRemoteCodexShim(installedRemoteShim, previousManifest?.remoteCodexShim);
     if (beforePrevious) atomicSymlink(beforePrevious, layout.previous);
     else removeActivationLink(layout.previous);

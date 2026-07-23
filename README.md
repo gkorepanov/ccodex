@@ -120,6 +120,32 @@ exact runtimes, and provider availability before atomically activating a new ver
 A failed install or update leaves your previous version and daemon running, and a
 failed readiness check after switching rolls back automatically.
 
+### Local Codex App (same-Mac)
+
+Over SSH the App resolves `codex` through your `PATH`, so the shim engages. The **local
+Codex App**, however, launches its bundled `codex app-server` directly and ignores
+`PATH`, so ccodex never sees it and no `claude:*` models appear. On macOS `ccodex setup`
+closes that gap without ever touching the signed `.app` bundle (so Sparkle auto-updates
+keep working):
+
+- `ccodex setup` points the App at ccodex automatically via
+  `CODEX_CLI_PATH=~/.ccodex/bin/codex-desktop` — it runs `launchctl setenv` for the live
+  session, installs a one-shot login LaunchAgent (`dev.ccodex.codex-cli-path`) so the GUI
+  session re-publishes it on every login/reboot, and exports it in the managed shell
+  blocks for terminal-launched instances. That managed entrypoint marks the launch and
+  execs the pinned ccodex runtime. **Fully quit the Codex App (`Cmd+Q`) and relaunch it**
+  (or log out and back in) so it picks up the variable.
+- The marked `app-server` launch runs a **stdio↔unix-socket bridge**: it translates the
+  App's newline-delimited JSON to the app-server-control socket, lazily starting the
+  gateway and retrying so a cold start never crashes the App.
+- A **LaunchAgent** (`dev.ccodex.gateway`, `KeepAlive`) owns the control socket
+  persistently and starts the remote-relay, replacing the detached daemon as the
+  keepalive owner. All of it is installed by `ccodex setup`, reversed exactly by `ccodex
+  uninstall` (`launchctl unsetenv`, both agents removed, shell export stripped — modified
+  files preserved), and tracked in `install.json` under the same hash/owner guards as the
+  shims. `ccodex doctor --deep` reports `desktop-entry`, `desktop-agent`, and
+  `desktop-bridge`.
+
 ## Technical details
 
 | | |

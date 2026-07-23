@@ -1,6 +1,7 @@
-import { constants, existsSync, mkdirSync, statSync } from "node:fs";
+import { constants, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -14,7 +15,9 @@ import { relayBinary } from "../gateway/remoteRelay.js";
 import { runtimePlatformKey } from "../runtime/dependencies.js";
 import { probeAppServer } from "../daemon/probe.js";
 import { reconcileManagedProcess } from "../daemon/supervisor.js";
+import { LAUNCH_AGENT_LABEL, launchAgentPath } from "../desktop/launchAgent.js";
 import { installLayout } from "./layout.js";
+import { readInstallManifest } from "./setup.js";
 import {
   probeClaudeAvailability, probeCodexAvailability, type ProviderAvailability,
 } from "../runtime/providerAvailability.js";
@@ -108,6 +111,34 @@ async function modelCatalog(socketPath: string): Promise<string[]> {
   });
 }
 
+function hashFile(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+async function desktopChecks(config: HybridConfig, layout: ReturnType<typeof installLayout>): Promise<DoctorCheck[]> {
+  const checks: DoctorCheck[] = [];
+  const entry = join(layout.bin, "codex-desktop");
+  const expectedHash = readInstallManifest(layout)?.shimHashes["codex-desktop"];
+  const entryOk = existsSync(entry) && expectedHash !== undefined && hashFile(entry) === expectedHash;
+  checks.push(check("desktop-entry", entryOk, existsSync(entry) ? entry : "missing", "managed bin/codex-desktop", "ccodex setup --repair"));
+
+  const plist = launchAgentPath();
+  try {
+    await execute("launchctl", ["print", `gui/${process.getuid?.() ?? 0}/${LAUNCH_AGENT_LABEL}`], { timeout: 10_000, maxBuffer: 256 * 1024 });
+    checks.push(check("desktop-agent", existsSync(plist), existsSync(plist) ? plist : "loaded but plist missing", "loaded LaunchAgent", "ccodex setup --repair"));
+  } catch (error) {
+    checks.push(check("desktop-agent", false, existsSync(plist) ? `not loaded (${String(error)})` : "missing", "loaded LaunchAgent", "ccodex setup --repair"));
+  }
+
+  try {
+    await probeAppServer(config.publicSocket);
+    checks.push(check("desktop-bridge", true, "connected", "bridge reaches the gateway"));
+  } catch (error) {
+    checks.push(check("desktop-bridge", false, String(error), "bridge reaches the gateway", "ccodex setup --repair"));
+  }
+  return checks;
+}
+
 async function deepChecks(config: HybridConfig): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
   const expected = compatibilityManifest();
@@ -134,6 +165,8 @@ async function deepChecks(config: HybridConfig): Promise<DoctorCheck[]> {
   } catch (error) {
     checks.push(check("shell-routing", false, String(error), join(layout.bin, "codex"), "ccodex setup --repair"));
   }
+
+  if (process.platform === "darwin") checks.push(...await desktopChecks(config, layout));
 
   const socketParent = dirname(config.publicSocket);
   const parentMode = existsSync(socketParent) ? statSync(socketParent).mode & 0o777 : 0;

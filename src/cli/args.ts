@@ -20,6 +20,7 @@ export type Invocation =
   | { readonly kind: "delegate" }
   | { readonly kind: "daemon"; readonly command: DaemonCommand; readonly remoteControl: boolean }
   | { readonly kind: "proxy"; readonly socketPath: string; readonly proxyArgs: string[] }
+  | { readonly kind: "bridge"; readonly socketPath: string }
   | { readonly kind: "gateway"; readonly socketPath: string; readonly stockArgs: string[] };
 
 const daemonCommands = new Set<DaemonCommand>([
@@ -103,6 +104,11 @@ export function classifyInvocation(args: readonly string[], config: HybridConfig
       proxyArgs: [...prefix, "app-server", "proxy", ...proxyArgs],
     };
   }
+
+  // The local Codex App reaches ccodex through the codex-desktop shim, which sets this
+  // marker and launches a bare/stdio `app-server`. Route it to the stdio<->socket bridge;
+  // every other launch shape (and every unmarked one) stays byte-identical below.
+  if (process.env.CCODEX_DESKTOP === "1") return { kind: "bridge", socketPath: config.publicSocket };
 
   const listen = optionValue(appArgs, "--listen") ?? (appArgs.includes("--stdio") ? "stdio://" : undefined);
   const socketPath = socketPathFromListen(listen, config);
