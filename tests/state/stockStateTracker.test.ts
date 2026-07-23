@@ -128,4 +128,47 @@ describe("stock state tracker", () => {
       config: { model_reasoning_effort: null },
     });
   });
+
+  it("builds an immediate empty side snapshot from the observed resume", () => {
+    const tracker = new StockStateTracker();
+    tracker.observeRequest("desktop", {
+      id: "resume", method: "thread/resume", params: { threadId: "stock-1" },
+    });
+    tracker.observeResponse("desktop", {
+      id: "resume",
+      result: {
+        thread: thread(),
+        model: "gpt-5.6-terra",
+        modelProvider: "openai",
+        serviceTier: "default",
+        cwd: "/tmp",
+        runtimeWorkspaceRoots: ["/tmp"],
+        instructionSources: [],
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        sandbox: { type: "readOnly" },
+        activePermissionProfile: null,
+        reasoningEffort: "medium",
+        multiAgentMode: "explicitRequestOnly",
+        initialTurnsPage: null,
+      },
+    });
+
+    expect(tracker.sideSnapshot({
+      threadId: "stock-1",
+      ephemeral: true,
+      excludeTurns: true,
+      threadSource: "user",
+    }, "public-side")).toMatchObject({
+      thread: {
+        id: "public-side",
+        forkedFromId: "stock-1",
+        ephemeral: true,
+        path: null,
+        turns: [],
+      },
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium",
+    });
+  });
 });

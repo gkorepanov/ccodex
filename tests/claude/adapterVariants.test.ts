@@ -46,7 +46,9 @@ async function runInteraction(
   const service = new ClaudeService(
     {
       ...config(directory),
-      features: { statusCommand: true, sideChatPromotion: true, interactiveQuestions },
+      features: {
+        statusCommand: true, sideChatPromotion: true, optimisticSideStartup: true, interactiveQuestions,
+      },
     },
     hub, new Logger("error"), new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory,
   );

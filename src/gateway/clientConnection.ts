@@ -58,6 +58,8 @@ import { providerUnavailableMessage } from "../runtime/providerAvailability.js";
 import { formatCCodexState, isCCodexStateCommand } from "../state/stateCommand.js";
 import { StockStateTracker } from "../state/stockStateTracker.js";
 import { STOCK_SIDE_THREAD_SOURCE, type StockSideThreads } from "./stockSideThreads.js";
+import type { OptimisticSideThreads, OptimisticSideTarget } from "./optimisticSideThreads.js";
+import { projectRpcToPublicThread } from "./logicalThreadProjection.js";
 
 type ForegroundProvider = "codex" | "claude";
 type FastSettings = Pick<ThreadSettings, "model" | "serviceTier">;
@@ -110,6 +112,7 @@ export function attachClientConnection(
   providerAvailability?: Pick<ProviderAvailabilityService, "read" | "refresh" | "refreshAll">,
   sharedStockState?: StockStateTracker,
   stockSideThreads?: StockSideThreads,
+  optimisticSideThreads?: OptimisticSideThreads,
 ): ClientConnectionHandle {
   const connectionId = uuidv7();
   let resolveClosed!: () => void;
@@ -376,6 +379,287 @@ export function attachClientConnection(
     subscribeClaude(threadId);
     subscriptions.mute(threadId, connectionId);
   };
+  const projectSideResult = (publicThreadId: string, target: OptimisticSideTarget, result: unknown) =>
+    projectRpcToPublicThread(
+      { result },
+      { publicThreadId, backendThreadId: target.backendThreadId },
+    ).result;
+  const projectSideParams = (publicThreadId: string, target: OptimisticSideTarget, params: unknown) =>
+    projectRpcToPublicThread(
+      { params },
+      { publicThreadId, backendThreadId: target.backendThreadId },
+    ).params;
+  const optimisticStockRequest = (method: string, params: unknown) =>
+    stockSideThreads?.request(method, params) ?? stockRpc.request(method, params);
+  const reportOptimisticFailure = (threadId: string) => {
+    if (!connectionAlive) return;
+    const failure = optimisticSideThreads?.claimFailure(threadId);
+    if (failure) {
+      emitTransientNotice(threadId, `Could not prepare side chat\n  ↳ ${failure.message}`, "error");
+    }
+  };
+  const openOptimisticSide = (
+    requestId: string | number,
+    snapshot: ThreadForkResponse,
+    provider: OptimisticSideTarget["provider"],
+    prepare: () => Promise<OptimisticSideTarget>,
+  ) => {
+    const threadId = snapshot.thread.id;
+    subscriptions.subscribe(threadId, connectionId, notificationSink, serverRequestSink);
+    const response = optimisticSideThreads!.open(
+      connectionId,
+      snapshot,
+      prepare,
+      async (target) => {
+        if (target.provider === "claude") {
+          subscriptions.unaliasThread(target.backendThreadId);
+          await claude.deleteThread(target.backendThreadId);
+        } else {
+          await stockSideThreads?.discardOptimistic(threadId);
+        }
+      },
+      reportOptimisticFailure,
+    );
+    sendResult(requestId, response);
+    sendJson({ method: "thread/started", params: { thread: response.thread } });
+    selectForeground(provider === "claude" ? "claude" : "codex", threadId);
+  };
+  const handleOptimisticRequest = async (
+    request: Extract<NonNullable<ReturnType<typeof parseRpcMessage>>, { id: string | number; method: string }>,
+    publicThreadId: string,
+  ): Promise<void> => {
+    const sides = optimisticSideThreads!;
+    sides.attach(publicThreadId, connectionId);
+    subscriptions.subscribe(publicThreadId, connectionId, notificationSink, serverRequestSink);
+    const snapshot = sides.snapshot(publicThreadId)!;
+    const publicParams = (request.params ?? {}) as Record<string, unknown>;
+    if (request.method === "thread/read") {
+      if (sides.phase(publicThreadId) !== "ready") {
+        sendResult(request.id, { thread: snapshot.thread });
+        reportOptimisticFailure(publicThreadId);
+        return;
+      }
+    }
+    if (request.method === "thread/resume") {
+      if (sides.phase(publicThreadId) !== "ready") {
+        sendResult(request.id, {
+          ...snapshot,
+          initialTurnsPage: null,
+        });
+        reportOptimisticFailure(publicThreadId);
+        return;
+      }
+    }
+    if (request.method === "thread/turns/list") {
+      if (sides.phase(publicThreadId) !== "ready") {
+        sendResult(request.id, { data: [], nextCursor: null, backwardsCursor: null });
+        return;
+      }
+    }
+    if (request.method === "thread/items/list") {
+      if (sides.phase(publicThreadId) !== "ready") {
+        sendResult(request.id, { data: [], nextCursor: null, backwardsCursor: null });
+        return;
+      }
+    }
+    if (request.method === "thread/goal/get" && sides.phase(publicThreadId) !== "ready") {
+      sendResult(request.id, { goal: null });
+      reportOptimisticFailure(publicThreadId);
+      return;
+    }
+    if (request.method === "thread/unsubscribe") {
+      subscriptions.unsubscribe(publicThreadId, connectionId);
+      await sides.delete(publicThreadId);
+      sendResult(request.id, { status: "unsubscribed" });
+      clearForeground(publicThreadId);
+      return;
+    }
+    if (request.method === "thread/delete") {
+      await sides.delete(publicThreadId);
+      subscriptions.unsubscribe(publicThreadId, connectionId);
+      sendResult(request.id, {});
+      clearForeground(publicThreadId);
+      return;
+    }
+
+    try {
+      await sides.run(publicThreadId, async (target) => {
+        const params = { ...publicParams, threadId: target.backendThreadId };
+        if (request.method === "thread/read") {
+          const result = target.provider === "claude"
+            ? claude.readThread(target.backendThreadId, Boolean(publicParams.includeTurns))
+            : await optimisticStockRequest("thread/read", params);
+          sendResult(request.id, projectSideResult(publicThreadId, target, result));
+          return;
+        }
+        if (request.method === "thread/resume") {
+          if (target.provider === "claude") {
+            subscriptions.mute(publicThreadId, connectionId);
+            try {
+              const prepared = await claude.prepareResume(params as unknown as ThreadResumeParams);
+              const snapshotHighWatermark = claude.eventHighWatermark(target.backendThreadId);
+              const tokenUsage = claude.latestTokenUsage(target.backendThreadId);
+              sendResult(request.id, projectSideResult(publicThreadId, target, prepared.response));
+              subscriptions.unmute(publicThreadId, connectionId);
+              if (tokenUsage && tokenUsage.sequence <= snapshotHighWatermark) {
+                notificationSink(tokenUsage.method, projectSideParams(publicThreadId, target, tokenUsage.params));
+              }
+              for (const event of claude.eventsAfter(target.backendThreadId, snapshotHighWatermark)) {
+                notificationSink(event.method, projectSideParams(publicThreadId, target, event.params));
+              }
+              await prepared.notifyGoalSnapshot((method, eventParams) =>
+                notificationSink(method, projectSideParams(publicThreadId, target, eventParams)));
+              await claude.replayPendingRequests(target.backendThreadId, connectionId);
+            } catch (error) {
+              subscriptions.unmute(publicThreadId, connectionId);
+              throw error;
+            }
+          } else {
+            sendResult(request.id, projectSideResult(
+              publicThreadId,
+              target,
+              await optimisticStockRequest("thread/resume", params),
+            ));
+          }
+          selectForeground(target.provider === "claude" ? "claude" : "codex", publicThreadId);
+          return;
+        }
+        if (request.method === "thread/turns/list") {
+          const result = target.provider === "claude"
+            ? claude.turnsPage(params as unknown as ThreadTurnsListParams)
+            : await optimisticStockRequest(request.method, params);
+          sendResult(request.id, projectSideResult(publicThreadId, target, result));
+          return;
+        }
+        if (request.method === "thread/items/list") {
+          const result = target.provider === "claude"
+            ? claude.listItems(params as unknown as ThreadItemsListParams)
+            : await optimisticStockRequest(request.method, params);
+          sendResult(request.id, projectSideResult(publicThreadId, target, result));
+          return;
+        }
+        if (request.method === "thread/goal/get") {
+          sendResult(request.id, target.provider === "claude"
+            ? await claude.getGoal(target.backendThreadId)
+            : await optimisticStockRequest(request.method, params));
+          return;
+        }
+        if (request.method === "thread/inject_items") {
+          sendResult(request.id, target.provider === "claude"
+            ? await claude.injectItems(params as unknown as ThreadInjectItemsParams)
+            : await optimisticStockRequest(request.method, params));
+          return;
+        }
+        if (request.method === "thread/name/set") {
+          sendResult(request.id, target.provider === "claude"
+            ? await claude.setThreadName(params as unknown as ThreadSetNameParams)
+            : await optimisticStockRequest(request.method, params));
+          return;
+        }
+        if (request.method === "thread/settings/update") {
+          if (target.provider === "claude") {
+            const before = claude.currentThreadSettings(target.backendThreadId);
+            const result = await claude.updateThreadSettings(params as unknown as ThreadSettingsUpdateParams);
+            sendResult(request.id, result);
+            emitFastTransition(
+              publicThreadId,
+              before,
+              claude.currentThreadSettings(target.backendThreadId),
+              (params as { serviceTier?: string | null }).serviceTier,
+            );
+          } else {
+            sendResult(request.id, await optimisticStockRequest(request.method, params));
+          }
+          return;
+        }
+        if (request.method === "turn/start") {
+          if (target.provider === "claude") {
+            const turn = params as unknown as TurnStartParams;
+            const before = claude.currentThreadSettings(target.backendThreadId);
+            const prepared = await claude.prepareTurn(turn);
+            sendResult(request.id, prepared.response);
+            selectForeground("claude", publicThreadId);
+            emitFastTransition(
+              publicThreadId,
+              before,
+              claude.currentThreadSettings(target.backendThreadId),
+              turn.serviceTier,
+            );
+            await prepared.announce();
+            prepared.start();
+          } else {
+            sendResult(request.id, await optimisticStockRequest(request.method, params));
+            selectForeground("codex", publicThreadId);
+          }
+          return;
+        }
+        if (request.method === "turn/interrupt") {
+          if (target.provider === "claude") {
+            await claude.interruptTurn(params as unknown as TurnInterruptParams);
+            sendResult(request.id, {});
+          } else sendResult(request.id, await optimisticStockRequest(request.method, params));
+          return;
+        }
+        if (request.method === "turn/steer") {
+          sendResult(request.id, target.provider === "claude"
+            ? await claude.steerTurn(params as unknown as TurnSteerParams)
+            : await optimisticStockRequest(request.method, params));
+          return;
+        }
+        if (request.method === "thread/compact/start") {
+          sendResult(request.id, target.provider === "claude"
+            ? await claude.compactThread(target.backendThreadId)
+            : await optimisticStockRequest(request.method, params));
+          return;
+        }
+        if (request.method === "thread/backgroundTerminals/clean") {
+          sendResult(request.id, target.provider === "claude"
+            ? await claude.cleanBackgroundTerminals(params as unknown as ThreadBackgroundTerminalsCleanParams)
+            : await optimisticStockRequest(request.method, params));
+          return;
+        }
+        if (request.method === "thread/backgroundTerminals/list") {
+          sendResult(request.id, target.provider === "claude"
+            ? await claude.listBackgroundTerminals(params as unknown as ThreadBackgroundTerminalsListParams)
+            : await optimisticStockRequest(request.method, params));
+          return;
+        }
+        if (request.method === "thread/backgroundTerminals/terminate") {
+          sendResult(request.id, target.provider === "claude"
+            ? await claude.terminateBackgroundTerminal(params as unknown as ThreadBackgroundTerminalsTerminateParams)
+            : await optimisticStockRequest(request.method, params));
+          return;
+        }
+        if (request.method === "thread/fork") {
+          let result: ThreadForkResponse;
+          if (target.provider === "claude") {
+            result = await claude.forkThread(params as unknown as ThreadForkParams, publicThreadId);
+            sendResult(request.id, result);
+            subscribeClaude(result.thread.id);
+            await claude.announceThread(result.thread);
+            subscriptions.unaliasThread(target.backendThreadId);
+          } else {
+            result = projectSideResult(
+              publicThreadId,
+              target,
+              await optimisticStockRequest(request.method, params),
+            ) as ThreadForkResponse;
+            sendResult(request.id, result);
+            await stockSideThreads?.discardOptimistic(publicThreadId);
+          }
+          sides.forgetPromoted(publicThreadId);
+          selectForeground(target.provider === "claude" ? "claude" : "codex", result.thread.id);
+          return;
+        }
+        throw new RpcError(-32601, `Method '${request.method}' is not implemented for optimistic side threads yet.`);
+      });
+    } catch (error) {
+      reportOptimisticFailure(publicThreadId);
+      const failure = rpcError(error);
+      if (request.method === "thread/inject_items") sendResult(request.id, {});
+      else sendError(request.id, failure.code, failure.message);
+    }
+  };
 
   client.on("message", async (data, isBinary) => {
     recorder.frame(connectionId, "client_to_gateway", data, isBinary);
@@ -387,6 +671,8 @@ export function attachClientConnection(
       const response = "result" in message ? message.result : { rpcError: message.error };
       if (handoffs.resolveStockServerRequest
         && await handoffs.resolveStockServerRequest(internalServerRequestId, response)) return;
+      if (stockSideThreads
+        && await stockSideThreads.resolveServerRequest(internalServerRequestId, response)) return;
       if (!await claude.resolveServerRequest(internalServerRequestId, response)) {
         logger.warn("claude.interaction.unknown-response", { connectionId, requestId: internalServerRequestId });
       }
@@ -475,6 +761,10 @@ export function attachClientConnection(
         }
 
         const params = (message.params ?? {}) as { threadId?: string };
+        if (params.threadId && optimisticSideThreads?.owns(params.threadId)) {
+          await handleOptimisticRequest(message, params.threadId);
+          return;
+        }
         if (params.threadId && message.method === "turn/start"
           && (claude.ownsThread(params.threadId)
             || handoffs.logical?.(params.threadId)?.epoch.provider === "claude")) {
@@ -711,6 +1001,34 @@ export function attachClientConnection(
           }
           const logicalSource = handoffs.logical?.(forkParams.threadId);
           if (logicalSource && isUserSideFork(forkParams)) {
+            const targetThreadId = uuidv7();
+            const snapshot = handoffs.sideSnapshot(forkParams, targetThreadId);
+            if (snapshot && optimisticSideThreads) {
+              openOptimisticSide(
+                message.id,
+                snapshot,
+                logicalSource.epoch.provider,
+                async () => {
+                  if (logicalSource.epoch.provider === "claude") {
+                    const result = await claude.forkThread({
+                      ...forkParams,
+                      threadId: logicalSource.epoch.backendThreadId,
+                    }, forkParams.threadId);
+                    subscriptions.aliasThread(result.thread.id, targetThreadId);
+                    claude.cancelEphemeralRelease(result.thread.id);
+                    return { provider: "claude", backendThreadId: result.thread.id };
+                  }
+                  if (!stockSideThreads) throw new Error("Stock side-chat support is unavailable.");
+                  const prepared = await stockSideThreads.prepareOptimisticSide(
+                    { ...forkParams, threadId: logicalSource.epoch.backendThreadId },
+                    forkParams.threadId,
+                    targetThreadId,
+                  );
+                  return { provider: "stock", backendThreadId: prepared.backendThreadId };
+                },
+              );
+              return;
+            }
             let result: ThreadForkResponse;
             if (logicalSource.epoch.provider === "claude") {
               result = await claude.forkThread({
@@ -733,6 +1051,39 @@ export function attachClientConnection(
             sendResult(message.id, result);
             selectForeground("codex", result.thread.id);
             return;
+          }
+          if (!logicalSource && isUserSideFork(forkParams) && optimisticSideThreads) {
+            const targetThreadId = uuidv7();
+            const sourceProvider = claude.ownsThread(forkParams.threadId) ? "claude" : "stock";
+            const completedParams = sourceProvider === "stock"
+              ? stockState.completeForkParams(forkParams)
+              : forkParams;
+            const snapshot = sourceProvider === "claude"
+              ? claude.sideSnapshot(forkParams.threadId, targetThreadId, forkParams.threadId)
+              : stockState.sideSnapshot(completedParams, targetThreadId);
+            if (snapshot) {
+              openOptimisticSide(
+                message.id,
+                snapshot,
+                sourceProvider,
+                async () => {
+                  if (sourceProvider === "claude") {
+                    const result = await claude.forkThread(completedParams, forkParams.threadId);
+                    subscriptions.aliasThread(result.thread.id, targetThreadId);
+                    claude.cancelEphemeralRelease(result.thread.id);
+                    return { provider: "claude", backendThreadId: result.thread.id };
+                  }
+                  if (!stockSideThreads) throw new Error("Stock side-chat support is unavailable.");
+                  const prepared = await stockSideThreads.prepareOptimisticSide(
+                    completedParams,
+                    forkParams.threadId,
+                    targetThreadId,
+                  );
+                  return { provider: "stock", backendThreadId: prepared.backendThreadId };
+                },
+              );
+              return;
+            }
           }
           const logicalFork = (handoffs as CrossProviderForks & {
             forkLogical?: (params: ThreadForkParams, stock: StockRpc) => Promise<unknown>;
@@ -1251,6 +1602,7 @@ export function attachClientConnection(
       }
       stockState.detach(connectionId);
       stockSideThreads?.detachConnection(connectionId);
+      optimisticSideThreads?.detachConnection(connectionId);
       stockRpc.close(new Error("Client connection closed."));
       if (stock.readyState === WebSocketState.OPEN || stock.readyState === WebSocketState.CONNECTING) {
         stock.close();

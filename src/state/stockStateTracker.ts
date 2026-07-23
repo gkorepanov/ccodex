@@ -1,5 +1,6 @@
 import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
+import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
 import type { ThreadSettings } from "../codex/generated/v2/ThreadSettings.js";
 import type { ThreadTokenUsage } from "../codex/generated/v2/ThreadTokenUsage.js";
 import {
@@ -54,6 +55,8 @@ export class StockStateTracker {
   private readonly pending = new Map<string, Pending>();
   private readonly settings = new Map<string, Partial<Settings>>();
   private readonly usage = new Map<string, ThreadTokenUsage>();
+  private readonly threads = new Map<string, Thread>();
+  private readonly responses = new Map<string, Omit<ThreadForkResponse, "thread">>();
 
   public observeRequest(connectionId: string, message: RpcMessage): void {
     if (!isRequest(message)) return;
@@ -83,6 +86,14 @@ export class StockStateTracker {
     if (!threadId) return;
     if (["thread/start", "thread/resume", "thread/fork"].includes(pending.method)) {
       this.merge(threadId, settingsFrom(result));
+      if (thread) this.threads.set(threadId, thread);
+      if (thread && typeof result.model === "string" && typeof result.modelProvider === "string"
+        && typeof result.cwd === "string" && Array.isArray(result.runtimeWorkspaceRoots)
+        && Array.isArray(result.instructionSources) && result.approvalPolicy && result.approvalsReviewer
+        && result.sandbox && "activePermissionProfile" in result && "reasoningEffort" in result) {
+        const { thread: _, ...response } = result as unknown as ThreadForkResponse;
+        this.responses.set(threadId, response);
+      }
     } else if (pending.method === "thread/settings/update") {
       this.merge(threadId, settingsFrom(pending.params));
     } else if (pending.method === "turn/start") {
@@ -105,7 +116,11 @@ export class StockStateTracker {
     } else if (message.method === "thread/deleted" && threadId) {
       this.settings.delete(threadId);
       this.usage.delete(threadId);
+      this.threads.delete(threadId);
+      this.responses.delete(threadId);
     }
+    const thread = params.thread && typeof params.thread === "object" ? params.thread as Thread : undefined;
+    if (message.method === "thread/started" && thread) this.threads.set(thread.id, thread);
   }
 
   public completeForkParams(params: ThreadForkParams): ThreadForkParams {
@@ -122,6 +137,34 @@ export class StockStateTracker {
       ...(inheritEffort
         ? { config: { ...config, model_reasoning_effort: source.effort } }
         : {}),
+    };
+  }
+
+  public sideSnapshot(
+    params: ThreadForkParams,
+    targetThreadId: string,
+  ): ThreadForkResponse | undefined {
+    const source = this.threads.get(params.threadId);
+    const response = this.responses.get(params.threadId);
+    if (!source || !response) return undefined;
+    const completed = this.completeForkParams(params);
+    return {
+      ...response,
+      ...(completed.model ? { model: completed.model } : {}),
+      ...(completed.serviceTier !== undefined ? { serviceTier: completed.serviceTier } : {}),
+      thread: {
+        ...source,
+        id: targetThreadId,
+        forkedFromId: params.threadId,
+        ephemeral: true,
+        path: null,
+        cwd: params.cwd ?? source.cwd,
+        threadSource: "user",
+        status: { type: "idle" },
+        name: source.name,
+        turns: [],
+      },
+      cwd: params.cwd ?? response.cwd,
     };
   }
 

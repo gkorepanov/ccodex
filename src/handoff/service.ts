@@ -233,6 +233,41 @@ export class CrossProviderForks {
   public logical(threadId: string): ResolvedProviderEpoch | undefined { return this.epochs.resolve(threadId); }
   public hiddenBackendIds(provider?: ProviderKind): Set<string> { return this.epochs.hiddenBackendIds(provider); }
 
+  public sideSnapshot(params: ThreadForkParams, targetThreadId: string): ThreadForkResponse | undefined {
+    const source = this.epochs.resolve(params.threadId);
+    if (!source) return undefined;
+    const settings = source.epoch.settings;
+    const cwd = params.cwd ?? source.logical.thread.cwd;
+    return {
+      thread: {
+        ...source.logical.thread,
+        id: targetThreadId,
+        forkedFromId: params.threadId,
+        ephemeral: true,
+        path: null,
+        cwd,
+        threadSource: "user",
+        status: { type: "idle" },
+        name: source.logical.thread.name,
+        turns: [],
+      },
+      model: source.epoch.model,
+      modelProvider: source.epoch.provider === "claude" ? "claude" : "openai",
+      serviceTier: typeof settings.serviceTier === "string" ? settings.serviceTier : null,
+      cwd,
+      runtimeWorkspaceRoots: Array.isArray(settings.runtimeWorkspaceRoots)
+        ? settings.runtimeWorkspaceRoots as string[] : [],
+      instructionSources: Array.isArray(settings.instructionSources)
+        ? settings.instructionSources as string[] : [],
+      approvalPolicy: (settings.approvalPolicy ?? "on-request") as ThreadForkResponse["approvalPolicy"],
+      approvalsReviewer: (settings.approvalsReviewer ?? "user") as ThreadForkResponse["approvalsReviewer"],
+      sandbox: (settings.sandbox ?? settings.sandboxPolicy ?? { type: "readOnly" }) as ThreadForkResponse["sandbox"],
+      activePermissionProfile: (settings.activePermissionProfile ?? null) as ThreadForkResponse["activePermissionProfile"],
+      reasoningEffort: (settings.reasoningEffort ?? settings.effort ?? null) as ThreadForkResponse["reasoningEffort"],
+      multiAgentMode: "explicitRequestOnly",
+    };
+  }
+
   public projectThreadCatalog(
     stockThreads: Thread[],
     claudeThreads: Thread[],

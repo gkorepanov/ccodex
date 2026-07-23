@@ -3,7 +3,10 @@ import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
 import type { Logger } from "../observability/logger.js";
 import { isRequest, isResponse, type RequestId, type RpcMessage } from "../protocol/envelopes.js";
+import { v7 as uuidv7 } from "uuid";
+import { projectRpcToPublicThread } from "./logicalThreadProjection.js";
 import type { StockRpc } from "./stockRpc.js";
+import type { SubscriptionHub } from "./subscriptions.js";
 
 export const STOCK_SIDE_THREAD_SOURCE = "ccodexSide";
 export const STOCK_SIDE_DISCONNECT_GRACE_MS = 60 * 60_000;
@@ -45,6 +48,10 @@ export class StockSideThreads {
   private readonly cleanupTimers = new Map<string, NodeJS.Timeout>();
   private readonly publicParents = new Map<string, string>();
   private readonly publicSources = new Map<string, string>();
+  private readonly publicIds = new Map<string, string>();
+  private readonly optimisticBySource = new Map<string, string[]>();
+  private readonly serverRequests = new Map<string, RequestId>();
+  private readonly serverRequestAliases = new Map<string, string>();
   private closed = false;
 
   public constructor(
@@ -128,7 +135,95 @@ export class StockSideThreads {
     return { ...result, thread: this.projectThread(result.thread) };
   }
 
-  public projectMessage(connectionId: string, message: RpcMessage): RpcMessage {
+  public async prepareOptimisticSide(
+    params: ThreadForkParams,
+    publicSourceThreadId: string,
+    publicSideThreadId: string,
+  ): Promise<{ response: ThreadForkResponse; backendThreadId: string }> {
+    this.publicSources.set(params.threadId, publicSourceThreadId);
+    const pending = this.optimisticBySource.get(params.threadId) ?? [];
+    pending.push(publicSideThreadId);
+    this.optimisticBySource.set(params.threadId, pending);
+    try {
+      const response = await this.cleanupStock.request("thread/fork", {
+        ...params,
+        ephemeral: false,
+        threadSource: STOCK_SIDE_THREAD_SOURCE,
+      }) as ThreadForkResponse;
+      this.bindOptimistic(response.thread, publicSideThreadId);
+      return {
+        response: { ...response, thread: this.projectThread(response.thread) },
+        backendThreadId: response.thread.id,
+      };
+    } finally {
+      const queued = this.optimisticBySource.get(params.threadId);
+      const index = queued?.indexOf(publicSideThreadId) ?? -1;
+      if (index >= 0) queued!.splice(index, 1);
+      if (queued?.length === 0) this.optimisticBySource.delete(params.threadId);
+    }
+  }
+
+  public async discardOptimistic(publicThreadId: string): Promise<void> {
+    const backend = [...this.publicIds].find(([, publicId]) => publicId === publicThreadId)?.[0];
+    if (!backend) return;
+    await this.cleanupStock.request("thread/delete", { threadId: backend });
+    this.forget(backend);
+  }
+
+  public request(method: string, params: unknown): Promise<unknown> {
+    return this.cleanupStock.request(method, params);
+  }
+
+  public captureDaemonMessage(message: RpcMessage, subscriptions: SubscriptionHub): boolean {
+    const projected = this.projectMessage("ccodex-side-daemon", message, false);
+    if (projected === message) return false;
+    if (!projected || !("method" in projected)) return true;
+    const params = projected.params && typeof projected.params === "object"
+      ? projected.params as { threadId?: unknown; thread?: { id?: unknown } }
+      : undefined;
+    const threadId = typeof params?.threadId === "string"
+      ? params.threadId
+      : typeof params?.thread?.id === "string" ? params.thread.id : undefined;
+    if (!threadId) return true;
+    if (projected.method === "serverRequest/resolved") {
+      const params = projected.params as Record<string, unknown>;
+      const providerRequestId = params.requestId;
+      const requestId = providerRequestId === undefined
+        ? undefined
+        : this.serverRequestAliases.get(String(providerRequestId));
+      if (!requestId) return true;
+      subscriptions.emitPublic(threadId, projected.method, { ...params, requestId });
+      this.serverRequestAliases.delete(String(providerRequestId));
+      this.serverRequests.delete(requestId);
+      return true;
+    }
+    if (isRequest(projected)) {
+      const requestId = `optimistic-stock:${uuidv7()}`;
+      this.serverRequests.set(requestId, projected.id);
+      this.serverRequestAliases.set(String(projected.id), requestId);
+      if (!subscriptions.request(threadId, requestId, projected.method, projected.params)) {
+        this.serverRequests.delete(requestId);
+        void this.cleanupStock.respond(projected.id, { decision: "decline" });
+      }
+    } else {
+      subscriptions.emitPublic(threadId, projected.method, projected.params);
+    }
+    return true;
+  }
+
+  public async resolveServerRequest(requestId: string, result: unknown): Promise<boolean> {
+    const providerRequestId = this.serverRequests.get(requestId);
+    if (providerRequestId === undefined) return false;
+    this.serverRequests.delete(requestId);
+    await this.cleanupStock.respond(providerRequestId, result);
+    return true;
+  }
+
+  public projectMessage(
+    connectionId: string,
+    message: RpcMessage,
+    trackConnection = true,
+  ): RpcMessage | undefined {
     if (!this.enabled) return message;
     if (isResponse(message)) {
       const pending = this.pending.get(requestKey(connectionId, message.id));
@@ -158,20 +253,32 @@ export class StockSideThreads {
       }
     }
     const thread = this.resultThread(container);
-    if (!thread) return message;
+    if (!thread) {
+      const params = "params" in message && message.params && typeof message.params === "object"
+        ? message.params as { threadId?: unknown }
+        : undefined;
+      const backendThreadId = typeof params?.threadId === "string" ? params.threadId : undefined;
+      const publicThreadId = backendThreadId ? this.publicIds.get(backendThreadId) : undefined;
+      return publicThreadId
+        ? projectRpcToPublicThread(message, { backendThreadId: backendThreadId!, publicThreadId })
+        : message;
+    }
     if (isMarked(thread)) {
-      this.attach(connectionId, thread.id);
+      if (trackConnection) this.attach(connectionId, thread.id);
+      this.bindOptimistic(thread);
       this.rememberPublicParent(thread);
     }
-    if (!this.hidden.has(thread.id)) return message;
+    const publicThreadId = this.publicIds.get(thread.id);
+    if (publicThreadId && "method" in message && message.method === "thread/started") return undefined;
+    const publicParent = thread.forkedFromId
+      ? this.publicIds.get(thread.forkedFromId) ?? this.publicSources.get(thread.forkedFromId)
+      : undefined;
+    const parentProjected = publicParent
+      ? this.replaceThread(message, { ...thread, forkedFromId: publicParent })
+      : message;
+    if (!this.hidden.has(thread.id)) return parentProjected;
     const projected = this.projectThread(thread);
-    if ("result" in message) {
-      return { ...message, result: { ...(message.result as Record<string, unknown>), thread: projected } };
-    }
-    if ("params" in message) {
-      return { ...message, params: { ...(message.params as Record<string, unknown>), thread: projected } } as RpcMessage;
-    }
-    return message;
+    return this.replaceThread(parentProjected, projected);
   }
 
   public filterThreads(threads: readonly Thread[]): Thread[] {
@@ -202,6 +309,10 @@ export class StockSideThreads {
     this.pending.clear();
     this.publicParents.clear();
     this.publicSources.clear();
+    this.publicIds.clear();
+    this.optimisticBySource.clear();
+    this.serverRequests.clear();
+    this.serverRequestAliases.clear();
   }
 
   private resultThread(value: unknown): Thread | undefined {
@@ -268,6 +379,7 @@ export class StockSideThreads {
     this.cleanupTimers.delete(threadId);
     this.hidden.delete(threadId);
     this.publicParents.delete(threadId);
+    this.publicIds.delete(threadId);
     for (const connectionId of this.connectionsByThread.get(threadId) ?? []) {
       const threads = this.threadsByConnection.get(connectionId);
       threads?.delete(threadId);
@@ -285,10 +397,37 @@ export class StockSideThreads {
   private projectThread(thread: Thread): Thread {
     return {
       ...thread,
+      id: this.publicIds.get(thread.id) ?? thread.id,
       ephemeral: true,
       path: null,
       threadSource: "user",
-      forkedFromId: this.publicParents.get(thread.id) ?? thread.forkedFromId,
+      forkedFromId: this.publicParents.get(thread.id)
+        ?? (thread.forkedFromId
+          ? this.publicIds.get(thread.forkedFromId) ?? this.publicSources.get(thread.forkedFromId)
+            ?? thread.forkedFromId
+          : null),
     };
+  }
+
+  private bindOptimistic(thread: Thread, requestedPublicId?: string): void {
+    const pending = thread.forkedFromId ? this.optimisticBySource.get(thread.forkedFromId) : undefined;
+    const publicId = requestedPublicId ?? pending?.shift();
+    if (!publicId) return;
+    if (requestedPublicId && pending) {
+      const index = pending.indexOf(requestedPublicId);
+      if (index >= 0) pending.splice(index, 1);
+    }
+    if (pending?.length === 0 && thread.forkedFromId) this.optimisticBySource.delete(thread.forkedFromId);
+    this.publicIds.set(thread.id, publicId);
+  }
+
+  private replaceThread(message: RpcMessage, thread: Thread): RpcMessage {
+    if ("result" in message) {
+      return { ...message, result: { ...(message.result as Record<string, unknown>), thread } };
+    }
+    if ("params" in message) {
+      return { ...message, params: { ...(message.params as Record<string, unknown>), thread } } as RpcMessage;
+    }
+    return message;
   }
 }

@@ -145,6 +145,7 @@ Return only the title.
 
 [features]
 status_command = false # forward /ccstatus and /ccstate to the provider as plain messages
+optimistic_side_startup = true # open `/side` immediately while provider context is prepared
 ```
 
 Remove or comment out `rename_prompt` for byte-compatible stock Codex title generation.

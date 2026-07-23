@@ -28,6 +28,7 @@ import { connectStock } from "../codex/stockConnection.js";
 import { StockRpc } from "./stockRpc.js";
 import { isRequest, parseRpcMessage } from "../protocol/envelopes.js";
 import { StockSideThreads } from "./stockSideThreads.js";
+import { OptimisticSideThreads } from "./optimisticSideThreads.js";
 
 export interface GatewayServer {
   stop(): Promise<void>;
@@ -80,6 +81,11 @@ async function startGatewayOwner(
   handoffs.configureSubscriptions(subscriptions);
   const handoffStock = connectStock(stock.socketPath);
   const handoffStockRpc = new StockRpc(handoffStock);
+  const stockSideThreads = new StockSideThreads(
+    features.sideChatPromotion,
+    handoffStockRpc,
+    logger,
+  );
   handoffStock.on("message", (data, isBinary) => {
     const message = isBinary ? undefined : parseRpcMessage(data);
     if (!message || handoffStockRpc.handle(message) || !("method" in message)) return;
@@ -87,17 +93,16 @@ async function startGatewayOwner(
     const target = !internal
       && handoffs.suppressStockTargetMessage(HANDOFF_DAEMON_CONNECTION_ID, message);
     const projected = !internal && !target && handoffs.projectStockMessage(message);
-    if ((internal || target) && !projected && isRequest(message) && handoffStock.readyState === WebSocket.OPEN) {
+    const side = !internal && !target && !projected
+      && stockSideThreads.captureDaemonMessage(message, subscriptions);
+    if ((internal || target || side) && !projected && isRequest(message) && handoffStock.readyState === WebSocket.OPEN) {
+      if (side) return;
       handoffStock.send(JSON.stringify({ id: message.id, result: { decision: "decline" } }));
     }
   });
   await handoffStockRpc.initialize();
   handoffs.configureDaemonStock(handoffStockRpc);
-  const stockSideThreads = new StockSideThreads(
-    features.sideChatPromotion,
-    handoffStockRpc,
-    logger,
-  );
+  const optimisticSideThreads = new OptimisticSideThreads();
   await stockSideThreads.recover().catch((error: unknown) => {
     logger.warn("stock.side.recovery-failed", { error: String(error) });
   });
@@ -137,6 +142,7 @@ async function startGatewayOwner(
         providerAvailability,
         stockState,
         stockSideThreads,
+        features.optimisticSideStartup ? optimisticSideThreads : undefined,
       );
       connectionCleanups.add(connection.closed);
       const untrack = () => connectionCleanups.delete(connection.closed);
@@ -170,6 +176,7 @@ async function startGatewayOwner(
     if (remoteControl) relay = await startRemoteRelay(socketPath, remoteControl, logger);
   } catch (error) {
     stockSideThreads.close();
+    optimisticSideThreads.close();
     await closeConnections();
     await handoffs.drain();
     handoffStockRpc.close(new Error("Gateway startup failed."));
@@ -188,6 +195,7 @@ async function startGatewayOwner(
     async stop(): Promise<void> {
       await relay?.stop();
       stockSideThreads.close();
+      optimisticSideThreads.close();
       await closeConnections();
       await handoffs.drain();
       handoffStockRpc.close(new Error("Gateway shutting down."));

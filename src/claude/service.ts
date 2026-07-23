@@ -497,6 +497,29 @@ export class ClaudeService {
     return threadSettings(this.requireRecord(threadId, false));
   }
 
+  public sideSnapshot(
+    sourceThreadId: string,
+    targetThreadId: string,
+    visibleForkedFromId: string,
+  ): ThreadForkResponse {
+    const record = this.requireRecord(sourceThreadId, false);
+    const response = threadResponse(record, false);
+    return {
+      ...response,
+      thread: {
+        ...record.thread,
+        id: targetThreadId,
+        forkedFromId: visibleForkedFromId,
+        ephemeral: true,
+        path: null,
+        threadSource: "user",
+        status: { type: "idle" },
+        name: record.thread.name,
+        turns: [],
+      },
+    };
+  }
+
   public loadedThreadIds(): string[] {
     const loaded = new Set(this.sessions.loadedOwnerIds());
     for (const record of this.store.allThreadRecords()) {
@@ -1219,7 +1242,9 @@ export class ClaudeService {
       sessionId: sourceRecord.thread.sessionId, forkedFromId: visibleForkedFromId,
       cwd, modelProvider: "claude", createdAt, updatedAt: createdAt, recencyAt: createdAt,
       status: params.ephemeral ? { type: "idle" } : { type: "notLoaded" },
-      name: sourceRecord.thread.name ? `${sourceRecord.thread.name} (fork)` : null,
+      name: params.ephemeral
+        ? sourceRecord.thread.name
+        : sourceRecord.thread.name ? `${sourceRecord.thread.name} (fork)` : null,
       threadSource: params.threadSource ?? sourceRecord.thread.threadSource, turns: [],
     };
     const copiedTurns = sourceTurns.map((turn) => forkProjection(turn, thread.id));

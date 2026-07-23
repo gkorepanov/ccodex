@@ -6,6 +6,7 @@ import {
   STOCK_SIDE_THREAD_SOURCE,
   StockSideThreads,
 } from "../../src/gateway/stockSideThreads.js";
+import { SubscriptionHub } from "../../src/gateway/subscriptions.js";
 
 function thread(id: string, threadSource = STOCK_SIDE_THREAD_SOURCE): Thread {
   return {
@@ -99,6 +100,75 @@ describe("stock side-chat promotion", () => {
       ephemeral: true,
       path: null,
       threadSource: "user",
+    });
+    sides.close();
+  });
+
+  it("binds an optimistic public id and suppresses the later provider thread/started", async () => {
+    const native = thread("native-side");
+    native.forkedFromId = "stock-backend";
+    const stock = {
+      request: vi.fn(async () => ({
+        thread: native,
+        model: "gpt-5.6-terra",
+        modelProvider: "openai",
+        serviceTier: null,
+      })),
+      respond: vi.fn(async () => undefined),
+    };
+    const sides = new StockSideThreads(true, stock as never, new Logger("error"));
+
+    const prepared = await sides.prepareOptimisticSide({
+      threadId: "stock-backend",
+      ephemeral: true,
+      excludeTurns: true,
+      threadSource: "user",
+    }, "public-parent", "public-side");
+
+    expect(prepared).toMatchObject({
+      backendThreadId: "native-side",
+      response: { thread: {
+        id: "public-side",
+        forkedFromId: "public-parent",
+        ephemeral: true,
+      } },
+    });
+    expect(sides.projectMessage("daemon", {
+      method: "thread/started",
+      params: { thread: native },
+    }, false)).toBeUndefined();
+    expect(sides.projectMessage("daemon", {
+      method: "turn/started",
+      params: { threadId: "native-side", turn: { id: "turn" } },
+    }, false)).toMatchObject({
+      params: { threadId: "public-side" },
+    });
+
+    const hub = new SubscriptionHub();
+    let approvalId = "";
+    hub.subscribe("public-side", "app", vi.fn(), (id) => { approvalId = id; });
+    expect(sides.captureDaemonMessage({
+      id: "provider-approval",
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "native-side", turnId: "turn", itemId: "item" },
+    }, hub)).toBe(true);
+    expect(approvalId).toMatch(/^optimistic-stock:/);
+    await sides.resolveServerRequest(approvalId, { decision: "accept" });
+    expect(stock.respond).toHaveBeenCalledWith("provider-approval", { decision: "accept" });
+    const resolved = vi.fn();
+    hub.subscribe("public-side", "app", resolved);
+    expect(sides.captureDaemonMessage({
+      method: "serverRequest/resolved",
+      params: {
+        threadId: "native-side",
+        requestId: "provider-approval",
+        decision: "accept",
+      },
+    }, hub)).toBe(true);
+    expect(resolved).toHaveBeenCalledWith("serverRequest/resolved", {
+      threadId: "public-side",
+      requestId: approvalId,
+      decision: "accept",
     });
     sides.close();
   });

@@ -1782,7 +1782,9 @@ describe("ClaudeService", () => {
     directories.push(directory);
     const disabled = {
       ...config(directory),
-      features: { statusCommand: true, sideChatPromotion: false, interactiveQuestions: true },
+      features: {
+        statusCommand: true, sideChatPromotion: false, optimisticSideStartup: true, interactiveQuestions: true,
+      },
     };
     const service = new ClaudeService(
       disabled, new SubscriptionHub(), new Logger("error"),

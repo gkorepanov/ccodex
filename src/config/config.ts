@@ -33,6 +33,7 @@ export interface HybridConfig {
 export interface FeatureConfig {
   readonly statusCommand: boolean;
   readonly sideChatPromotion: boolean;
+  readonly optimisticSideStartup: boolean;
   readonly interactiveQuestions: boolean;
 }
 
@@ -61,6 +62,7 @@ interface ConfigFile {
 export const DEFAULT_FEATURES: FeatureConfig = {
   statusCommand: true,
   sideChatPromotion: true,
+  optimisticSideStartup: true,
   interactiveQuestions: true,
 };
 
@@ -79,6 +81,7 @@ ${DEFAULT_RENAME_PROMPT}
 [features]
 status_command = true
 side_chat_promotion = true
+optimistic_side_startup = true
 interactive_questions = true
 `;
 }
@@ -123,7 +126,9 @@ function featureConfig(value: unknown): FeatureConfig {
     throw new Error("[features] must be a TOML table.");
   }
   const table = value as Record<string, unknown>;
-  for (const key of ["status_command", "side_chat_promotion", "interactive_questions"] as const) {
+  for (const key of [
+    "status_command", "side_chat_promotion", "optimistic_side_startup", "interactive_questions",
+  ] as const) {
     if (table[key] !== undefined && typeof table[key] !== "boolean") {
       throw new Error(`features.${key} must be a boolean.`);
     }
@@ -131,6 +136,7 @@ function featureConfig(value: unknown): FeatureConfig {
   return {
     statusCommand: table.status_command as boolean | undefined ?? true,
     sideChatPromotion: table.side_chat_promotion as boolean | undefined ?? true,
+    optimisticSideStartup: table.optimistic_side_startup as boolean | undefined ?? true,
     interactiveQuestions: table.interactive_questions as boolean | undefined ?? true,
   };
 }

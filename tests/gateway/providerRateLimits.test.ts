@@ -21,6 +21,7 @@ import { DEFAULT_FEATURES, type FeatureConfig } from "../../src/config/config.js
 import { STOCK_SIDE_THREAD_SOURCE, StockSideThreads } from "../../src/gateway/stockSideThreads.js";
 import { Logger } from "../../src/observability/logger.js";
 import { CursorCodec } from "../../src/protocol/cursor.js";
+import { OptimisticSideThreads } from "../../src/gateway/optimisticSideThreads.js";
 
 const claudeSnapshot: ClaudeRateLimitsResponse = mapClaudeUsage({
   session: {
@@ -78,6 +79,34 @@ function stockThread(id: string) {
         },
       ],
     }],
+  };
+}
+
+function sideSnapshot(sourceId: string, targetId: string, provider: "claude" | "stock") {
+  return {
+    thread: {
+      ...stockThread(targetId),
+      sessionId: sourceId,
+      forkedFromId: sourceId,
+      ephemeral: true,
+      modelProvider: provider === "claude" ? "claude" : "openai",
+      threadSource: "user",
+      path: null,
+      name: "Side",
+      turns: [],
+    },
+    model: provider === "claude" ? "claude:sonnet" : "gpt-5.6-terra",
+    modelProvider: provider === "claude" ? "claude" : "openai",
+    serviceTier: null,
+    cwd: "/tmp",
+    runtimeWorkspaceRoots: ["/tmp"],
+    instructionSources: [],
+    approvalPolicy: "on-request",
+    approvalsReviewer: "user",
+    sandbox: { type: "readOnly" },
+    activePermissionProfile: null,
+    reasoningEffort: "high",
+    multiAgentMode: "explicitRequestOnly",
   };
 }
 
@@ -239,8 +268,10 @@ async function makeHarness(
     refresh(provider: "claude" | "codex"): Promise<{ provider: "claude" | "codex"; state: string; action?: string }>;
     refreshAll(): Promise<Record<"claude" | "codex", { provider: "claude" | "codex"; state: string; action?: string }>>;
   },
-  stockForkResult: unknown | ((params: Record<string, any>) => unknown) = { thread: { id: "stock-fork" } },
+  stockForkResult: unknown | ((params: Record<string, any>) => unknown | Promise<unknown>) = { thread: { id: "stock-fork" } },
   sideThreads?: StockSideThreads,
+  optimisticSides?: OptimisticSideThreads,
+  sharedSubscriptions?: SubscriptionHub,
 ): Promise<Harness> {
   const socket = join(tmpdir(), `ccodex-rate-${randomUUID()}.sock`);
   const server: Server = createServer();
@@ -306,12 +337,15 @@ async function makeHarness(
           },
         }));
       }
-      else if (request.method === "thread/fork") ws.send(JSON.stringify({
-        id: request.id,
-        result: typeof stockForkResult === "function"
+      else if (request.method === "thread/fork") {
+        const result = typeof stockForkResult === "function"
           ? stockForkResult(request.params as Record<string, any>)
-          : stockForkResult,
-      }));
+          : stockForkResult;
+        void Promise.resolve(result).then((resolved) => ws.send(JSON.stringify({
+          id: request.id,
+          result: resolved,
+        })));
+      }
       else if (request.method === "thread/read") ws.send(JSON.stringify({
         id: request.id,
         result: { thread: stockThread((request.params as any).threadId) },
@@ -324,7 +358,7 @@ async function makeHarness(
     server.listen(socket, resolve);
   });
   const client = new FakeClient();
-  const subscriptions = new SubscriptionHub();
+  const subscriptions = sharedSubscriptions ?? new SubscriptionHub();
   const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const systemEphemeralThreads = new Set<string>();
   const noHandoffs = {
@@ -347,6 +381,7 @@ async function makeHarness(
     pending: () => undefined, overlay: (threadId: string) => threadId === overlayThreadId ? { threadId } : undefined,
     projectThreadCatalog: (stock: unknown[], claudeThreads: unknown[]) => [...stock, ...claudeThreads],
     projectLoadedThreadIds: (stock: string[], claudeThreads: string[]) => [...stock, ...claudeThreads],
+    sideSnapshot: () => undefined,
     resumeOverlay: async (params: { threadId: string }) => ({ thread: { id: params.threadId } }),
     clearThread() {}, prepareTitleTurn: (_id: string, params: unknown) => params,
     rewriteTitleMessages: () => undefined, suppressStockTargetMessage: () => false, ownsInternalStockThread: () => false,
@@ -370,6 +405,7 @@ async function makeHarness(
     availability as never,
     undefined,
     sideThreads,
+    optimisticSides,
   );
   while (stockClients.size === 0) await new Promise((resolve) => setTimeout(resolve, 1));
   const harness: Harness = {
@@ -382,6 +418,7 @@ async function makeHarness(
       wss.close();
       await unlink(socket).catch(() => undefined);
       sideThreads?.close();
+      optimisticSides?.close();
     },
   };
   harnesses.push(harness);
@@ -947,7 +984,9 @@ describe("provider-aware rate-limit gateway routing", () => {
       claude,
       undefined,
       undefined,
-      { statusCommand: false, sideChatPromotion: true, interactiveQuestions: true },
+      {
+        statusCommand: false, sideChatPromotion: true, optimisticSideStartup: true, interactiveQuestions: true,
+      },
     );
 
     harness.client.request("status", "turn/start", {
@@ -1430,6 +1469,287 @@ describe("provider-aware rate-limit gateway routing", () => {
     expect(messages(harness, "thread/name/updated")).toContainEqual({
       method: "thread/name/updated",
       params: { threadId: renamed.id, threadName: renamed.name },
+    });
+  });
+
+  it("opens a logical Claude /side before provider readiness and queues boundary before Send", async () => {
+    const claude = fakeClaude();
+    claude.threads.add("claude-backend");
+    let finish!: (value: any) => void;
+    claude.forkThread.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const optimistic = new OptimisticSideThreads();
+    const harness = await makeHarness(
+      claude,
+      undefined,
+      undefined,
+      DEFAULT_FEATURES,
+      {
+        logical: (threadId: string) => threadId === "public-thread"
+          ? { epoch: { provider: "claude", backendThreadId: "claude-backend" } }
+          : undefined,
+        sideSnapshot: (params: { threadId: string }, targetId: string) =>
+          sideSnapshot(params.threadId, targetId, "claude"),
+        forkLogical: vi.fn(),
+      },
+      undefined,
+      undefined,
+      undefined,
+      optimistic,
+    );
+
+    harness.client.request("side-open", "thread/fork", {
+      threadId: "public-thread",
+      threadSource: "user",
+      excludeTurns: true,
+      ephemeral: true,
+    });
+    await settle();
+    const opened = messages(harness, "side-open")[0]?.result;
+    const publicSideId = opened?.thread?.id;
+    expect(opened?.thread).toMatchObject({
+      forkedFromId: "public-thread",
+      ephemeral: true,
+      turns: [],
+    });
+    expect(messages(harness, "thread/started").filter((value) =>
+      value.params?.thread?.id === publicSideId)).toHaveLength(1);
+
+    harness.client.request("boundary", "thread/inject_items", {
+      threadId: publicSideId,
+      items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Side conversation boundary." }] }],
+    });
+    harness.client.request("send", "turn/start", {
+      threadId: publicSideId,
+      input: [{ type: "text", text: "answer after readiness", text_elements: [] }],
+    });
+    await settle();
+    expect(messages(harness, "boundary")).toEqual([]);
+    expect(messages(harness, "send")).toEqual([]);
+    expect(claude.injectItems).not.toHaveBeenCalled();
+    expect(claude.prepareTurn).not.toHaveBeenCalled();
+
+    finish(sideSnapshot("public-thread", "claude-side-backend", "claude"));
+    await settle();
+    expect(messages(harness, "boundary")[0]).toEqual({ id: "boundary", result: {} });
+    expect(messages(harness, "send")[0]).toMatchObject({ result: { turn: { id: "turn-claude-side-backend" } } });
+    expect(claude.injectItems.mock.invocationCallOrder[0])
+      .toBeLessThan(claude.prepareTurn.mock.invocationCallOrder[0]!);
+    expect((harness.client.sent as any[]).some((message) =>
+      message.params?.threadId === "claude-side-backend"
+      || message.params?.thread?.id === "claude-side-backend"
+      || message.result?.thread?.id === "claude-side-backend")).toBe(false);
+  });
+
+  it("opens a logical stock /side before the hidden rollout is ready and preserves FIFO", async () => {
+    let finish!: (value: unknown) => void;
+    const providerFork = new Promise((resolve) => { finish = resolve; });
+    const sideRequests: string[] = [];
+    const stockSides = {
+      prepareOptimisticSide: vi.fn(async () => {
+        await providerFork;
+        return { response: {}, backendThreadId: "stock-side-backend" };
+      }),
+      request: vi.fn(async (method: string) => {
+        sideRequests.push(method);
+        return {};
+      }),
+      discardOptimistic: vi.fn(async () => undefined),
+      resolveServerRequest: vi.fn(async () => false),
+      projectMessage: (_connectionId: string, message: unknown) => message,
+      filterThreads: (threads: unknown[]) => threads,
+      detachConnection: vi.fn(),
+      close: vi.fn(),
+    } as unknown as StockSideThreads;
+    const optimistic = new OptimisticSideThreads();
+    const harness = await makeHarness(
+      fakeClaude(),
+      undefined,
+      undefined,
+      DEFAULT_FEATURES,
+      {
+        logical: (threadId: string) => threadId === "public-stock"
+          ? { epoch: { provider: "stock", backendThreadId: "stock-backend" } }
+          : undefined,
+        sideSnapshot: (params: { threadId: string }, targetId: string) =>
+          sideSnapshot(params.threadId, targetId, "stock"),
+        forkLogical: vi.fn(),
+      },
+      undefined,
+      undefined,
+      stockSides,
+      optimistic,
+    );
+
+    harness.client.request("side-open", "thread/fork", {
+      threadId: "public-stock",
+      threadSource: "user",
+      excludeTurns: true,
+      ephemeral: true,
+    });
+    await settle();
+    const publicSideId = messages(harness, "side-open")[0]?.result?.thread?.id;
+    expect(publicSideId).toEqual(expect.any(String));
+
+    harness.client.request("boundary", "thread/inject_items", {
+      threadId: publicSideId,
+      items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "boundary" }] }],
+    });
+    harness.client.request("send", "turn/start", {
+      threadId: publicSideId,
+      input: [{ type: "text", text: "queued", text_elements: [] }],
+    });
+    await settle();
+    expect(sideRequests).not.toContain("thread/inject_items");
+    expect(sideRequests).not.toContain("turn/start");
+
+    finish({});
+    await settle();
+    expect(messages(harness, "boundary")[0]).toEqual({ id: "boundary", result: {} });
+    expect(messages(harness, "send")[0]).toEqual({ id: "send", result: {} });
+    expect(sideRequests.indexOf("thread/inject_items")).toBeLessThan(sideRequests.indexOf("turn/start"));
+    expect(JSON.stringify(harness.client.sent)).not.toContain("stock-side-backend");
+  });
+
+  it("keeps a queued Claude side turn across App disconnect and resumes the same public side", async () => {
+    const claude = fakeClaude();
+    claude.threads.add("claude-backend");
+    let finish!: (value: any) => void;
+    claude.forkThread.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const optimistic = new OptimisticSideThreads();
+    const subscriptions = new SubscriptionHub();
+    const handoffs = {
+      logical: (threadId: string) => threadId === "public-thread"
+        ? { epoch: { provider: "claude", backendThreadId: "claude-backend" } }
+        : undefined,
+      sideSnapshot: (params: { threadId: string }, targetId: string) =>
+        sideSnapshot(params.threadId, targetId, "claude"),
+      forkLogical: vi.fn(),
+    };
+    const first = await makeHarness(
+      claude, undefined, undefined, DEFAULT_FEATURES, handoffs,
+      undefined, undefined, undefined, optimistic, subscriptions,
+    );
+
+    first.client.request("side-open", "thread/fork", {
+      threadId: "public-thread",
+      threadSource: "user",
+      excludeTurns: true,
+      ephemeral: true,
+    });
+    await settle();
+    const publicSideId = messages(first, "side-open")[0]?.result?.thread?.id;
+    first.client.request("boundary", "thread/inject_items", {
+      threadId: publicSideId,
+      items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "boundary" }] }],
+    });
+    first.client.request("send", "turn/start", {
+      threadId: publicSideId,
+      input: [{ type: "text", text: "queued before disconnect", text_elements: [] }],
+    });
+    await settle();
+    first.client.readyState = WebSocket.CLOSED;
+    first.client.emit("close", 1006, Buffer.from("transport lost"));
+    await first.connection.closed;
+
+    finish(sideSnapshot("public-thread", "claude-side-backend", "claude"));
+    await settle();
+    expect(claude.injectItems).toHaveBeenCalledTimes(1);
+    expect(claude.prepareTurn).toHaveBeenCalledTimes(1);
+
+    const second = await makeHarness(
+      claude, undefined, undefined, DEFAULT_FEATURES, handoffs,
+      undefined, undefined, undefined, optimistic, subscriptions,
+    );
+    second.client.request("resume", "thread/resume", {
+      threadId: publicSideId,
+      excludeTurns: false,
+    });
+    await settle();
+
+    expect(messages(second, "resume")[0]).toMatchObject({
+      result: { thread: { id: publicSideId } },
+    });
+    expect(claude.prepareResume).toHaveBeenCalledWith(expect.objectContaining({
+      threadId: "claude-side-backend",
+    }));
+    expect(claude.replayPendingRequests).toHaveBeenCalledWith("claude-side-backend", expect.any(String));
+    expect(JSON.stringify(second.client.sent)).not.toContain("claude-side-backend");
+  });
+
+  it("reports a preparation failure once after reconnect instead of losing it with the old socket", async () => {
+    const claude = fakeClaude();
+    claude.threads.add("claude-backend");
+    let fail!: (error: Error) => void;
+    claude.forkThread.mockImplementation(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const optimistic = new OptimisticSideThreads();
+    const subscriptions = new SubscriptionHub();
+    const handoffs = {
+      logical: (threadId: string) => threadId === "public-thread"
+        ? { epoch: { provider: "claude", backendThreadId: "claude-backend" } }
+        : undefined,
+      sideSnapshot: (params: { threadId: string }, targetId: string) =>
+        sideSnapshot(params.threadId, targetId, "claude"),
+      forkLogical: vi.fn(),
+    };
+    const first = await makeHarness(
+      claude, undefined, undefined, DEFAULT_FEATURES, handoffs,
+      undefined, undefined, undefined, optimistic, subscriptions,
+    );
+    first.client.request("side-open", "thread/fork", {
+      threadId: "public-thread", threadSource: "user", excludeTurns: true, ephemeral: true,
+    });
+    await settle();
+    const publicSideId = messages(first, "side-open")[0]?.result?.thread?.id;
+    first.client.readyState = WebSocket.CLOSED;
+    first.client.emit("close", 1006, Buffer.from("transport lost"));
+    await first.connection.closed;
+    fail(new Error("provider fork exploded"));
+    await settle();
+
+    const second = await makeHarness(
+      claude, undefined, undefined, DEFAULT_FEATURES, handoffs,
+      undefined, undefined, undefined, optimistic, subscriptions,
+    );
+    second.client.request("resume-1", "thread/resume", { threadId: publicSideId });
+    second.client.request("resume-2", "thread/resume", { threadId: publicSideId });
+    await settle();
+
+    expect(messages(second, "resume-1")[0]).toMatchObject({
+      result: { thread: { id: publicSideId } },
+    });
+    expect(second.client.sent.filter((message: any) =>
+      message.method === "item/agentMessage/delta"
+      && String(message.params?.delta).includes("provider fork exploded"))).toHaveLength(1);
+  });
+
+  it("keeps synchronous side startup when the optimistic feature is disabled", async () => {
+    const claude = fakeClaude();
+    claude.threads.add("claude-backend");
+    let finish!: (value: any) => void;
+    claude.forkThread.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const features = { ...DEFAULT_FEATURES, optimisticSideStartup: false };
+    const harness = await makeHarness(claude, undefined, undefined, features, {
+      logical: (threadId: string) => threadId === "public-thread"
+        ? { epoch: { provider: "claude", backendThreadId: "claude-backend" } }
+        : undefined,
+      sideSnapshot: (params: { threadId: string }, targetId: string) =>
+        sideSnapshot(params.threadId, targetId, "claude"),
+      forkLogical: vi.fn(),
+    });
+
+    harness.client.request("side-open", "thread/fork", {
+      threadId: "public-thread",
+      threadSource: "user",
+      excludeTurns: true,
+      ephemeral: true,
+    });
+    await settle();
+    expect(messages(harness, "side-open")).toEqual([]);
+
+    finish(sideSnapshot("public-thread", "claude-side-backend", "claude"));
+    await settle();
+    expect(messages(harness, "side-open")[0]).toMatchObject({
+      result: { thread: { id: "claude-side-backend", ephemeral: true } },
     });
   });
 
