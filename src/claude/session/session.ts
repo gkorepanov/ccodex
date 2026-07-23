@@ -2240,24 +2240,12 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       return message.error || message.output.length > 0 ? "projected" : "stateOnly";
     }
     if (message.type === "rate_limit_event") {
-      void this.submitLineage({
+      await this.submitLineage({
         type: "runtimeLineage",
         action: "rateLimit",
         runtimeGeneration,
         info: message.rate_limit_info,
       });
-      if (message.rate_limit_info.status !== "allowed") {
-        const reset = message.rate_limit_info.resetsAt
-          ? ` Resets at ${new Date(message.rate_limit_info.resetsAt).toISOString()}.`
-          : "";
-        await this.providerSystemMessage(
-          projection,
-          runtimeGeneration,
-          `Claude rate limit: ${message.rate_limit_info.status}.${reset}`,
-          message.rate_limit_info.status === "rejected" ? "error" : "info",
-        );
-        return "projected";
-      }
       return "stateOnly";
     }
     if (message.type === "conversation_reset") {

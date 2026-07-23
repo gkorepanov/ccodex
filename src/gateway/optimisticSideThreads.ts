@@ -107,9 +107,17 @@ export class OptimisticSideThreads {
   ): Promise<T> {
     const state = this.states.get(threadId);
     if (!state) return Promise.reject(new Error(`Unknown optimistic side thread '${threadId}'.`));
-    const result = state.tail.then(async () => operation(await state.ready));
+    const result = state.tail.then(async () => {
+      if (state.failure) throw state.failure;
+      return operation(await state.ready);
+    });
     state.tail = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  public fail(threadId: string, error: Error): void {
+    const state = this.states.get(threadId);
+    if (state && !state.failure) state.failure = error;
   }
 
   public attach(threadId: string, connectionId: string): void {

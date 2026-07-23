@@ -105,7 +105,7 @@ function resetSeconds(value: string | null): number | null {
   return Math.floor(millis / 1_000);
 }
 
-function eventResetSeconds(value: number | undefined): number | null {
+export function providerResetSeconds(value: number | undefined): number | null {
   if (value === undefined) return null;
   if (!Number.isFinite(value) || value < 0) throw new ClaudeUsageSchemaError(`Malformed Claude rate-limit reset value '${value}'.`);
   return Math.floor(value > 10_000_000_000 ? value / 1_000 : value);
@@ -179,7 +179,16 @@ interface CacheEntry {
   readonly complete: boolean;
 }
 
-type Listener = (response: ClaudeRateLimitsResponse) => void;
+export interface ClaudeRateLimitTransition {
+  readonly bucket: string;
+  readonly status: "allowed_warning" | "rejected";
+  readonly resetsAt: number | null;
+}
+
+type Listener = (
+  response: ClaudeRateLimitsResponse,
+  transition?: ClaudeRateLimitTransition,
+) => void;
 
 export interface ClaudeRateLimitCoordinatorOptions {
   readonly ttlMs?: number;
@@ -207,6 +216,7 @@ export class ClaudeRateLimitCoordinator {
   private cache: CacheEntry | undefined;
   private inFlight: Promise<ClaudeRateLimitsResponse> | undefined;
   private unavailableReason: string | null = "No authenticated Claude runtime is loaded.";
+  private readonly notices = new Map<string, ClaudeRateLimitTransition>();
 
   public constructor(private readonly logger: Logger, options: ClaudeRateLimitCoordinatorOptions = {}) {
     this.ttlMs = options.ttlMs ?? 60_000;
@@ -246,6 +256,7 @@ export class ClaudeRateLimitCoordinator {
     this.cache = undefined;
     this.inFlight = undefined;
     this.unavailableReason = `Claude authentication changed (${reason}).`;
+    this.notices.clear();
     this.logger.warn("claude.rate-limits.invalidated", { reason });
   }
 
@@ -284,16 +295,17 @@ export class ClaudeRateLimitCoordinator {
     }
     const target = eventTarget(info.rateLimitType);
     if (!target) return;
-    const response = structuredClone(this.cached());
+    const previousResponse = this.cached();
+    const response = structuredClone(previousResponse);
     const bucket = response.rateLimitsByLimitId[target.id]
       ?? snapshot(target.id, target.name, null, null, response.rateLimits.planType);
     const current = target.secondary ? response.rateLimits.secondary : bucket.primary;
     const incoming: ClaudeRateLimitWindow = {
       usedPercent: info.utilization === undefined ? current?.usedPercent ?? null : percent(info.utilization),
       windowDurationMins: target.duration,
-      resetsAt: info.resetsAt === undefined ? current?.resetsAt ?? null : eventResetSeconds(info.resetsAt),
+      resetsAt: info.resetsAt === undefined ? current?.resetsAt ?? null : providerResetSeconds(info.resetsAt),
     };
-    if (current && incoming.resetsAt !== null && current.resetsAt !== null) {
+    if (info.status !== "allowed" && current && incoming.resetsAt !== null && current.resetsAt !== null) {
       if (incoming.resetsAt < current.resetsAt) return;
       if (incoming.resetsAt === current.resetsAt && incoming.usedPercent !== null && current.usedPercent !== null
         && incoming.usedPercent < current.usedPercent) return;
@@ -301,7 +313,7 @@ export class ClaudeRateLimitCoordinator {
     const previousReached = target.id === "claude" ? response.rateLimits.rateLimitReachedType : bucket.rateLimitReachedType;
     const reached: ClaudeRateLimitSnapshot["rateLimitReachedType"] = info.status === "rejected"
       ? "rate_limit_reached"
-      : previousReached;
+      : info.status === "allowed" ? null : previousReached;
     if (target.id === "claude" && target.secondary) {
       response.rateLimits = { ...response.rateLimits, limitName: "Claude", secondary: incoming, rateLimitReachedType: reached };
     } else {
@@ -310,6 +322,23 @@ export class ClaudeRateLimitCoordinator {
       if (target.id === "claude") response.rateLimits = next;
     }
     response.rateLimitsByLimitId.claude = response.rateLimits;
+    const noticeBucket = `${target.id}:${target.secondary ? "secondary" : "primary"}`;
+    let transition: ClaudeRateLimitTransition | undefined;
+    if (info.status === "allowed") {
+      this.notices.delete(noticeBucket);
+    } else {
+      const candidate: ClaudeRateLimitTransition = {
+        bucket: noticeBucket,
+        status: info.status,
+        resetsAt: incoming.resetsAt,
+      };
+      const previous = this.notices.get(noticeBucket);
+      if (!previous || previous.status !== candidate.status || previous.resetsAt !== candidate.resetsAt) {
+        this.notices.set(noticeBucket, candidate);
+        transition = candidate;
+      }
+    }
+    if (JSON.stringify(previousResponse) === JSON.stringify(response) && !transition) return;
     this.cache = {
       response,
       fetchedAt: this.now(),
@@ -317,7 +346,7 @@ export class ClaudeRateLimitCoordinator {
       complete: this.cache?.complete ?? false,
     };
     if (hasRateLimitWindows(response)) this.unavailableReason = null;
-    for (const listener of this.listeners.values()) listener(response);
+    for (const listener of this.listeners.values()) listener(response, transition);
   }
 
   private async refresh(): Promise<ClaudeRateLimitsResponse> {

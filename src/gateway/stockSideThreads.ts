@@ -1,3 +1,5 @@
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
@@ -19,6 +21,10 @@ interface Pending {
   readonly threadId?: string;
 }
 
+export type StockSideProjection =
+  | { readonly kind: "drop" }
+  | { readonly kind: "forward"; readonly message: RpcMessage };
+
 function requestKey(connectionId: string, id: RequestId): string {
   return `${connectionId}:${typeof id}:${id}`;
 }
@@ -29,6 +35,29 @@ function isThread(value: unknown): value is Thread {
 
 function isMarked(thread: Thread): boolean {
   return thread.threadSource === STOCK_SIDE_THREAD_SOURCE;
+}
+
+async function hasPersistedMarker(thread: Thread): Promise<boolean> {
+  if (isMarked(thread)) return true;
+  if (!thread.path) return false;
+  const input = createReadStream(thread.path, { encoding: "utf8" });
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      const record = JSON.parse(line) as {
+        type?: unknown;
+        payload?: { thread_source?: unknown };
+      };
+      return record.type === "session_meta"
+        && record.payload?.thread_source === STOCK_SIDE_THREAD_SOURCE;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    lines.close();
+    input.destroy();
+  }
 }
 
 function userSideFork(params: ThreadForkParams): boolean {
@@ -70,7 +99,7 @@ export class StockSideThreads {
         nextCursor: string | null;
       };
       for (const thread of result.data) {
-        if (!isMarked(thread)) continue;
+        if (!await hasPersistedMarker(thread)) continue;
         this.hidden.add(thread.id);
         const ageMs = Math.max(0, Date.now() - thread.updatedAt * 1_000);
         this.scheduleCleanup(thread.id, Math.max(0, this.graceMs - ageMs));
@@ -175,9 +204,10 @@ export class StockSideThreads {
   }
 
   public captureDaemonMessage(message: RpcMessage, subscriptions: SubscriptionHub): boolean {
-    const projected = this.projectMessage("ccodex-side-daemon", message, false);
-    if (projected === message) return false;
-    if (!projected || !("method" in projected)) return true;
+    const projection = this.projectMessage("ccodex-side-daemon", message, false);
+    if (projection.kind === "forward" && projection.message === message) return false;
+    if (projection.kind === "drop" || !("method" in projection.message)) return true;
+    const projected = projection.message;
     const params = projected.params && typeof projected.params === "object"
       ? projected.params as { threadId?: unknown; thread?: { id?: unknown } }
       : undefined;
@@ -223,8 +253,9 @@ export class StockSideThreads {
     connectionId: string,
     message: RpcMessage,
     trackConnection = true,
-  ): RpcMessage | undefined {
-    if (!this.enabled) return message;
+  ): StockSideProjection {
+    const forward = (projected: RpcMessage): StockSideProjection => ({ kind: "forward", message: projected });
+    if (!this.enabled) return forward(message);
     if (isResponse(message)) {
       const pending = this.pending.get(requestKey(connectionId, message.id));
       this.pending.delete(requestKey(connectionId, message.id));
@@ -240,7 +271,7 @@ export class StockSideThreads {
     const container = "result" in message
       ? message.result
       : "params" in message ? message.params : undefined;
-    if (!container || typeof container !== "object") return message;
+    if (!container || typeof container !== "object") return forward(message);
     if ("result" in message && Array.isArray((container as { data?: unknown }).data)) {
       const data = (container as { data: unknown[] }).data;
       const visible = data.filter((entry) => {
@@ -249,7 +280,7 @@ export class StockSideThreads {
         return !this.hidden.has(entry.id);
       });
       if (visible.length !== data.length) {
-        return { ...message, result: { ...(container as Record<string, unknown>), data: visible } };
+        return forward({ ...message, result: { ...(container as Record<string, unknown>), data: visible } });
       }
     }
     const thread = this.resultThread(container);
@@ -259,9 +290,9 @@ export class StockSideThreads {
         : undefined;
       const backendThreadId = typeof params?.threadId === "string" ? params.threadId : undefined;
       const publicThreadId = backendThreadId ? this.publicIds.get(backendThreadId) : undefined;
-      return publicThreadId
+      return forward(publicThreadId
         ? projectRpcToPublicThread(message, { backendThreadId: backendThreadId!, publicThreadId })
-        : message;
+        : message);
     }
     if (isMarked(thread)) {
       if (trackConnection) this.attach(connectionId, thread.id);
@@ -269,16 +300,16 @@ export class StockSideThreads {
       this.rememberPublicParent(thread);
     }
     const publicThreadId = this.publicIds.get(thread.id);
-    if (publicThreadId && "method" in message && message.method === "thread/started") return undefined;
+    if (publicThreadId && "method" in message && message.method === "thread/started") return { kind: "drop" };
     const publicParent = thread.forkedFromId
       ? this.publicIds.get(thread.forkedFromId) ?? this.publicSources.get(thread.forkedFromId)
       : undefined;
     const parentProjected = publicParent
       ? this.replaceThread(message, { ...thread, forkedFromId: publicParent })
       : message;
-    if (!this.hidden.has(thread.id)) return parentProjected;
+    if (!this.hidden.has(thread.id)) return forward(parentProjected);
     const projected = this.projectThread(thread);
-    return this.replaceThread(parentProjected, projected);
+    return forward(this.replaceThread(parentProjected, projected));
   }
 
   public filterThreads(threads: readonly Thread[]): Thread[] {
@@ -325,7 +356,7 @@ export class StockSideThreads {
     try {
       const result = await stock.request("thread/read", { threadId, includeTurns: false });
       const thread = this.resultThread(result);
-      if (!thread || !isMarked(thread)) return false;
+      if (!thread || !await hasPersistedMarker(thread)) return false;
       this.hidden.add(threadId);
       return true;
     } catch {

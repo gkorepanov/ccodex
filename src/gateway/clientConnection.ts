@@ -47,9 +47,13 @@ import { ServerRequestIds } from "./serverRequestIds.js";
 import type { CrossProviderForks } from "../handoff/service.js";
 import {
   providerMigrationCompleted, providerMigrationFailed, providerMigrationNotice, transientCommandNotice, transientSystemNotice,
-  type SystemNoticeKind, type TransientNotice,
+  transientSystemItemNotice, type SystemNoticeKind, type TransientNotice,
 } from "./transientNotice.js";
-import { rateLimitNotifications, type ClaudeRateLimitsResponse } from "../claude/rateLimits.js";
+import {
+  rateLimitNotifications,
+  type ClaudeRateLimitsResponse,
+  type ClaudeRateLimitTransition,
+} from "../claude/rateLimits.js";
 import { formatCCodexStatus, isCCodexStatusCommand } from "../claude/statusCommand.js";
 import { claudeCompactCommand } from "../claude/compactCommand.js";
 import { DEFAULT_FEATURES, type FeatureConfig } from "../config/config.js";
@@ -244,6 +248,30 @@ export function attachClientConnection(
   const emitRateLimits = (response: ClaudeRateLimitsResponse) => {
     for (const notification of rateLimitNotifications(response)) sendJson(notification);
   };
+  const activeClaudeTurns = new Map<string, string>();
+  const pendingRateLimitTransitions = new Map<string, ClaudeRateLimitTransition[]>();
+  const rateLimitNoticeText = (transition: ClaudeRateLimitTransition) => {
+    const reset = transition.resetsAt === null
+      ? ""
+      : `\n  ↳ resets ${new Date(transition.resetsAt * 1_000).toISOString().replace("T", " ").slice(0, 16)} UTC`;
+    return transition.status === "rejected"
+      ? `❌ Claude rate limit reached${reset}`
+      : `⚠️ Claude usage is nearing its limit${reset}`;
+  };
+  const emitRateLimitTransition = (threadId: string, transition: ClaudeRateLimitTransition) => {
+    const turnId = activeClaudeTurns.get(threadId);
+    if (!turnId) {
+      const pending = pendingRateLimitTransitions.get(threadId) ?? [];
+      pending.push(transition);
+      pendingRateLimitTransitions.set(threadId, pending);
+      return;
+    }
+    for (const notification of transientSystemItemNotice(
+      threadId,
+      turnId,
+      rateLimitNoticeText(transition),
+    )) sendJson(notification);
+  };
   const emitStockRateLimits = (value: unknown) => {
     if (!value || typeof value !== "object") return;
     const result = value as { rateLimits?: unknown; rateLimitsByLimitId?: Record<string, unknown> | null };
@@ -335,6 +363,20 @@ export function attachClientConnection(
     });
   };
   const notificationSink = (method: string, params: unknown) => {
+    let startedTurn: { threadId: string; turnId: string } | undefined;
+    if (method === "turn/started" && params && typeof params === "object") {
+      const value = params as { threadId?: unknown; turn?: { id?: unknown } };
+      if (typeof value.threadId === "string" && typeof value.turn?.id === "string") {
+        activeClaudeTurns.set(value.threadId, value.turn.id);
+        startedTurn = { threadId: value.threadId, turnId: value.turn.id };
+      }
+    } else if (method === "turn/completed" && params && typeof params === "object") {
+      const value = params as { threadId?: unknown; turn?: { id?: unknown } };
+      if (typeof value.threadId === "string" && typeof value.turn?.id === "string"
+        && activeClaudeTurns.get(value.threadId) === value.turn.id) {
+        activeClaudeTurns.delete(value.threadId);
+      }
+    }
     if (method === "thread/name/updated" && params && typeof params === "object") {
       const update = params as { threadId?: unknown; threadName?: unknown };
       if (typeof update.threadId === "string"
@@ -359,13 +401,20 @@ export function attachClientConnection(
       }
     }
     sendJson({ method, params });
+    if (startedTurn) {
+      const pending = pendingRateLimitTransitions.get(startedTurn.threadId) ?? [];
+      pendingRateLimitTransitions.delete(startedTurn.threadId);
+      for (const transition of pending) emitRateLimitTransition(startedTurn.threadId, transition);
+    }
   };
   const serverRequestSink = (id: string, method: string, params: unknown) => {
     sendJson({ id: serverRequestIds.wireId(id), method, params });
   };
   subscriptions.attach(connectionId, notificationSink, serverRequestSink);
-  claude.subscribeRateLimits(connectionId, (response) => {
-    if (foreground?.provider === "claude") emitRateLimits(response);
+  claude.subscribeRateLimits(connectionId, (response, transition) => {
+    if (foreground?.provider !== "claude") return;
+    emitRateLimits(response);
+    if (transition) emitRateLimitTransition(foreground.threadId, transition);
   });
   const subscribedClaudeThreads = new Set<string>();
   const subscribeClaude = (threadId: string) => {
@@ -481,6 +530,25 @@ export function attachClientConnection(
       clearForeground(publicThreadId);
       return;
     }
+    if (request.method === "thread/inject_items") {
+      const queued = sides.run(publicThreadId, async (target) => {
+        const params = { ...publicParams, threadId: target.backendThreadId };
+        try {
+          if (target.provider === "claude") {
+            await claude.injectItems(params as unknown as ThreadInjectItemsParams);
+          } else {
+            await optimisticStockRequest(request.method, params);
+          }
+        } catch (value) {
+          const error = value instanceof Error ? value : new Error(String(value));
+          sides.fail(publicThreadId, error);
+          throw error;
+        }
+      });
+      sendResult(request.id, {});
+      void queued.catch(() => reportOptimisticFailure(publicThreadId));
+      return;
+    }
 
     try {
       await sides.run(publicThreadId, async (target) => {
@@ -541,12 +609,6 @@ export function attachClientConnection(
         if (request.method === "thread/goal/get") {
           sendResult(request.id, target.provider === "claude"
             ? await claude.getGoal(target.backendThreadId)
-            : await optimisticStockRequest(request.method, params));
-          return;
-        }
-        if (request.method === "thread/inject_items") {
-          sendResult(request.id, target.provider === "claude"
-            ? await claude.injectItems(params as unknown as ThreadInjectItemsParams)
             : await optimisticStockRequest(request.method, params));
           return;
         }
@@ -1481,98 +1543,110 @@ export function attachClientConnection(
     }
   });
 
-  stock.on("message", (data, isBinary) => {
-    const incoming = isBinary ? undefined : parseRpcMessage(data);
-    let message = incoming;
-    if (message) {
-      stockState.observeResponse(connectionId, message);
-      stockState.observeNotification(message);
-    }
-    if (message && stockRpc.handle(message)) return;
-    if (message && stockSideThreads) message = stockSideThreads.projectMessage(connectionId, message);
-    let foregroundAfterForward: (() => void) | undefined;
-    if (message && "method" in message && !("id" in message) && message.method === "remoteControl/status/changed" && remoteControl) {
-      remoteControl.intercept(connectionId, notificationSink, message.params);
-      return;
-    }
-    if (message && isResponse(message)) {
-      completeLatency(message.id, "stock");
-      const forwarded = forwardedRequests.get(requestKey(message.id));
-      forwardedRequests.delete(requestKey(message.id));
-      if (forwarded?.systemEphemeral && "result" in message) {
-        const result = message.result && typeof message.result === "object"
-          ? message.result as { thread?: { id?: unknown } }
-          : undefined;
-        if (typeof result?.thread?.id === "string") {
-          handoffs.registerForwardedEphemeralCandidate(connectionId, result.thread.id, forwarded.systemEphemeral);
-        }
-      }
-      if (forwarded?.threadId && isUuid(forwarded.threadId) && "error" in message) {
-        emitSystemError(forwarded.threadId, message.error.message);
-      }
-      if (forwarded && "result" in message) {
-        const result = message.result && typeof message.result === "object"
-          ? message.result as { thread?: { id?: unknown } }
-          : undefined;
-        const resultThreadId = typeof result?.thread?.id === "string" ? result.thread.id : forwarded.threadId;
-        if (forwarded.foreground && resultThreadId) {
-          handoffs.observeDurableThread(connectionId, "stock");
-          foregroundAfterForward = () => selectForeground(forwarded.foreground!, resultThreadId);
-        } else if (forwarded.clearForeground && forwarded.threadId) {
-          foregroundAfterForward = () => clearForeground(forwarded.threadId!);
-        }
-      }
-    }
-    if (message && "method" in message) {
-      if (!("id" in message) && message.method === "account/rateLimits/updated" && foreground?.provider === "claude") {
-        publishForegroundRateLimits(foregroundGeneration);
-        return;
-      }
-      if (!("id" in message) && message.method === "account/rateLimits/updated" && !foreground) {
-        diagnoseUnknownStatus("account/rateLimits/updated");
-      }
-      if (handoffs.captureInternalStockMessage(connectionId, message)) {
-        if (isRequest(message)) stock.send(JSON.stringify({ id: message.id, result: { decision: "decline" } }));
-        return;
-      }
-      const rewritten = handoffs.rewriteTitleMessages(message);
-      if (rewritten) {
-        for (const output of rewritten) sendJson(output);
-        return;
-      }
-      if (handoffs.suppressStockTargetMessage(connectionId, message)) {
-        if (isRequest(message)) stock.send(JSON.stringify({ id: message.id, result: { decision: "decline" } }));
-        return;
-      }
-      if (handoffs.ownsStockBackendMessage?.(message)) {
-        if (isRequest(message)) stock.send(JSON.stringify({ id: message.id, result: { decision: "decline" } }));
-        return;
-      }
-      const params = message.params && typeof message.params === "object" ? message.params as Record<string, unknown> : undefined;
-      const nestedThread = params?.thread && typeof params.thread === "object"
-        ? (params.thread as { id?: unknown }).id
-        : undefined;
-      const threadId = typeof params?.threadId === "string"
-        ? params.threadId
-        : typeof nestedThread === "string" ? nestedThread : undefined;
-      if (message.method === "error" && threadId) {
-        const error = params?.error && typeof params.error === "object"
-          ? params.error as { message?: unknown }
-          : undefined;
-        if (typeof error?.message === "string") emitSystemError(threadId, error.message);
-      }
-    }
-    if (client.readyState === WebSocketState.OPEN) {
-      const outbound = message === incoming ? data : JSON.stringify(message);
-      recorder.frame(connectionId, "gateway_to_client", outbound, isBinary && message === incoming);
-      client.send(outbound, { binary: isBinary && message === incoming });
-    }
-    foregroundAfterForward?.();
-  });
-
   const closeClient = (code: number, reason: string) => {
     if (client.readyState === WebSocketState.OPEN) client.close(code, reason);
   };
+  stock.on("message", (data, isBinary) => {
+    try {
+      const incoming = isBinary ? undefined : parseRpcMessage(data);
+      let message = incoming;
+      if (message) {
+        stockState.observeResponse(connectionId, message);
+        stockState.observeNotification(message);
+      }
+      if (message && stockRpc.handle(message)) return;
+      if (message && stockSideThreads) {
+        const projection = stockSideThreads.projectMessage(connectionId, message);
+        if (projection.kind === "drop") return;
+        message = projection.message;
+      }
+      let foregroundAfterForward: (() => void) | undefined;
+      if (message && "method" in message && !("id" in message) && message.method === "remoteControl/status/changed" && remoteControl) {
+        remoteControl.intercept(connectionId, notificationSink, message.params);
+        return;
+      }
+      if (message && isResponse(message)) {
+        completeLatency(message.id, "stock");
+        const forwarded = forwardedRequests.get(requestKey(message.id));
+        forwardedRequests.delete(requestKey(message.id));
+        if (forwarded?.systemEphemeral && "result" in message) {
+          const result = message.result && typeof message.result === "object"
+            ? message.result as { thread?: { id?: unknown } }
+            : undefined;
+          if (typeof result?.thread?.id === "string") {
+            handoffs.registerForwardedEphemeralCandidate(connectionId, result.thread.id, forwarded.systemEphemeral);
+          }
+        }
+        if (forwarded?.threadId && isUuid(forwarded.threadId) && "error" in message) {
+          emitSystemError(forwarded.threadId, message.error.message);
+        }
+        if (forwarded && "result" in message) {
+          const result = message.result && typeof message.result === "object"
+            ? message.result as { thread?: { id?: unknown } }
+            : undefined;
+          const resultThreadId = typeof result?.thread?.id === "string" ? result.thread.id : forwarded.threadId;
+          if (forwarded.foreground && resultThreadId) {
+            handoffs.observeDurableThread(connectionId, "stock");
+            foregroundAfterForward = () => selectForeground(forwarded.foreground!, resultThreadId);
+          } else if (forwarded.clearForeground && forwarded.threadId) {
+            foregroundAfterForward = () => clearForeground(forwarded.threadId!);
+          }
+        }
+      }
+      if (message && "method" in message) {
+        if (!("id" in message) && message.method === "account/rateLimits/updated" && foreground?.provider === "claude") {
+          publishForegroundRateLimits(foregroundGeneration);
+          return;
+        }
+        if (!("id" in message) && message.method === "account/rateLimits/updated" && !foreground) {
+          diagnoseUnknownStatus("account/rateLimits/updated");
+        }
+        if (handoffs.captureInternalStockMessage(connectionId, message)) {
+          if (isRequest(message)) stock.send(JSON.stringify({ id: message.id, result: { decision: "decline" } }));
+          return;
+        }
+        const rewritten = handoffs.rewriteTitleMessages(message);
+        if (rewritten) {
+          for (const output of rewritten) sendJson(output);
+          return;
+        }
+        if (handoffs.suppressStockTargetMessage(connectionId, message)) {
+          if (isRequest(message)) stock.send(JSON.stringify({ id: message.id, result: { decision: "decline" } }));
+          return;
+        }
+        if (handoffs.ownsStockBackendMessage?.(message)) {
+          if (isRequest(message)) stock.send(JSON.stringify({ id: message.id, result: { decision: "decline" } }));
+          return;
+        }
+        const params = message.params && typeof message.params === "object" ? message.params as Record<string, unknown> : undefined;
+        const nestedThread = params?.thread && typeof params.thread === "object"
+          ? (params.thread as { id?: unknown }).id
+          : undefined;
+        const threadId = typeof params?.threadId === "string"
+          ? params.threadId
+          : typeof nestedThread === "string" ? nestedThread : undefined;
+        if (message.method === "error" && threadId) {
+          const error = params?.error && typeof params.error === "object"
+            ? params.error as { message?: unknown }
+            : undefined;
+          if (typeof error?.message === "string") emitSystemError(threadId, error.message);
+        }
+      }
+      if (client.readyState === WebSocketState.OPEN) {
+        const outbound = message === incoming ? data : JSON.stringify(message);
+        recorder.frame(connectionId, "gateway_to_client", outbound, isBinary && message === incoming);
+        client.send(outbound, { binary: isBinary && message === incoming });
+      }
+      foregroundAfterForward?.();
+    } catch (error) {
+      logger.error("connection.stock.message-failed", {
+        connectionId,
+        error: error instanceof Error ? error.stack ?? error.message : String(error),
+      });
+      closeClient(1011, "CCodex failed to process a stock event");
+    }
+  });
+
   stock.on("error", (error) => {
     logger.error("connection.stock.error", { connectionId, error: error.message });
     closeClient(1011, "Stock app-server connection failed");

@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { Thread } from "../../src/codex/generated/v2/Thread.js";
 import { Logger } from "../../src/observability/logger.js";
@@ -8,7 +11,7 @@ import {
 } from "../../src/gateway/stockSideThreads.js";
 import { SubscriptionHub } from "../../src/gateway/subscriptions.js";
 
-function thread(id: string, threadSource = STOCK_SIDE_THREAD_SOURCE): Thread {
+function thread(id: string, threadSource: string | null = STOCK_SIDE_THREAD_SOURCE): Thread {
   return {
     id, extra: null, sessionId: id, forkedFromId: "parent", parentThreadId: null,
     preview: "side", ephemeral: false, historyMode: "legacy", modelProvider: "openai",
@@ -17,6 +20,11 @@ function thread(id: string, threadSource = STOCK_SIDE_THREAD_SOURCE): Thread {
     source: "appServer", threadSource, agentNickname: null, agentRole: null,
     gitInfo: null, name: null, turns: [],
   };
+}
+
+function forwarded(projection: ReturnType<StockSideThreads["projectMessage"]>): RpcMessage {
+  expect(projection.kind).toBe("forward");
+  return (projection as { kind: "forward"; message: RpcMessage }).message;
 }
 
 describe("stock side-chat promotion", () => {
@@ -37,15 +45,15 @@ describe("stock side-chat promotion", () => {
       threadSource: STOCK_SIDE_THREAD_SOURCE,
     });
 
-    const started = sides.projectMessage("app", {
+    const started = forwarded(sides.projectMessage("app", {
       method: "thread/started", params: { thread: thread("side") },
-    });
+    }));
     expect(started).toMatchObject({ params: { thread: {
       id: "side", ephemeral: true, path: null, threadSource: "user",
     } } });
-    const created = sides.projectMessage("app", {
+    const created = forwarded(sides.projectMessage("app", {
       id: "create", result: { thread: thread("side"), model: "gpt-5.6-terra", serviceTier: null },
-    });
+    }));
     expect(created).toMatchObject({ result: { thread: {
       id: "side", ephemeral: true, path: null, threadSource: "user",
     } } });
@@ -58,9 +66,9 @@ describe("stock side-chat promotion", () => {
     expect(promote.params).toMatchObject({
       threadId: "side", ephemeral: false, threadSource: "user",
     });
-    const promoted = sides.projectMessage("app", {
+    const promoted = forwarded(sides.projectMessage("app", {
       id: "promote", result: { thread: thread("durable", "user") },
-    });
+    }));
     expect(promoted).toMatchObject({ result: { thread: {
       id: "durable", ephemeral: false, threadSource: "user",
     } } });
@@ -136,11 +144,11 @@ describe("stock side-chat promotion", () => {
     expect(sides.projectMessage("daemon", {
       method: "thread/started",
       params: { thread: native },
-    }, false)).toBeUndefined();
-    expect(sides.projectMessage("daemon", {
+    }, false)).toEqual({ kind: "drop" });
+    expect(forwarded(sides.projectMessage("daemon", {
       method: "turn/started",
       params: { threadId: "native-side", turn: { id: "turn" } },
-    }, false)).toMatchObject({
+    }, false))).toMatchObject({
       params: { threadId: "public-side" },
     });
 
@@ -208,5 +216,30 @@ describe("stock side-chat promotion", () => {
     expect(deleted).toEqual(["side"]);
     sides.close();
     vi.useRealTimers();
+  });
+
+  it("recovers a hidden rollout when stock thread/list drops its custom threadSource", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "ccodex-side-recovery-"));
+    try {
+      const hidden = thread("hidden", null);
+      hidden.path = join(directory, "hidden.jsonl");
+      await writeFile(hidden.path, `${JSON.stringify({
+        type: "session_meta",
+        payload: { id: hidden.id, thread_source: STOCK_SIDE_THREAD_SOURCE },
+      })}\n`);
+      const visible = thread("visible", "user");
+      const stock = { request: vi.fn(async (method: string) =>
+        method === "thread/list"
+          ? { data: [hidden, visible], nextCursor: null }
+          : {}) };
+      const sides = new StockSideThreads(true, stock as never, new Logger("error"));
+
+      await sides.recover();
+
+      expect(sides.filterThreads([hidden, visible]).map((item) => item.id)).toEqual(["visible"]);
+      sides.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

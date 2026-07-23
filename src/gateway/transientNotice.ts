@@ -70,6 +70,32 @@ export function transientSystemNotice(
   return transientAgentNotice(threadId, systemNoticeText(text, kind), nowMs);
 }
 
+export function transientSystemItemNotice(
+  threadId: string,
+  turnId: string,
+  text: string,
+  kind: SystemNoticeKind = "info",
+  nowMs = Date.now(),
+): Array<{ method: string; params: unknown }> {
+  const itemId = uuidv7({ msecs: nowMs });
+  const emptyItem: ThreadItem = {
+    type: "agentMessage",
+    id: itemId,
+    text: "",
+    phase: "commentary",
+    memoryCitation: null,
+  };
+  const item: ThreadItem = { ...emptyItem, text: systemNoticeText(text, kind) };
+  return [
+    { method: "item/started", params: { item: emptyItem, threadId, turnId, startedAtMs: nowMs } },
+    {
+      method: "item/agentMessage/delta",
+      params: { threadId, turnId, itemId, delta: item.text },
+    },
+    { method: "item/completed", params: { item, threadId, turnId, completedAtMs: nowMs } },
+  ];
+}
+
 export function transientCommandNotice(
   threadId: string,
   content: UserInput[],

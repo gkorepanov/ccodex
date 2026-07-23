@@ -63,6 +63,7 @@ import { MetricsRegistry } from "../observability/metrics.js";
 import { SdkTranscriptBrancher, type TranscriptBrancher } from "./transcriptBrancher.js";
 import {
   ClaudeRateLimitCoordinator,
+  type ClaudeRateLimitTransition,
   type ClaudeRateLimitStatus,
   type ClaudeRateLimitsResponse,
 } from "./rateLimits.js";
@@ -470,7 +471,10 @@ export class ClaudeService {
     return this.rateLimits.cached();
   }
 
-  public subscribeRateLimits(connectionId: string, listener: (response: ClaudeRateLimitsResponse) => void): void {
+  public subscribeRateLimits(
+    connectionId: string,
+    listener: (response: ClaudeRateLimitsResponse, transition?: ClaudeRateLimitTransition) => void,
+  ): void {
     this.rateLimits.subscribe(connectionId, listener);
   }
 

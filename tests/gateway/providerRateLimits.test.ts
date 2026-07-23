@@ -15,6 +15,7 @@ import { MetricsRegistry } from "../../src/observability/metrics.js";
 import {
   mapClaudeUsage,
   unavailableClaudeRateLimits,
+  type ClaudeRateLimitTransition,
   type ClaudeRateLimitsResponse,
 } from "../../src/claude/rateLimits.js";
 import { DEFAULT_FEATURES, type FeatureConfig } from "../../src/config/config.js";
@@ -129,7 +130,7 @@ interface Harness {
   readonly stockClients: Set<WebSocket>;
   readonly stockRequests: Array<{ method: string; id: string; params?: unknown }>;
   readonly claude: ReturnType<typeof fakeClaude>;
-  readonly logger: { warn: ReturnType<typeof vi.fn> };
+  readonly logger: { warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> };
   readonly connection: ClientConnectionHandle;
   readonly subscriptions: SubscriptionHub;
   close(): Promise<void>;
@@ -140,7 +141,10 @@ afterEach(async () => Promise.all(harnesses.splice(0).map((harness) => harness.c
 
 function fakeClaude() {
   const threads = new Set<string>();
-  const listeners = new Map<string, (response: ClaudeRateLimitsResponse) => void>();
+  const listeners = new Map<string, (
+    response: ClaudeRateLimitsResponse,
+    transition?: ClaudeRateLimitTransition,
+  ) => void>();
   const settings = new Map<string, {
     model: string; serviceTier: string | null; effort: string | null;
   }>();
@@ -154,7 +158,10 @@ function fakeClaude() {
       unavailableReason: null,
     })),
     cachedRateLimits: vi.fn(() => claudeSnapshot),
-    subscribeRateLimits: vi.fn((id: string, listener: (response: ClaudeRateLimitsResponse) => void) => listeners.set(id, listener)),
+    subscribeRateLimits: vi.fn((id: string, listener: (
+      response: ClaudeRateLimitsResponse,
+      transition?: ClaudeRateLimitTransition,
+    ) => void) => listeners.set(id, listener)),
     unsubscribeRateLimits: vi.fn((id: string) => listeners.delete(id)),
     ownsModel: (model: string) => model.startsWith("claude:"),
     ownsThread: (threadId: string) => threads.has(threadId),
@@ -399,7 +406,12 @@ async function makeHarness(
     logger as never,
     new CursorCodec(Buffer.alloc(32, 7)),
     new MetricsRegistry(),
-    { connection: vi.fn(), frame: vi.fn() } as never,
+    {
+      connection: vi.fn(),
+      frame: vi.fn((_connectionId: string, _direction: string, data: unknown) => {
+        if (data === undefined) throw new TypeError("RPC recorder received an undefined frame");
+      }),
+    } as never,
     undefined,
     features,
     availability as never,
@@ -625,6 +637,79 @@ describe("provider-aware rate-limit gateway routing", () => {
       method: "account/rateLimits/updated",
       params: { rateLimits: { limitId: "claude", limitName: "Claude" } },
     });
+  });
+
+  it("shows a normalized transient Claude limit notice only for a foreground Claude thread", async () => {
+    const claude = fakeClaude();
+    const background = await makeHarness(claude);
+    for (const listener of claude.listeners.values()) {
+      listener(claudeSnapshot, {
+        bucket: "claude:primary",
+        status: "allowed_warning",
+        resetsAt: 1_785_034_800,
+      });
+    }
+    expect(messages(background, "item/agentMessage/delta")).toEqual([]);
+
+    background.client.request("start", "thread/start", { model: "claude:sonnet" });
+    await settle();
+    const before = messages(background, "item/agentMessage/delta").length;
+    for (const listener of claude.listeners.values()) {
+      listener(claudeSnapshot, {
+        bucket: "claude:primary",
+        status: "allowed_warning",
+        resetsAt: 1_785_034_800,
+      });
+    }
+    background.subscriptions.emit("claude-1", "turn/started", {
+      threadId: "claude-1",
+      turn: { id: "active-warning-turn" },
+    });
+    await settle();
+    expect(messages(background, "item/agentMessage/delta").slice(before)).toMatchObject([{
+      params: {
+        threadId: "claude-1",
+        turnId: "active-warning-turn",
+        delta: "◆ **CCodex** │ ⚠️ Claude usage is nearing its limit\n  ↳ resets 2026-07-26 03:00 UTC",
+      },
+    }]);
+  });
+
+  it("shows a rejected Claude limit as a transient error without completing the active turn", async () => {
+    const claude = fakeClaude();
+    const harness = await makeHarness(claude);
+    harness.client.request("start", "thread/start", { model: "claude:sonnet" });
+    await settle();
+    harness.client.request("turn", "turn/start", {
+      threadId: "claude-1",
+      input: [{ type: "text", text: "keep working", text_elements: [] }],
+    });
+    await settle();
+    harness.subscriptions.emit("claude-1", "turn/started", {
+      threadId: "claude-1",
+      turn: { id: "active-rejected-turn" },
+    });
+    await settle();
+    const completedBefore = messages(harness, "turn/completed").length;
+    const deltasBefore = messages(harness, "item/agentMessage/delta").length;
+
+    for (const listener of claude.listeners.values()) {
+      listener(claudeSnapshot, {
+        bucket: "claude:primary",
+        status: "rejected",
+        resetsAt: 1_785_034_800,
+      });
+    }
+
+    expect(messages(harness, "item/agentMessage/delta").slice(deltasBefore)).toMatchObject([{
+      params: {
+        threadId: "claude-1",
+        turnId: "active-rejected-turn",
+        delta: "◆ **CCodex** │ ❌ Claude rate limit reached\n  ↳ resets 2026-07-26 03:00 UTC",
+      },
+    }]);
+    expect(messages(harness, "turn/completed")).toHaveLength(completedBefore);
+    expect(claude.prepareTurn).toHaveBeenCalledTimes(1);
   });
 
   it("publishes explicit unavailable state without fabricating a Codex alias", async () => {
@@ -1523,14 +1608,14 @@ describe("provider-aware rate-limit gateway routing", () => {
       input: [{ type: "text", text: "answer after readiness", text_elements: [] }],
     });
     await settle();
-    expect(messages(harness, "boundary")).toEqual([]);
+    expect(messages(harness, "boundary")[0]).toEqual({ id: "boundary", result: {} });
     expect(messages(harness, "send")).toEqual([]);
     expect(claude.injectItems).not.toHaveBeenCalled();
     expect(claude.prepareTurn).not.toHaveBeenCalled();
 
     finish(sideSnapshot("public-thread", "claude-side-backend", "claude"));
     await settle();
-    expect(messages(harness, "boundary")[0]).toEqual({ id: "boundary", result: {} });
+    expect(messages(harness, "boundary")).toHaveLength(1);
     expect(messages(harness, "send")[0]).toMatchObject({ result: { turn: { id: "turn-claude-side-backend" } } });
     expect(claude.injectItems.mock.invocationCallOrder[0])
       .toBeLessThan(claude.prepareTurn.mock.invocationCallOrder[0]!);
@@ -1555,7 +1640,7 @@ describe("provider-aware rate-limit gateway routing", () => {
       }),
       discardOptimistic: vi.fn(async () => undefined),
       resolveServerRequest: vi.fn(async () => false),
-      projectMessage: (_connectionId: string, message: unknown) => message,
+      projectMessage: (_connectionId: string, message: unknown) => ({ kind: "forward", message }),
       filterThreads: (threads: unknown[]) => threads,
       detachConnection: vi.fn(),
       close: vi.fn(),
@@ -1599,15 +1684,91 @@ describe("provider-aware rate-limit gateway routing", () => {
       input: [{ type: "text", text: "queued", text_elements: [] }],
     });
     await settle();
+    expect(messages(harness, "boundary")[0]).toEqual({ id: "boundary", result: {} });
     expect(sideRequests).not.toContain("thread/inject_items");
     expect(sideRequests).not.toContain("turn/start");
 
     finish({});
     await settle();
-    expect(messages(harness, "boundary")[0]).toEqual({ id: "boundary", result: {} });
+    expect(messages(harness, "boundary")).toHaveLength(1);
     expect(messages(harness, "send")[0]).toEqual({ id: "send", result: {} });
     expect(sideRequests.indexOf("thread/inject_items")).toBeLessThan(sideRequests.indexOf("turn/start"));
     expect(JSON.stringify(harness.client.sent)).not.toContain("stock-side-backend");
+  });
+
+  it("drops the native optimistic stock thread/started without crashing before queued inject", async () => {
+    let finishFork!: (value: unknown) => void;
+    const providerFork = new Promise((resolve) => { finishFork = resolve; });
+    const stockRequests: string[] = [];
+    const cleanup = {
+      request: vi.fn(async (method: string) => {
+        stockRequests.push(method);
+        if (method === "thread/fork") return providerFork;
+        return {};
+      }),
+      respond: vi.fn(async () => undefined),
+    };
+    const stockSides = new StockSideThreads(true, cleanup as never, new Logger("error"));
+    const optimistic = new OptimisticSideThreads();
+    const harness = await makeHarness(
+      fakeClaude(),
+      undefined,
+      undefined,
+      DEFAULT_FEATURES,
+      {
+        logical: (threadId: string) => threadId === "public-stock"
+          ? { epoch: { provider: "stock", backendThreadId: "stock-backend" } }
+          : undefined,
+        sideSnapshot: (params: { threadId: string }, targetId: string) =>
+          sideSnapshot(params.threadId, targetId, "stock"),
+        forkLogical: vi.fn(),
+      },
+      undefined,
+      undefined,
+      stockSides,
+      optimistic,
+    );
+
+    harness.client.request("side-open", "thread/fork", {
+      threadId: "public-stock",
+      threadSource: "user",
+      excludeTurns: true,
+      ephemeral: true,
+    });
+    await settle();
+    const publicSideId = messages(harness, "side-open")[0]?.result?.thread?.id;
+    harness.client.request("boundary", "thread/inject_items", {
+      threadId: publicSideId,
+      items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "boundary" }] }],
+    });
+
+    const backend = {
+      ...stockThread("stock-side-backend"),
+      forkedFromId: "stock-backend",
+      ephemeral: false,
+      threadSource: STOCK_SIDE_THREAD_SOURCE,
+      path: "/rollouts/stock-side-backend.jsonl",
+    };
+    finishFork({
+      thread: backend,
+      model: "gpt-5.6-terra",
+      modelProvider: "openai",
+      serviceTier: null,
+    });
+    await settle();
+    for (const stock of harness.stockClients) {
+      stock.send(JSON.stringify({ method: "thread/started", params: { thread: backend } }));
+    }
+    await settle();
+
+    expect(harness.client.readyState).toBe(WebSocket.OPEN);
+    expect(messages(harness, "boundary")[0]).toEqual({ id: "boundary", result: {} });
+    expect(stockRequests).toEqual(["thread/fork", "thread/inject_items"]);
+    expect(JSON.stringify(harness.client.sent)).not.toContain("stock-side-backend");
+    expect(harness.logger.error).not.toHaveBeenCalledWith(
+      "connection.stock.message-failed",
+      expect.anything(),
+    );
   });
 
   it("keeps a queued Claude side turn across App disconnect and resumes the same public side", async () => {

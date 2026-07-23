@@ -81,10 +81,13 @@ describe("ClaudeService account rate limits", () => {
       type: "rate_limit_event", uuid: randomUUID(), session_id: "session",
       rate_limit_info: {
         status: "rejected", rateLimitType: "five_hour", utilization: 22,
-        resetsAt: Date.parse("2026-07-18T01:00:00Z"),
+        resetsAt: Math.floor(Date.parse("2026-07-18T01:00:00Z") / 1_000),
       },
     } as unknown as SDKMessage;
-    const fake = new FakeClaudeQuery(undefined, undefined, [], false, undefined, undefined, undefined, [rateEvent]);
+    const duplicate = { ...rateEvent, uuid: randomUUID() } as unknown as SDKMessage;
+    const fake = new FakeClaudeQuery(
+      undefined, undefined, [], false, undefined, undefined, undefined, [rateEvent, duplicate],
+    );
     fake.experimentalUsage = usage();
     const service = new ClaudeService(
       config(directory), new SubscriptionHub(), new Logger("error"),
@@ -102,8 +105,14 @@ describe("ClaudeService account rate limits", () => {
     prepared.start();
     await waitFor(() => listener.mock.calls.length > 0);
     expect(listener.mock.calls.at(-1)?.[0].rateLimits).toMatchObject({
-      primary: { usedPercent: 22 }, rateLimitReachedType: "rate_limit_reached",
+      primary: { usedPercent: 22, resetsAt: 1_784_336_400 }, rateLimitReachedType: "rate_limit_reached",
     });
+    expect(listener.mock.calls.flatMap((call) => call[1] ? [call[1]] : [])).toEqual([{
+      bucket: "claude:primary",
+      status: "rejected",
+      resetsAt: 1_784_336_400,
+    }]);
+    expect(JSON.stringify(service.readThread(started.thread.id, true))).not.toContain("Claude rate limit:");
     await service.close();
   });
 

@@ -5,6 +5,7 @@ import {
   ClaudeRateLimitCoordinator,
   ClaudeUsageSchemaError,
   mapClaudeUsage,
+  providerResetSeconds,
   rateLimitNotifications,
   unavailableClaudeRateLimits,
 } from "../../src/claude/rateLimits.js";
@@ -222,7 +223,75 @@ describe("ClaudeRateLimitCoordinator", () => {
     expect(listener).toHaveBeenCalledTimes(2);
     expect(coordinator.cached().rateLimits.rateLimitReachedType).toBe("rate_limit_reached");
     event({ status: "allowed", resetsAt: 1_900_000_000_000, utilization: 2 });
-    expect(coordinator.cached().rateLimits.rateLimitReachedType).toBe("rate_limit_reached");
+    expect(coordinator.cached().rateLimits.rateLimitReachedType).toBeNull();
+  });
+
+  it("normalizes provider reset timestamps in seconds or milliseconds exactly once", () => {
+    expect(providerResetSeconds(1_785_034_800)).toBe(1_785_034_800);
+    expect(providerResetSeconds(1_785_034_800_000)).toBe(1_785_034_800);
+    expect(new Date(providerResetSeconds(1_785_034_800)! * 1_000).toISOString())
+      .toBe("2026-07-26T03:00:00.000Z");
+  });
+
+  it("deduplicates warning and rejection transitions per bucket and reset window", async () => {
+    const coordinator = new ClaudeRateLimitCoordinator(new Logger("error"));
+    const generation = coordinator.register(source(async () => usage()));
+    await coordinator.read();
+    const listener = vi.fn();
+    coordinator.subscribe("app", listener);
+    const event = (
+      status: SDKRateLimitInfo["status"],
+      rateLimitType: NonNullable<SDKRateLimitInfo["rateLimitType"]>,
+      resetsAt: number,
+    ) =>
+      coordinator.mergeEvent(generation, { status, rateLimitType, utilization: 90, resetsAt });
+
+    event("allowed", "five_hour", 1_785_034_800);
+    event("allowed_warning", "five_hour", 1_785_034_800);
+    event("allowed_warning", "five_hour", 1_785_034_800);
+    event("allowed_warning", "seven_day", 1_785_120_000);
+    event("rejected", "seven_day", 1_785_120_000);
+    event("rejected", "seven_day", 1_785_120_000);
+    event("allowed", "five_hour", 1_785_034_800);
+    event("allowed_warning", "five_hour", 1_785_207_600);
+
+    expect(listener.mock.calls.flatMap((call) => call[1] ? [call[1]] : [])).toEqual([
+      { bucket: "claude:primary", status: "allowed_warning", resetsAt: 1_785_034_800 },
+      { bucket: "claude:secondary", status: "allowed_warning", resetsAt: 1_785_120_000 },
+      { bucket: "claude:secondary", status: "rejected", resetsAt: 1_785_120_000 },
+      { bucket: "claude:primary", status: "allowed_warning", resetsAt: 1_785_207_600 },
+    ]);
+  });
+
+  it("does not replay an unchanged transition after an App reconnect", async () => {
+    const coordinator = new ClaudeRateLimitCoordinator(new Logger("error"));
+    const generation = coordinator.register(source(async () => usage()));
+    await coordinator.read();
+    const desktop = vi.fn();
+    coordinator.subscribe("desktop", desktop);
+    coordinator.mergeEvent(generation, {
+      status: "allowed_warning",
+      rateLimitType: "five_hour",
+      utilization: 90,
+      resetsAt: 1_785_034_800,
+    });
+    expect(desktop.mock.calls.flatMap((call) => call[1] ? [call[1]] : [])).toHaveLength(1);
+
+    coordinator.unsubscribe("desktop");
+    const mobile = vi.fn();
+    coordinator.subscribe("mobile", mobile);
+    coordinator.mergeEvent(generation, {
+      status: "allowed_warning",
+      rateLimitType: "five_hour",
+      utilization: 90,
+      resetsAt: 1_785_034_800,
+    });
+
+    expect(mobile).not.toHaveBeenCalled();
+    expect(coordinator.cached().rateLimits.primary).toMatchObject({
+      usedPercent: 90,
+      resetsAt: 1_785_034_800,
+    });
   });
 
   it("does not mistake a partial rolling event for a complete account snapshot", async () => {

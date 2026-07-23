@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  systemNoticeText, transientAgentNotice, transientCommandNotice, transientSystemNotice,
+  systemNoticeText, transientAgentNotice, transientCommandNotice, transientSystemItemNotice, transientSystemNotice,
 } from "../../src/gateway/transientNotice.js";
 
 describe("transientAgentNotice", () => {
@@ -26,6 +26,27 @@ describe("transientAgentNotice", () => {
     expect(transientSystemNotice("thread-1", "Provider exploded.", "error", 1_700_000_000_000)
       .notifications.at(-1)?.params).toMatchObject({
       turn: { items: [{ text: "◆ **CCodex** │ ⚠️ Provider exploded." }] },
+    });
+  });
+
+  it("attaches a transient system item to an active turn without completing it", () => {
+    const notifications = transientSystemItemNotice(
+      "thread-1",
+      "turn-1",
+      "❌ Claude rate limit reached",
+      "info",
+      1_700_000_000_000,
+    );
+    expect(notifications.map((event) => event.method)).toEqual([
+      "item/started",
+      "item/agentMessage/delta",
+      "item/completed",
+    ]);
+    expect(notifications).not.toContainEqual(expect.objectContaining({ method: "turn/completed" }));
+    expect(notifications[1]?.params).toMatchObject({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      delta: "◆ **CCodex** │ ❌ Claude rate limit reached",
     });
   });
 
