@@ -1140,7 +1140,10 @@ export class ClaudeService {
     };
   }
 
-  public async forkThread(params: ThreadForkParams): Promise<ThreadForkResponse> {
+  public async forkThread(
+    params: ThreadForkParams,
+    visibleForkedFromId: string = params.threadId,
+  ): Promise<ThreadForkResponse> {
     if (params.path) throw invalidParams("Claude thread forks must use threadId, not a Codex rollout path.");
     this.requireIndependentThread(params.threadId, "fork");
     const source = await this.sessions.submit<SessionBranchSnapshot>(params.threadId, { type: "snapshotBranch" });
@@ -1213,7 +1216,7 @@ export class ClaudeService {
     const cwd = existingThreadCwd(params.cwd ?? sourceRecord.thread.cwd);
     const thread: Thread = {
       ...sourceRecord.thread, id: uuidv7(), ephemeral: params.ephemeral ?? false,
-      sessionId: sourceRecord.thread.sessionId, forkedFromId: sourceRecord.thread.id,
+      sessionId: sourceRecord.thread.sessionId, forkedFromId: visibleForkedFromId,
       cwd, modelProvider: "claude", createdAt, updatedAt: createdAt, recencyAt: createdAt,
       status: params.ephemeral ? { type: "idle" } : { type: "notLoaded" },
       name: sourceRecord.thread.name ? `${sourceRecord.thread.name} (fork)` : null,

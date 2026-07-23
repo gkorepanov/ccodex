@@ -200,6 +200,10 @@ describe("provider switch service", () => {
     const forked = await service.forkLogical({ threadId: source.id }, stock as never);
     expect(forked.thread.turns.map((value) => value.id))
       .toEqual([sourceTurn.id, compact.id, targetTurn.id]);
+    expect(service.projectThreadCatalog([], [], {
+      ancestorThreadId: forked.thread.id,
+      sourceKinds: ["subAgentThreadSpawn"],
+    })).toEqual([]);
     const provisional = await service.requestLogical("thread/read", {
       threadId: forked.thread.id,
       includeTurns: true,

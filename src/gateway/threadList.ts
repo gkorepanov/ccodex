@@ -58,7 +58,7 @@ export async function mergedThreadList(
   stock: StockRpc,
   claude: ClaudeService,
   cursors: CursorCodec,
-  logical?: { projectThreadCatalog(stock: Thread[], claude: Thread[]): Thread[] },
+  logical?: { projectThreadCatalog(stock: Thread[], claude: Thread[], params?: ThreadListParams): Thread[] },
   sideThreads?: Pick<StockSideThreads, "filterThreads">,
 ): Promise<ThreadListResponse> {
   const [stockCatalog, claudeThreads] = await Promise.all([
@@ -74,7 +74,7 @@ export async function mergedThreadList(
     throw invalidParams("Thread pagination query changed; restart pagination.");
   }
   const anchor: Thread | undefined = cursor ? { [key]: cursor.value, id: cursor.id } as unknown as Thread : undefined;
-  const catalog = (logical ? logical.projectThreadCatalog(stockThreads, claudeThreads) : [...stockThreads, ...claudeThreads])
+  const catalog = (logical ? logical.projectThreadCatalog(stockThreads, claudeThreads, params) : [...stockThreads, ...claudeThreads])
     .sort((left, right) => compareThreads(left, right, key, direction))
     .filter((thread) => !anchor || compareThreads(thread, anchor, key, direction) > 0);
   const limit = Math.max(1, Math.min(params.limit ?? 50, 100));

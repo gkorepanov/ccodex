@@ -1,4 +1,5 @@
 import type { Thread } from "../codex/generated/v2/Thread.js";
+import type { ThreadListParams } from "../codex/generated/v2/ThreadListParams.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
 import type { ThreadItemsListParams } from "../codex/generated/v2/ThreadItemsListParams.js";
@@ -34,6 +35,7 @@ import type { StockRpc } from "../gateway/stockRpc.js";
 import type { SubscriptionHub } from "../gateway/subscriptions.js";
 import { projectRpcToBackendThread, projectRpcToPublicThread } from "../gateway/logicalThreadProjection.js";
 import { invalidParams } from "../protocol/errors.js";
+import { filterSortThreads } from "../store/threadFilter.js";
 import { v7 as uuidv7 } from "uuid";
 import {
   HandoffStore,
@@ -231,7 +233,11 @@ export class CrossProviderForks {
   public logical(threadId: string): ResolvedProviderEpoch | undefined { return this.epochs.resolve(threadId); }
   public hiddenBackendIds(provider?: ProviderKind): Set<string> { return this.epochs.hiddenBackendIds(provider); }
 
-  public projectThreadCatalog(stockThreads: Thread[], claudeThreads: Thread[]): Thread[] {
+  public projectThreadCatalog(
+    stockThreads: Thread[],
+    claudeThreads: Thread[],
+    params: ThreadListParams = {},
+  ): Thread[] {
     const physical = new Map([...stockThreads, ...claudeThreads].map((thread) => [thread.id, thread]));
     const mappings = this.store.listBackendMappings();
     const hidden = new Set([
@@ -246,7 +252,8 @@ export class CrossProviderForks {
       if (backend) return [this.epochs.projectThread(mapping.publicThreadId, backend, false)];
       if (mapping.backendThreadId.startsWith("ccodex-provisional:")) {
         const provisional = this.store.getLogicalThread(mapping.publicThreadId);
-        return provisional ? [{ ...provisional.thread, turns: [] }] : [];
+        const thread = provisional ? { ...provisional.thread, turns: [] } : undefined;
+        return thread && filterSortThreads([thread], params).length > 0 ? [thread] : [];
       }
       return [];
     });

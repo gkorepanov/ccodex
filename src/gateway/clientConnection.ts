@@ -3,6 +3,7 @@ import type WebSocket from "ws";
 import { WebSocket as WebSocketState } from "ws";
 import type { ModelListParams } from "../codex/generated/v2/ModelListParams.js";
 import type { ThreadListParams } from "../codex/generated/v2/ThreadListParams.js";
+import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { ThreadLoadedListParams } from "../codex/generated/v2/ThreadLoadedListParams.js";
 import type { ThreadReadParams } from "../codex/generated/v2/ThreadReadParams.js";
 import type { ThreadReadResponse } from "../codex/generated/v2/ThreadReadResponse.js";
@@ -14,6 +15,7 @@ import type { ThreadMetadataUpdateParams } from "../codex/generated/v2/ThreadMet
 import type { ThreadItemsListParams } from "../codex/generated/v2/ThreadItemsListParams.js";
 import type { ThreadGoalSetParams } from "../codex/generated/v2/ThreadGoalSetParams.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
+import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
 import type { ThreadRollbackParams } from "../codex/generated/v2/ThreadRollbackParams.js";
 import type { ThreadSettingsUpdateParams } from "../codex/generated/v2/ThreadSettingsUpdateParams.js";
 import type { ThreadSettings } from "../codex/generated/v2/ThreadSettings.js";
@@ -62,6 +64,10 @@ type FastSettings = Pick<ThreadSettings, "model" | "serviceTier">;
 
 function requestedFast(serviceTier: string | null | undefined): boolean {
   return serviceTier === "fast" || serviceTier === "priority";
+}
+
+function isUserSideFork(params: ThreadForkParams): boolean {
+  return params.ephemeral === true && params.excludeTurns === true && params.threadSource === "user";
 }
 
 function claudeModelNoticeName(model: string): string {
@@ -127,6 +133,7 @@ export function attachClientConnection(
     clearForeground?: boolean;
   }>();
   const recentSystemErrors = new Map<string, number>();
+  const knownLogicalNames = new Map<string, string | null>();
   const serverRequestIds = new ServerRequestIds();
   const requestKey = (id: string | number) => `${typeof id}:${id}`;
   const completeLatency = (id: string | number, provider: "stock" | "claude") => {
@@ -171,6 +178,23 @@ export function attachClientConnection(
     const data = JSON.stringify(message);
     recorder.frame(connectionId, "gateway_to_client", data, false);
     client.send(data);
+  };
+  const syncLogicalName = (thread: Thread) => {
+    if (!handoffs.logical?.(thread.id)) return;
+    if (knownLogicalNames.has(thread.id) && knownLogicalNames.get(thread.id) === thread.name) return;
+    knownLogicalNames.set(thread.id, thread.name);
+    sendJson({
+      method: "thread/name/updated",
+      params: { threadId: thread.id, ...(thread.name === null ? {} : { threadName: thread.name }) },
+    });
+  };
+  const syncLogicalNameFromResult = (result: unknown) => {
+    const thread = result && typeof result === "object"
+      ? (result as { thread?: unknown }).thread
+      : undefined;
+    if (thread && typeof thread === "object" && typeof (thread as { id?: unknown }).id === "string") {
+      syncLogicalName(thread as Thread);
+    }
   };
 
   const emitNotice = (notice: TransientNotice) => {
@@ -308,6 +332,13 @@ export function attachClientConnection(
     });
   };
   const notificationSink = (method: string, params: unknown) => {
+    if (method === "thread/name/updated" && params && typeof params === "object") {
+      const update = params as { threadId?: unknown; threadName?: unknown };
+      if (typeof update.threadId === "string"
+        && (typeof update.threadName === "string" || update.threadName === null)) {
+        knownLogicalNames.set(update.threadId, update.threadName);
+      }
+    }
     if (method === "error" && params && typeof params === "object") {
       const failure = params as { threadId?: unknown; error?: { message?: unknown } };
       if (typeof failure.threadId === "string" && typeof failure.error?.message === "string") {
@@ -401,14 +432,16 @@ export function attachClientConnection(
         }
         if (message.method === "account/rateLimits/read" && !foreground) diagnoseUnknownStatus("account/rateLimits/read");
         if (message.method === "thread/list") {
-          sendResult(message.id, await mergedThreadList(
+          const result = await mergedThreadList(
             (message.params ?? {}) as ThreadListParams,
             stockRpc,
             claude,
             cursors,
             handoffs,
             stockSideThreads,
-          ));
+          );
+          sendResult(message.id, result);
+          for (const thread of result.data) syncLogicalName(thread);
           return;
         }
         if (message.method === "thread/loaded/list") {
@@ -653,6 +686,7 @@ export function attachClientConnection(
             stockRpc,
           );
           sendResult(message.id, handled.result);
+          syncLogicalNameFromResult(handled.result);
           selectForeground(handled.provider === "claude" ? "claude" : "codex", params.threadId);
           await handled.after?.();
           return;
@@ -673,6 +707,31 @@ export function attachClientConnection(
           const forkParams = (message.params ?? {}) as ThreadForkParams;
           if (handoffs.isSystemEphemeralFork(forkParams)) {
             sendResult(message.id, await handoffs.forkSystemEphemeral(forkParams, stockRpc, connectionId));
+            return;
+          }
+          const logicalSource = handoffs.logical?.(forkParams.threadId);
+          if (logicalSource && isUserSideFork(forkParams)) {
+            let result: ThreadForkResponse;
+            if (logicalSource.epoch.provider === "claude") {
+              result = await claude.forkThread({
+                ...forkParams,
+                threadId: logicalSource.epoch.backendThreadId,
+              }, forkParams.threadId);
+              sendResult(message.id, result);
+              selectForeground("claude", result.thread.id);
+              subscribeClaude(result.thread.id);
+              await claude.announceThread(result.thread);
+              return;
+            }
+            if (!stockSideThreads) throw new Error("Stock side-chat support is unavailable.");
+            result = await stockSideThreads.forkSide(
+              connectionId,
+              { ...forkParams, threadId: logicalSource.epoch.backendThreadId },
+              forkParams.threadId,
+              stockRpc,
+            );
+            sendResult(message.id, result);
+            selectForeground("codex", result.thread.id);
             return;
           }
           const logicalFork = (handoffs as CrossProviderForks & {

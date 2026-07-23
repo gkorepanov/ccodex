@@ -68,6 +68,41 @@ describe("stock side-chat promotion", () => {
     sides.close();
   });
 
+  it("projects a logical source id through the hidden native side rollout", async () => {
+    const native = thread("side");
+    native.forkedFromId = "stock-backend";
+    const stock = {
+      request: vi.fn(async () => ({
+        thread: native,
+        model: "gpt-5.6-terra",
+        modelProvider: "openai",
+        serviceTier: null,
+      })),
+    };
+    const sides = new StockSideThreads(true, stock as never, new Logger("error"));
+
+    const result = await sides.forkSide("app", {
+      threadId: "stock-backend",
+      ephemeral: true,
+      excludeTurns: true,
+      threadSource: "user",
+    }, "public-thread", stock as never);
+
+    expect(stock.request).toHaveBeenCalledWith("thread/fork", expect.objectContaining({
+      threadId: "stock-backend",
+      ephemeral: false,
+      threadSource: STOCK_SIDE_THREAD_SOURCE,
+    }));
+    expect(result.thread).toMatchObject({
+      id: "side",
+      forkedFromId: "public-thread",
+      ephemeral: true,
+      path: null,
+      threadSource: "user",
+    });
+    sides.close();
+  });
+
   it("deletes an abandoned hidden rollout after the disconnect grace", async () => {
     vi.useFakeTimers();
     const deleted: string[] = [];

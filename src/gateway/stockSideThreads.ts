@@ -1,5 +1,6 @@
 import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
+import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
 import type { Logger } from "../observability/logger.js";
 import { isRequest, isResponse, type RequestId, type RpcMessage } from "../protocol/envelopes.js";
 import type { StockRpc } from "./stockRpc.js";
@@ -31,10 +32,6 @@ function userSideFork(params: ThreadForkParams): boolean {
   return params.ephemeral === true && params.excludeTurns === true && params.threadSource === "user";
 }
 
-function projectThread(thread: Thread): Thread {
-  return { ...thread, ephemeral: true, path: null, threadSource: "user" };
-}
-
 /**
  * Keeps stock `/side` chats on native Codex rollout rails while projecting
  * them as ephemeral to App clients. A later ordinary fork therefore promotes
@@ -46,6 +43,8 @@ export class StockSideThreads {
   private readonly connectionsByThread = new Map<string, Set<string>>();
   private readonly threadsByConnection = new Map<string, Set<string>>();
   private readonly cleanupTimers = new Map<string, NodeJS.Timeout>();
+  private readonly publicParents = new Map<string, string>();
+  private readonly publicSources = new Map<string, string>();
   private closed = false;
 
   public constructor(
@@ -105,6 +104,30 @@ export class StockSideThreads {
     return message;
   }
 
+  public async forkSide(
+    connectionId: string,
+    params: ThreadForkParams,
+    publicSourceThreadId: string,
+    stock: StockRpc,
+  ): Promise<ThreadForkResponse> {
+    if (!this.enabled) {
+      const result = await stock.request("thread/fork", params) as ThreadForkResponse;
+      return {
+        ...result,
+        thread: { ...result.thread, forkedFromId: publicSourceThreadId },
+      };
+    }
+    this.publicSources.set(params.threadId, publicSourceThreadId);
+    const result = await stock.request("thread/fork", {
+      ...params,
+      ephemeral: false,
+      threadSource: STOCK_SIDE_THREAD_SOURCE,
+    }) as ThreadForkResponse;
+    this.attach(connectionId, result.thread.id);
+    this.rememberPublicParent(result.thread);
+    return { ...result, thread: this.projectThread(result.thread) };
+  }
+
   public projectMessage(connectionId: string, message: RpcMessage): RpcMessage {
     if (!this.enabled) return message;
     if (isResponse(message)) {
@@ -136,9 +159,12 @@ export class StockSideThreads {
     }
     const thread = this.resultThread(container);
     if (!thread) return message;
-    if (isMarked(thread)) this.attach(connectionId, thread.id);
+    if (isMarked(thread)) {
+      this.attach(connectionId, thread.id);
+      this.rememberPublicParent(thread);
+    }
     if (!this.hidden.has(thread.id)) return message;
-    const projected = projectThread(thread);
+    const projected = this.projectThread(thread);
     if ("result" in message) {
       return { ...message, result: { ...(message.result as Record<string, unknown>), thread: projected } };
     }
@@ -174,6 +200,8 @@ export class StockSideThreads {
     for (const timer of this.cleanupTimers.values()) clearTimeout(timer);
     this.cleanupTimers.clear();
     this.pending.clear();
+    this.publicParents.clear();
+    this.publicSources.clear();
   }
 
   private resultThread(value: unknown): Thread | undefined {
@@ -239,11 +267,28 @@ export class StockSideThreads {
     if (timer) clearTimeout(timer);
     this.cleanupTimers.delete(threadId);
     this.hidden.delete(threadId);
+    this.publicParents.delete(threadId);
     for (const connectionId of this.connectionsByThread.get(threadId) ?? []) {
       const threads = this.threadsByConnection.get(connectionId);
       threads?.delete(threadId);
       if (threads?.size === 0) this.threadsByConnection.delete(connectionId);
     }
     this.connectionsByThread.delete(threadId);
+  }
+
+  private rememberPublicParent(thread: Thread): void {
+    if (!thread.forkedFromId) return;
+    const publicParent = this.publicSources.get(thread.forkedFromId);
+    if (publicParent) this.publicParents.set(thread.id, publicParent);
+  }
+
+  private projectThread(thread: Thread): Thread {
+    return {
+      ...thread,
+      ephemeral: true,
+      path: null,
+      threadSource: "user",
+      forkedFromId: this.publicParents.get(thread.id) ?? thread.forkedFromId,
+    };
   }
 }

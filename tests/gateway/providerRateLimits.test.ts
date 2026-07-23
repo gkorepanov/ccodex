@@ -20,6 +20,7 @@ import {
 import { DEFAULT_FEATURES, type FeatureConfig } from "../../src/config/config.js";
 import { STOCK_SIDE_THREAD_SOURCE, StockSideThreads } from "../../src/gateway/stockSideThreads.js";
 import { Logger } from "../../src/observability/logger.js";
+import { CursorCodec } from "../../src/protocol/cursor.js";
 
 const claudeSnapshot: ClaudeRateLimitsResponse = mapClaudeUsage({
   session: {
@@ -128,6 +129,8 @@ function fakeClaude() {
     unsubscribeRateLimits: vi.fn((id: string) => listeners.delete(id)),
     ownsModel: (model: string) => model.startsWith("claude:"),
     ownsThread: (threadId: string) => threads.has(threadId),
+    listThreads: vi.fn(() => []),
+    loadedThreadIds: vi.fn(() => []),
     isChildProjection: () => false,
     startThread: vi.fn(async (params: {
       model?: string; serviceTier?: string | null; effort?: string | null;
@@ -151,13 +154,23 @@ function fakeClaude() {
       response: { thread: { id: params.threadId } },
       notifyGoalSnapshot: vi.fn(),
     })),
-    forkThread: vi.fn(async () => {
+    forkThread: vi.fn(async (params: { threadId: string; ephemeral?: boolean; threadSource?: string }, visible?: string) => {
       const id = `claude-${++sequence}`;
       threads.add(id);
-      return { thread: { id } };
+      return {
+        thread: {
+          ...stockThread(id),
+          forkedFromId: visible ?? params.threadId,
+          ephemeral: params.ephemeral ?? false,
+          modelProvider: "claude",
+          threadSource: params.threadSource ?? "user",
+        },
+      };
     }),
     rollbackThread: vi.fn(async () => ({})),
     compactThread: vi.fn(async () => ({})),
+    injectItems: vi.fn(async () => ({})),
+    getGoal: vi.fn(async () => ({ goal: null })),
     currentThreadSettings: vi.fn((threadId: string) => settings.get(threadId)),
     updateThreadSettings: vi.fn(async (params: {
       threadId: string; model?: string | null; serviceTier?: string | null; effort?: string | null;
@@ -242,6 +255,10 @@ async function makeHarness(
       stockRequests.push(request);
       if (request.method === "account/rateLimits/read") ws.send(JSON.stringify({ id: request.id, result: stockSnapshot }));
       else if (request.method === "thread/start") ws.send(JSON.stringify({ id: request.id, result: { thread: { id: "stock-thread" } } }));
+      else if (request.method === "thread/list") ws.send(JSON.stringify({
+        id: request.id,
+        result: { data: [], nextCursor: null, backwardsCursor: null },
+      }));
       else if (request.method === "thread/resume") {
         const threadId = (request.params as any).threadId;
         ws.send(JSON.stringify({
@@ -328,6 +345,8 @@ async function makeHarness(
     ownsSystemEphemeral: (_connectionId: string, threadId: string) => systemEphemeralThreads.has(threadId),
     registerForwardedEphemeralCandidate: (_connectionId: string, threadId: string) => systemEphemeralThreads.add(threadId),
     pending: () => undefined, overlay: (threadId: string) => threadId === overlayThreadId ? { threadId } : undefined,
+    projectThreadCatalog: (stock: unknown[], claudeThreads: unknown[]) => [...stock, ...claudeThreads],
+    projectLoadedThreadIds: (stock: string[], claudeThreads: string[]) => [...stock, ...claudeThreads],
     resumeOverlay: async (params: { threadId: string }) => ({ thread: { id: params.threadId } }),
     clearThread() {}, prepareTitleTurn: (_id: string, params: unknown) => params,
     rewriteTitleMessages: () => undefined, suppressStockTargetMessage: () => false, ownsInternalStockThread: () => false,
@@ -343,7 +362,7 @@ async function makeHarness(
     noHandoffs as never,
     subscriptions,
     logger as never,
-    {} as never,
+    new CursorCodec(Buffer.alloc(32, 7)),
     new MetricsRegistry(),
     { connection: vi.fn(), frame: vi.fn() } as never,
     undefined,
@@ -1282,10 +1301,142 @@ describe("provider-aware rate-limit gateway routing", () => {
       .toBe(false);
   });
 
+  it("routes captured /side params on a logical Claude task to one native ephemeral fork", async () => {
+    const claude = fakeClaude();
+    claude.threads.add("claude-backend");
+    const forkLogical = vi.fn();
+    const harness = await makeHarness(claude, undefined, undefined, DEFAULT_FEATURES, {
+      logical: (threadId: string) => threadId === "public-thread"
+        ? { epoch: { provider: "claude", backendThreadId: "claude-backend" } }
+        : undefined,
+      forkLogical,
+    });
+
+    harness.client.request("side", "thread/fork", {
+      threadId: "public-thread",
+      cwd: "/tmp",
+      threadSource: "user",
+      excludeTurns: true,
+      ephemeral: true,
+    });
+    await settle();
+
+    expect(claude.forkThread).toHaveBeenCalledWith({
+      threadId: "claude-backend",
+      cwd: "/tmp",
+      threadSource: "user",
+      excludeTurns: true,
+      ephemeral: true,
+    }, "public-thread");
+    expect(forkLogical).not.toHaveBeenCalled();
+    const child = messages(harness, "side")[0]?.result?.thread;
+    expect(child).toMatchObject({
+      forkedFromId: "public-thread",
+      ephemeral: true,
+      threadSource: "user",
+    });
+
+    harness.client.request("boundary", "thread/inject_items", {
+      threadId: child.id,
+      items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Side conversation boundary." }] }],
+    });
+    harness.client.request("goal", "thread/goal/get", { threadId: child.id });
+    await settle();
+    expect(messages(harness, "boundary")[0]).toEqual({ id: "boundary", result: {} });
+    expect(messages(harness, "goal")[0]).toEqual({ id: "goal", result: { goal: null } });
+    expect(harness.client.rawSent.join("\n")).not.toContain("waiting for Codex App");
+    expect(harness.stockRequests.some((request) => request.method === "thread/fork")).toBe(false);
+  });
+
+  it("routes /side on a logical stock task through the hidden native rollout", async () => {
+    const cleanup = { request: vi.fn(async (method: string) =>
+      method === "thread/list" ? { data: [], nextCursor: null } : {}) };
+    const sides = new StockSideThreads(true, cleanup as never, new Logger("error"));
+    const harness = await makeHarness(
+      fakeClaude(),
+      undefined,
+      undefined,
+      DEFAULT_FEATURES,
+      {
+        logical: (threadId: string) => threadId === "public-stock"
+          ? { epoch: { provider: "stock", backendThreadId: "stock-backend" } }
+          : undefined,
+        forkLogical: vi.fn(),
+      },
+      undefined,
+      (params: Record<string, any>) => ({
+        thread: {
+          ...stockThread("stock-side"),
+          forkedFromId: params.threadId,
+          ephemeral: params.ephemeral,
+          threadSource: params.threadSource,
+          path: "/rollouts/stock-side.jsonl",
+        },
+      }),
+      sides,
+    );
+
+    harness.client.request("stock-side", "thread/fork", {
+      threadId: "public-stock",
+      threadSource: "user",
+      excludeTurns: true,
+      ephemeral: true,
+    });
+    await settle();
+
+    expect(harness.stockRequests).toContainEqual(expect.objectContaining({
+      method: "thread/fork",
+      params: expect.objectContaining({
+        threadId: "stock-backend",
+        ephemeral: false,
+        excludeTurns: true,
+        threadSource: STOCK_SIDE_THREAD_SOURCE,
+      }),
+    }));
+    expect(messages(harness, "stock-side")[0]).toMatchObject({ result: { thread: {
+      id: "stock-side",
+      forkedFromId: "public-stock",
+      ephemeral: true,
+      path: null,
+      threadSource: "user",
+    } } });
+  });
+
+  it("replays the authoritative logical title to a newly connected App client", async () => {
+    const renamed = {
+      ...stockThread("public-thread"),
+      modelProvider: "claude",
+      name: "🧭 XRP fable убегание",
+    };
+    const harness = await makeHarness(fakeClaude(), undefined, undefined, DEFAULT_FEATURES, {
+      logical: (threadId: string) => threadId === renamed.id
+        ? { epoch: { provider: "claude", backendThreadId: "claude-backend" } }
+        : undefined,
+      projectThreadCatalog: () => [renamed],
+    });
+
+    harness.client.request("list", "thread/list", {
+      limit: 200,
+      cursor: null,
+      archived: false,
+      sortDirection: "desc",
+      sortKey: "created_at",
+    });
+    await settle();
+
+    expect(messages(harness, "list")[0]).toMatchObject({
+      result: { data: [{ id: renamed.id, name: renamed.name }] },
+    });
+    expect(messages(harness, "thread/name/updated")).toContainEqual({
+      method: "thread/name/updated",
+      params: { threadId: renamed.id, threadName: renamed.name },
+    });
+  });
+
   it("does not let a late async fork completion resurrect a detached subscription", async () => {
     const claude = fakeClaude();
     claude.threads.add("claude-source");
-    let finish!: (result: { thread: { id: string } }) => void;
+    let finish!: (result: any) => void;
     claude.forkThread.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
     const harness = await makeHarness(claude);
     harness.client.request("late-fork", "thread/fork", { threadId: "claude-source" });
