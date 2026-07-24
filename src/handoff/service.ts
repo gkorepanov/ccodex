@@ -371,6 +371,13 @@ export class CrossProviderForks {
       await this.deleteLogicalThread(publicThreadId, clientStock);
       return { provider: resolved.epoch.provider, result: {} };
     }
+    if (method === "thread/archive") {
+      this.store.cancelProviderSwitches(publicThreadId, "Task archived.");
+      if (resolved.epoch.backendThreadId.startsWith("ccodex-provisional:")) {
+        await this.deleteLogicalThread(publicThreadId, clientStock);
+        return { provider: resolved.epoch.provider, result: {} };
+      }
+    }
     if (resolved.epoch.backendThreadId.startsWith("ccodex-provisional:")) {
       return this.requestProvisionalLogical(method, publicParams, resolved);
     }
@@ -628,10 +635,17 @@ export class CrossProviderForks {
       this.patchLogicalThread(resolved.logical.publicThreadId, { name: params.name });
       return { provider: resolved.epoch.provider, result: {} };
     }
+    if (method === "thread/goal/get") {
+      return { provider: resolved.epoch.provider, result: { goal: null } };
+    }
     throw invalidParams("This fork is waiting for Codex App to select a completed history boundary.");
   }
 
-  public async forkLogical(params: ThreadForkParams, clientStock: StockRpc): Promise<ThreadForkResponse> {
+  public async forkLogical(
+    params: ThreadForkParams,
+    clientStock: StockRpc,
+    connectionId?: string,
+  ): Promise<ThreadForkResponse> {
     const source = this.epochs.resolve(params.threadId);
     if (!source) throw invalidParams(`Unknown logical thread '${params.threadId}'.`);
     if (params.model && providerForModel(this.claude, params.model) !== source.epoch.provider) {
@@ -639,11 +653,54 @@ export class CrossProviderForks {
     }
     const currentTurns = await this.currentBackendTurns(source, this.daemonStock ?? clientStock);
     const visible = this.epochs.snapshotTurns(params.threadId, currentTurns);
+    const boundaryIndex = visible.findLastIndex((turn) =>
+      turn.turn.status === "completed" && turn.epochId && turn.providerTurnId);
+    const boundary = visible[boundaryIndex];
+    if (!boundary?.epochId || !boundary.providerTurnId) {
+      throw invalidParams("Cannot fork before the task has a completed provider turn.");
+    }
+    const selectedEpoch = this.store.getEpoch(boundary.epochId);
+    if (!selectedEpoch || !this.store.epochBelongsToLineage(params.threadId, selectedEpoch.id)) {
+      throw invalidParams("Fork boundary is outside the task's provider lineage.");
+    }
+
     const targetId = uuidv7();
-    const placeholderId = `ccodex-provisional:${uuidv7()}`;
+    let forked: ThreadForkResponse | undefined;
+    let stockBuildOwner: string | undefined;
+    if (selectedEpoch.provider === "claude") {
+      forked = await this.claude.forkThread({
+        threadId: selectedEpoch.backendThreadId,
+        lastTurnId: boundary.providerTurnId,
+        model: selectedEpoch.model,
+      }, params.threadId);
+    } else {
+      stockBuildOwner = connectionId;
+      if (stockBuildOwner) {
+        if (this.stockTargetBuilds.has(stockBuildOwner)) {
+          throw new Error("Another stock thread materialization is already active on this connection.");
+        }
+        this.stockTargetBuilds.set(stockBuildOwner, {
+          awaitingStart: true,
+          threadIds: new Set(),
+          messages: [],
+          expectedForkedFromId: selectedEpoch.backendThreadId,
+        });
+      }
+      try {
+        forked = await clientStock.request("thread/fork", {
+          threadId: selectedEpoch.backendThreadId,
+          lastTurnId: boundary.providerTurnId,
+          model: selectedEpoch.model,
+        }) as ThreadForkResponse;
+      } catch (error) {
+        if (stockBuildOwner) this.stockTargetBuilds.delete(stockBuildOwner);
+        throw error;
+      }
+    }
+
     const now = Math.floor(Date.now() / 1_000);
     const thread: Thread = {
-      ...source.logical.thread,
+      ...forked.thread,
       id: targetId,
       sessionId: source.logical.thread.sessionId,
       forkedFromId: params.threadId,
@@ -653,47 +710,51 @@ export class CrossProviderForks {
       recencyAt: now,
       status: { type: "notLoaded" },
       name: source.logical.thread.name ? `${source.logical.thread.name} (fork)` : null,
-      turns: visible.map((turn) => turn.turn),
+      turns: [],
     };
-    const target = this.store.createLogicalThread({
-      thread,
-      epoch: {
-        id: uuidv7(),
-        provider: source.epoch.provider,
-        backendThreadId: placeholderId,
-        model: source.epoch.model,
-        settings: source.epoch.settings,
-      },
-    });
-    if (visible.length > 0 && !this.store.replaceLogicalTurns(targetId, target.revision, visible)) {
-      throw new Error("Failed to persist provisional logical fork history.");
+    try {
+      const target = this.store.createLogicalThread({
+        thread,
+        epoch: {
+          id: uuidv7(),
+          provider: selectedEpoch.provider,
+          backendThreadId: forked.thread.id,
+          model: selectedEpoch.model,
+          settings: selectedEpoch.settings,
+        },
+      });
+      const inherited = visible.slice(0, boundaryIndex + 1).filter((turn) => turn.epochId !== selectedEpoch.id);
+      if (inherited.length > 0 && !this.store.replaceLogicalTurns(targetId, target.revision, inherited)) {
+        throw new Error("Failed to persist logical fork history.");
+      }
+      this.subscriptions?.aliasThread(forked.thread.id, targetId);
+      if (stockBuildOwner) this.stockTargetBuilds.delete(stockBuildOwner);
+      if (selectedEpoch.provider === "claude") {
+        await this.claude.announceThread(forked.thread);
+      } else {
+        this.subscriptions?.emitPublic(targetId, "thread/started", {
+          thread: this.epochs.projectThread(targetId, forked.thread, false),
+        });
+      }
+      const settings = selectedEpoch.settings;
+      return {
+        ...forked,
+        thread: this.epochs.projectThread(targetId, forked.thread, !params.excludeTurns),
+        model: selectedEpoch.model,
+        modelProvider: selectedEpoch.provider === "claude" ? "claude" : "openai",
+        serviceTier: typeof settings.serviceTier === "string" ? settings.serviceTier : null,
+      };
+    } catch (error) {
+      if (stockBuildOwner) this.stockTargetBuilds.delete(stockBuildOwner);
+      this.store.deleteLogicalThread(targetId);
+      if (!forked?.thread.id) throw error;
+      if (selectedEpoch.provider === "claude") {
+        await this.claude.deleteThread(forked.thread.id).catch(() => undefined);
+      } else {
+        await clientStock.request("thread/delete", { threadId: forked.thread.id }).catch(() => undefined);
+      }
+      throw error;
     }
-    const provisional = this.epochs.resolve(targetId)!;
-    if (!this.store.createForkSelection({
-      targetPublicThreadId: targetId,
-      sourcePublicThreadId: params.threadId,
-      provisionalEpochId: provisional.epoch.id,
-    })) throw new Error("Failed to persist logical fork selection.");
-    const settings = source.epoch.settings;
-    const response: ThreadForkResponse = {
-      thread: { ...thread, turns: params.excludeTurns ? [] : thread.turns },
-      model: source.epoch.model,
-      modelProvider: source.epoch.provider === "claude" ? "claude" : "openai",
-      serviceTier: typeof settings.serviceTier === "string" ? settings.serviceTier : null,
-      cwd: thread.cwd,
-      runtimeWorkspaceRoots: Array.isArray(settings.runtimeWorkspaceRoots)
-        ? settings.runtimeWorkspaceRoots as string[] : [],
-      instructionSources: Array.isArray(settings.instructionSources)
-        ? settings.instructionSources as string[] : [],
-      approvalPolicy: (settings.approvalPolicy ?? "on-request") as ThreadForkResponse["approvalPolicy"],
-      approvalsReviewer: (settings.approvalsReviewer ?? "user") as ThreadForkResponse["approvalsReviewer"],
-      sandbox: (settings.sandbox ?? settings.sandboxPolicy ?? { type: "readOnly" }) as ThreadForkResponse["sandbox"],
-      activePermissionProfile: (settings.activePermissionProfile ?? null) as ThreadForkResponse["activePermissionProfile"],
-      reasoningEffort: (settings.reasoningEffort ?? settings.effort ?? null) as ThreadForkResponse["reasoningEffort"],
-      multiAgentMode: "explicitRequestOnly",
-    };
-    this.subscriptions?.emit(targetId, "thread/started", { thread: { ...thread, turns: [] } });
-    return response;
   }
 
   public async rollbackLogicalThread(
@@ -1503,19 +1564,19 @@ export class CrossProviderForks {
 
   private async deleteLogicalThread(publicThreadId: string, clientStock: StockRpc): Promise<void> {
     const stock = this.daemonStock ?? clientStock;
+    this.store.cancelProviderSwitches(publicThreadId, "Task deleted.");
     const mappings = this.store.listBackendMappings()
       .filter((mapping) => mapping.publicThreadId === publicThreadId
         && !mapping.backendThreadId.startsWith("ccodex-provisional:"));
     for (const mapping of mappings) this.subscriptions?.suppress(mapping.backendThreadId);
+    this.store.deleteLogicalThread(publicThreadId);
+    this.subscriptions?.threadDeleted(publicThreadId);
     await Promise.allSettled(mappings.map((mapping) => mapping.provider === "claude"
       ? this.claude.deleteThread(mapping.backendThreadId)
       : stock.request("thread/delete", { threadId: mapping.backendThreadId })));
     for (const mapping of mappings) {
       this.subscriptions?.unaliasThread(mapping.backendThreadId);
     }
-    this.store.clearPending(publicThreadId);
-    this.store.deleteLogicalThread(publicThreadId);
-    this.subscriptions?.threadDeleted(publicThreadId);
   }
 
   private async providerSwitchSource(

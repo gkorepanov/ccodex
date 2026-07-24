@@ -1148,14 +1148,18 @@ export function attachClientConnection(
             }
           }
           const logicalFork = (handoffs as CrossProviderForks & {
-            forkLogical?: (params: ThreadForkParams, stock: StockRpc) => Promise<unknown>;
+            forkLogical?: (
+              params: ThreadForkParams,
+              stock: StockRpc,
+              connectionId?: string,
+            ) => Promise<unknown>;
           }).forkLogical;
           const overlay = handoffs.overlay(params.threadId) as unknown as {
             epochs?: Array<{ provider: "stock" | "claude"; backendThreadId: string; publicTurnIds: string[] }>;
           } | undefined;
           if ((logicalFork && handoffs.logical?.(params.threadId)) || overlay?.epochs) {
             if (logicalFork) {
-              sendResult(message.id, await logicalFork.call(handoffs, forkParams, stockRpc));
+              sendResult(message.id, await logicalFork.call(handoffs, forkParams, stockRpc, connectionId));
               return;
             }
             const turns = overlay!.epochs!.flatMap((epoch) =>

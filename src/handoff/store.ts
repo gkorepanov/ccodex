@@ -446,6 +446,16 @@ export class HandoffStore {
     return Number(result.changes) > 0;
   }
 
+  public cancelProviderSwitches(threadId: string, reason: string): void {
+    this.transaction(() => {
+      this.database.prepare(`
+        UPDATE provider_switch_jobs SET status = 'failed', error = ?, updated_at = ?
+        WHERE public_thread_id = ? AND status IN ('queued', 'running', 'targetCreated')
+      `).run(reason, Date.now(), threadId);
+      this.database.prepare("DELETE FROM pending_provider_switches WHERE thread_id = ?").run(threadId);
+    });
+  }
+
   public createLogicalThread(input: { readonly thread: Thread; readonly epoch: NewProviderEpoch }): LogicalThread {
     const now = input.epoch.createdAt ?? Date.now();
     return this.transaction(() => {
@@ -769,7 +779,10 @@ export class HandoffStore {
     while (threadId && !visited.has(threadId)) {
       if (epoch.publicThreadId === threadId) return true;
       visited.add(threadId);
-      threadId = this.getForkSelection(threadId)?.sourcePublicThreadId;
+      const logical = this.getLogicalThread(threadId);
+      const forkedFromId = logical?.thread.forkedFromId;
+      threadId = this.getForkSelection(threadId)?.sourcePublicThreadId
+        ?? (typeof forkedFromId === "string" && this.getLogicalThread(forkedFromId) ? forkedFromId : undefined);
     }
     return false;
   }
