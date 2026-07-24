@@ -157,6 +157,25 @@ describe("npm-backed hybrid daemon lifecycle", () => {
     await run("stop");
   }, 20_000);
 
+  it("replaces an older managed gateway on the first reconnect", async () => {
+    const { config, home } = harness();
+    const run = () => runDaemonCommand(config, { command: "start", remoteControl: false }, fixture);
+    const first = wire(await run());
+    const pidFile = join(home, "app-server-daemon", "app-server.pid");
+    const record = JSON.parse(readFileSync(pidFile, "utf8")) as Record<string, unknown>;
+    writeFileSync(pidFile, JSON.stringify({ ...record, wrapperPath: "/old/ccodex/main.js" }), { mode: 0o600 });
+
+    const replacement = wire(await run());
+    expect(replacement).toMatchObject({ status: "started", backend: "pid" });
+    expect(replacement.pid).not.toBe(first.pid);
+    expect(alive(first.pid as number)).toBe(false);
+    expect(JSON.parse(readFileSync(pidFile, "utf8"))).toMatchObject({
+      pid: replacement.pid,
+      wrapperPath: fixture,
+    });
+    await runDaemonCommand(config, { command: "stop", remoteControl: false }, fixture);
+  }, 20_000);
+
   it("replaces an unmanaged gateway that wins the readiness race", async () => {
     const { config, home, record } = harness();
     process.env.FAKE_DAEMON_HANDOFF = "1";

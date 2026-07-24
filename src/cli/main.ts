@@ -29,6 +29,7 @@ async function main(): Promise<number> {
     return 0;
   }
   if (invocation.kind === "proxy") {
+    await runDaemonCommand(config, { command: "start", remoteControl: false }, process.argv[1]!);
     return delegate(
       config.realCodex,
       withProxySocket(invocation.proxyArgs, invocation.socketPath),
@@ -40,42 +41,36 @@ async function main(): Promise<number> {
   }
 
   const { startGateway } = await import("../gateway/server.js");
-  let stopRequested = false;
   let resolveStop!: () => void;
   const stopped = new Promise<void>((resolve) => { resolveStop = resolve; });
-  const stop = () => {
-    stopRequested = true;
-    resolveStop();
-  };
+  const stop = () => resolveStop();
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   let releaseDaemonRecord: () => void = () => undefined;
   let releaseGatewayOwner: () => void = () => undefined;
+  let gateway: Awaited<ReturnType<typeof startGateway>> | undefined;
   try {
-    const gateway = await withGatewayStartupFence(
-      () => startGateway(
+    gateway = await withGatewayStartupFence(async () => {
+      // The PID handshake identifies the detached child, not gateway readiness.
+      // Publish it before the potentially slow stock/Claude bootstrap; the
+      // daemon independently waits for and verifies public-socket ownership.
+      releaseDaemonRecord = await publishDaemonChildRecord();
+      return startGateway(
         config,
         invocation.socketPath,
         invocation.stockArgs,
         logger,
-      ),
-    );
-    // Publishing is the daemon parent's readiness handshake. It must happen only
-    // after this process owns the public socket and its relay is ready; otherwise
-    // a concurrently started direct gateway can be mistaken for this child.
-    try {
-      releaseGatewayOwner = publishGatewayOwner(invocation.socketPath);
-      if (!stopRequested) releaseDaemonRecord = await publishDaemonChildRecord();
-      await stopped;
-    } finally {
-      try {
-        await gateway.stop();
-      } finally {
-        releaseDaemonRecord();
-        releaseGatewayOwner();
-      }
-    }
+      );
+    });
+    releaseGatewayOwner = publishGatewayOwner(invocation.socketPath);
+    await stopped;
   } finally {
+    try {
+      await gateway?.stop();
+    } finally {
+      releaseGatewayOwner();
+      releaseDaemonRecord();
+    }
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
   }

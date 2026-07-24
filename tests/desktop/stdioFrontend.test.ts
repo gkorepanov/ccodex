@@ -151,12 +151,16 @@ describe("desktop stdio frontend", () => {
     const path = socketPath();
     const first = await startFakeGateway(path, false);
     let second: Awaited<ReturnType<typeof startFakeGateway>> | undefined;
+    let kicks = 0;
     const input = new PassThrough();
     const { output, text } = collector();
     const done = runStdioFrontend(config, path, {
       input,
       output,
-      kick: async () => { second ??= await startFakeGateway(path); },
+      kick: async () => {
+        kicks += 1;
+        if (kicks > 1) second ??= await startFakeGateway(path);
+      },
       initialConnectDeadlineMs: 5_000,
       retryDelayMs: 20,
     });
@@ -172,6 +176,7 @@ describe("desktop stdio frontend", () => {
     expect(second!.received.map((line) => JSON.parse(line))).toEqual([
       { id: 1, method: "initialize" },
     ]);
+    expect(kicks).toBe(2);
     expect(text().match(/"id":1,"result":\{\}/g)).toHaveLength(1);
 
     input.write('{"id":8,"method":"thread/list"}\n');

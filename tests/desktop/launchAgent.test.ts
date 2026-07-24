@@ -1,54 +1,36 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { installLayout } from "../../src/management/layout.js";
 import {
-  bootstrapLaunchAgent,
   codexCliPathAgentPath,
   codexCliPathPlist,
   CODEX_CLI_PATH_LABEL,
-  desktopPlist,
   getCodexCliPathEnv,
   installCliPathAgent,
-  installLaunchAgent,
   launchAgentLoaded,
-  launchAgentPath,
-  LAUNCH_AGENT_LABEL,
-  type LaunchctlRuntime,
   setCodexCliPathEnv,
+  type LaunchctlRuntime,
   uninstallCliPathAgent,
-  uninstallLaunchAgent,
-  unsetCodexCliPathEnv,
 } from "../../src/desktop/launchAgent.js";
 
 const roots: string[] = [];
-const saved = { HOME: process.env.HOME, CCODEX_HOME: process.env.CCODEX_HOME, CODEX_HOME: process.env.CODEX_HOME };
+const savedHome = process.env.HOME;
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
-  for (const [key, value] of Object.entries(saved)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
 });
 
-function fixture(): { layout: ReturnType<typeof installLayout>; socket: string; node: string } {
+function fixture(): string {
   const root = mkdtempSync(join(tmpdir(), "ccodex-agent-"));
   roots.push(root);
   process.env.HOME = root;
-  process.env.CCODEX_HOME = join(root, ".ccodex");
-  process.env.CODEX_HOME = join(root, ".codex");
-  const layout = installLayout();
-  mkdirSync(layout.bin, { recursive: true });
-  return {
-    layout,
-    socket: join(root, ".codex", "app-server-control", "app-server-control.sock"),
-    node: join(root, "toolchains", "node", "bin", "node"),
-  };
+  return join(root, ".ccodex", "bin", "codex");
 }
 
-function recordingLaunchctl(): {
+function launchctl(initial?: string): {
   runtime: LaunchctlRuntime;
   calls: string[][];
   environment: Map<string, string>;
@@ -56,6 +38,7 @@ function recordingLaunchctl(): {
 } {
   const calls: string[][] = [];
   const environment = new Map<string, string>();
+  if (initial) environment.set("CODEX_CLI_PATH", initial);
   const loaded = new Set<string>();
   return {
     calls,
@@ -70,14 +53,10 @@ function recordingLaunchctl(): {
           const value = environment.get(args[1]!);
           return { status: value === undefined ? 1 : 0, stdout: value ?? "", stderr: "" };
         }
-        if (args[0] === "bootstrap" || args[0] === "load") loaded.add(LAUNCH_AGENT_LABEL);
-        if (args[0] === "bootout" || args[0] === "unload") {
-          const label = args.at(-1)?.split("/").at(-1);
-          if (label) loaded.delete(label);
-        }
+        if (args[0] === "bootstrap" || args[0] === "load") loaded.add(CODEX_CLI_PATH_LABEL);
+        if (args[0] === "bootout") loaded.delete(CODEX_CLI_PATH_LABEL);
         if (args[0] === "print") {
-          const label = args.at(-1)?.split("/").at(-1);
-          return { status: label && loaded.has(label) ? 0 : 1, stdout: "", stderr: "" };
+          return { status: loaded.has(CODEX_CLI_PATH_LABEL) ? 0 : 1, stdout: "", stderr: "" };
         }
         return { status: 0, stdout: "", stderr: "" };
       },
@@ -85,76 +64,37 @@ function recordingLaunchctl(): {
   };
 }
 
-describe("desktop LaunchAgent", () => {
-  it("uses an absolute Node executable and does not force remote control", () => {
-    const { layout, socket, node } = fixture();
-    const plist = desktopPlist(layout, socket, node, false);
-    expect(plist).toContain(`<string>${node}</string>`);
-    expect(plist).toContain(`<string>${join(layout.current, "node_modules", "@gkorepanov", "ccodex", "dist", "cli", "main.js")}</string>`);
-    expect(plist).not.toContain("<string>--remote-control</string>");
-    expect(desktopPlist(layout, socket, node, true)).toContain("<string>--remote-control</string>");
-  });
-
-  it("writes but does not start the gateway agent until the unified supervisor does", () => {
-    const { layout, socket, node } = fixture();
-    const record = installLaunchAgent(layout, socket, node, false);
-    expect(record.path).toBe(launchAgentPath());
-    expect(statSync(record.path).mode & 0o777).toBe(0o644);
-    expect(record.contentHash).toHaveLength(64);
-
-    const { runtime, calls, loaded } = recordingLaunchctl();
-    bootstrapLaunchAgent(record, runtime);
-    expect(calls.map((call) => call[0])).toEqual(["bootstrap", "kickstart"]);
-    expect(loaded.has(LAUNCH_AGENT_LABEL)).toBe(true);
-    expect(launchAgentLoaded(LAUNCH_AGENT_LABEL, runtime)).toBe(true);
-  });
-
-  it("allows an exact managed rewrite and rejects a modified plist", () => {
-    const { layout, socket, node } = fixture();
-    const first = installLaunchAgent(layout, socket, node, false);
-    const second = installLaunchAgent(layout, socket, node, true, first);
-    expect(second.remoteControlEnabled).toBe(true);
-    writeFileSync(second.path, `${readFileSync(second.path, "utf8")}<!-- user -->\n`);
-    expect(() => installLaunchAgent(layout, socket, node, false, second))
-      .toThrow("Refusing to overwrite modified or unmanaged");
-  });
-
-  it("removes only a byte-identical owned gateway plist", () => {
-    const { layout, socket, node } = fixture();
-    const record = installLaunchAgent(layout, socket, node, false);
-    const { runtime } = recordingLaunchctl();
-    writeFileSync(record.path, `${readFileSync(record.path, "utf8")}<!-- changed -->`);
-    expect(uninstallLaunchAgent(record, runtime)).toBe(false);
-    expect(existsSync(record.path)).toBe(true);
-  });
-});
-
-describe("CODEX_CLI_PATH login agent", () => {
-  it("publishes the existing managed codex shim, not a desktop-only shim", () => {
-    const { layout } = fixture();
-    const entry = join(layout.bin, "codex");
+describe("CODEX_CLI_PATH login hook", () => {
+  it("contains only the stable managed shim and no gateway process", () => {
+    const entry = fixture();
     const plist = codexCliPathPlist(entry);
-    expect(plist).toContain(`<string>${CODEX_CLI_PATH_LABEL}</string>`);
     expect(plist).toContain(`<string>${entry}</string>`);
-    expect(plist).not.toContain("codex-desktop");
+    expect(plist).toContain(`<string>${CODEX_CLI_PATH_LABEL}</string>`);
+    expect(plist).not.toContain("KeepAlive");
+    expect(plist).not.toContain("app-server");
   });
 
-  it("installs, hashes, and removes only an unchanged login agent", () => {
-    const { layout } = fixture();
-    const { runtime } = recordingLaunchctl();
-    const record = installCliPathAgent(join(layout.bin, "codex"), undefined, runtime);
-    expect(record.path).toBe(codexCliPathAgentPath());
-    expect(record.contentHash).toHaveLength(64);
-    expect(uninstallCliPathAgent(record, runtime)).toBe(true);
-    expect(existsSync(record.path)).toBe(false);
+  it("installs idempotently and restores the previous GUI value on uninstall", () => {
+    const entry = fixture();
+    const state = launchctl("/stock/codex");
+    const first = installCliPathAgent(entry, undefined, state.runtime);
+    const second = installCliPathAgent(entry, first, state.runtime);
+    expect(second.previousValue).toBe("/stock/codex");
+    expect(getCodexCliPathEnv(state.runtime)).toBe(entry);
+    expect(launchAgentLoaded(state.runtime)).toBe(true);
+    expect(uninstallCliPathAgent(second, state.runtime)).toBe(true);
+    expect(getCodexCliPathEnv(state.runtime)).toBe("/stock/codex");
+    expect(existsSync(codexCliPathAgentPath())).toBe(false);
   });
 
-  it("sets, reads, and clears the GUI environment", () => {
-    fixture();
-    const { runtime } = recordingLaunchctl();
-    setCodexCliPathEnv("/managed/codex", runtime);
-    expect(getCodexCliPathEnv(runtime)).toBe("/managed/codex");
-    unsetCodexCliPathEnv(runtime);
-    expect(getCodexCliPathEnv(runtime)).toBeUndefined();
+  it("preserves a modified plist and an independently changed GUI value", () => {
+    const entry = fixture();
+    const state = launchctl();
+    const record = installCliPathAgent(entry, undefined, state.runtime);
+    writeFileSync(record.path, `${readFileSync(record.path, "utf8")}<!-- user -->`);
+    setCodexCliPathEnv("/user/codex", state.runtime);
+    expect(uninstallCliPathAgent(record, state.runtime)).toBe(false);
+    expect(getCodexCliPathEnv(state.runtime)).toBe("/user/codex");
+    expect(existsSync(record.path)).toBe(true);
   });
 });

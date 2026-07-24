@@ -117,8 +117,8 @@ commands to your global Codex installation:
 
 Setup is deliberately **fail-closed and transactional**: it validates the platform,
 exact runtimes, and provider availability before atomically activating a new version.
-A failed install or update leaves your previous version and daemon running, and a
-failed readiness check after switching rolls back automatically.
+A failed install or update leaves your previous version running. Setup never interrupts
+an active App session; the new version takes over on the next reconnect.
 
 ### Local Codex App (same-Mac)
 
@@ -139,13 +139,14 @@ keep working):
   newline-delimited JSON to the existing app-server-control socket, lazily starts the
   gateway when cold, and reconnects after gateway restarts. Provider state and lifecycle
   remain exclusively inside the existing gateway.
-- A **LaunchAgent** (`dev.ccodex.gateway`, `KeepAlive`) owns the control socket
-  persistently and starts the remote-relay, replacing the detached daemon as the
-  keepalive owner. All of it is installed by `ccodex setup`, reversed exactly by `ccodex
-  uninstall` (`launchctl unsetenv`, both agents removed, shell export stripped — modified
-  files preserved), and tracked in `install.json` under the same hash/owner guards as the
-  shims. `ccodex doctor --deep` reports `desktop-entry`, `desktop-agent`, and
-  `desktop-stdio`.
+- There is **no extra macOS gateway service**. The same PID-managed gateway used over SSH
+  starts lazily when the App connects and stops through the existing daemon contract.
+  Setup/update/rollback only switch files and ask you to reconnect; they never restart a
+  live gateway underneath a task.
+- `ccodex uninstall` removes the login hook, restores any previous `CODEX_CLI_PATH`,
+  strips the managed shell export, and stops only CCodex's own PID-managed gateway.
+  Modified files are preserved. `ccodex doctor --deep` reports the entrypoint and login
+  hook separately from gateway health.
 
 ## Technical details
 

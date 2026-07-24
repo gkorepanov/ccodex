@@ -11,9 +11,6 @@ import { compatibilityManifest } from "../compatibility/probe.js";
 import { defaultConfigToml, delegatedCodexExecutable, loadConfig } from "../config/config.js";
 import { pinnedCodexExecutable, runtimePlatformKey } from "../runtime/dependencies.js";
 import { probeAppServer } from "../daemon/probe.js";
-import { reconcileManagedProcess, stopManagedProcess } from "../daemon/supervisor.js";
-import { daemonStateDirectory } from "../daemon/supervisor.js";
-import { loadDaemonSettings } from "../daemon/settings.js";
 import { atomicSymlink, atomicWrite, ensureLayout, installLayout, type InstallLayout } from "./layout.js";
 import {
   fishManagedBlock as fishBlock, MANAGED_BLOCK_BEGIN as BEGIN,
@@ -27,8 +24,8 @@ import {
   installRemoteCodexShim, relocatedDelegate, restoreRemoteCodexShim, type RemoteCodexShim,
 } from "./remoteShim.js";
 import {
-  installDesktopApp, restoreDesktopApp, type DesktopAppInstall,
-} from "../desktop/install.js";
+  installCliPathAgent, uninstallCliPathAgent, type CliPathAgentInstall,
+} from "../desktop/launchAgent.js";
 
 const execute = promisify(execFile);
 
@@ -48,8 +45,7 @@ export interface InstallManifest {
   readonly managedShellFiles: string[];
   readonly shimHashes: Readonly<Record<string, string>>;
   readonly remoteCodexShim?: RemoteCodexShim;
-  readonly desktopApp?: DesktopAppInstall;
-  readonly desktopAppActive?: boolean;
+  readonly desktopCliPath?: CliPathAgentInstall;
   readonly nodeExecutable?: string;
   readonly platformPackage: string;
   readonly compatibility: ReturnType<typeof compatibilityManifest>;
@@ -290,30 +286,6 @@ export function activate(layout: InstallLayout, version: string): string | null 
   return previous;
 }
 
-function daemonPidFile(): string {
-  return join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "app-server-daemon", "app-server.pid");
-}
-
-async function replaceRunningDaemon(layout: InstallLayout, version: string): Promise<void> {
-  const command = join(
-    layout.versions, version, "node_modules", "@gkorepanov", "ccodex", "dist", "cli", "main.js",
-  );
-  await execute(process.execPath, [command, "app-server", "daemon", "restart"], {
-    timeout: 90_000,
-    maxBuffer: 512 * 1024,
-  });
-}
-
-async function stopDaemon(layout: InstallLayout, version: string): Promise<void> {
-  const command = join(
-    layout.versions, version, "node_modules", "@gkorepanov", "ccodex", "dist", "cli", "main.js",
-  );
-  await execute(process.execPath, [command, "app-server", "daemon", "stop"], {
-    timeout: 90_000,
-    maxBuffer: 512 * 1024,
-  });
-}
-
 export async function setup(args: readonly string[]): Promise<number> {
   if (process.getuid?.() === 0) throw new Error("Do not run CCodex setup as root or with sudo.");
   const stagedIndex = args.indexOf("--staged");
@@ -359,13 +331,10 @@ export async function setup(args: readonly string[]): Promise<number> {
     : undefined;
   const beforeManifest = existsSync(layout.manifest) ? readFileSync(layout.manifest, "utf8") : undefined;
   const previousManifest = beforeManifest ? JSON.parse(beforeManifest) as InstallManifest : undefined;
-  const daemonWasRunning = Boolean(reconcileManagedProcess(daemonPidFile()));
-  const gatewayWasRunning = await probeAppServer(publicSocket).then(() => true, () => false);
   let installedShellChanges: ShellRouting["changed"] = [];
   let installedShimChanges: readonly ManagedShimChange[] = [];
   let installedRemoteShim: RemoteCodexShim | undefined;
-  let installedDesktopApp: DesktopAppInstall | undefined;
-  let daemonReplacementAttempted = false;
+  let installedDesktopHook: CliPathAgentInstall | undefined;
   const configPath = join(layout.home, "config.toml");
   let installedConfig = false;
   try {
@@ -383,21 +352,10 @@ export async function setup(args: readonly string[]): Promise<number> {
     installedRemoteShim = installRemoteCodexShim(layout, previousManifest?.remoteCodexShim);
     delegateCodex = relocatedDelegate(installedRemoteShim, delegateCodex);
     installedConfig = installInitialConfig(layout);
-    // The local Codex App only exists on macOS; the LaunchAgent + control socket are
-    // never touched elsewhere so Linux/CI stays byte-identical.
-    const remoteControlEnabled = loadDaemonSettings(
-      join(daemonStateDirectory(), "settings.json"),
-    ).remoteControlEnabled;
-    const desktopApp = process.platform === "darwin"
-      ? installDesktopApp(
-        layout,
-        publicSocket,
-        process.execPath,
-        remoteControlEnabled,
-        previousManifest?.desktopApp,
-      )
+    const desktopCliPath = process.platform === "darwin"
+      ? installCliPathAgent(join(layout.bin, "codex"), previousManifest?.desktopCliPath)
       : undefined;
-    installedDesktopApp = desktopApp;
+    installedDesktopHook = desktopCliPath;
     const manifest: InstallManifest = {
       schemaVersion: 1,
       method: supplied ? "curl" : "npm",
@@ -409,8 +367,7 @@ export async function setup(args: readonly string[]): Promise<number> {
       managedShellFiles: shellRouting.managed,
       shimHashes,
       ...(installedRemoteShim ? { remoteCodexShim: installedRemoteShim } : {}),
-      ...(desktopApp ? { desktopApp } : {}),
-      ...(desktopApp ? { desktopAppActive: true } : {}),
+      ...(desktopCliPath ? { desktopCliPath } : {}),
       nodeExecutable: process.execPath,
       platformPackage: compatibility.relayPackages[runtimePlatformKey()] ?? "unsupported",
       compatibility,
@@ -418,29 +375,12 @@ export async function setup(args: readonly string[]): Promise<number> {
       installedAt: new Date().toISOString(),
     };
     atomicWrite(layout.manifest, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
-    // One lifecycle entrypoint selects launchd on installed macOS hosts and the
-    // PID supervisor elsewhere. No setup-specific socket ownership choreography.
-    daemonReplacementAttempted = true;
-    await replaceRunningDaemon(layout, requestedVersion);
   } catch (error) {
-    if (daemonReplacementAttempted) {
-      await stopDaemon(layout, requestedVersion).catch(async () => {
-        const managed = reconcileManagedProcess(daemonPidFile());
-        if (managed) await stopManagedProcess(daemonPidFile(), managed).catch((cleanupError: unknown) => {
-          process.stderr.write(`CCodex rollback could not stop partial gateway: ${String(cleanupError)}\n`);
-        });
-      });
-    }
     if (installedConfig) rmSync(configPath, { force: true });
     if (before) {
       atomicSymlink(join("versions", before), layout.current);
       removeFirstInstallRouting(layout, installedShellChanges, {});
       restoreManagedShims(installedShimChanges);
-      // Skip the detached-daemon restore when a previous LaunchAgent owns the socket;
-      // restoreDesktopApp below reloads it, and a detached daemon would flap against it.
-      if ((daemonWasRunning || gatewayWasRunning) && !previousManifest?.desktopApp) {
-        await replaceRunningDaemon(layout, before).catch(() => undefined);
-      }
     }
     else {
       removeActivationLink(layout.current);
@@ -448,13 +388,20 @@ export async function setup(args: readonly string[]): Promise<number> {
       removeFirstInstallRouting(layout, installedShellChanges, {});
       restoreManagedShims(installedShimChanges);
     }
-    restoreDesktopApp(
-      layout,
-      installedDesktopApp,
-      previousManifest?.desktopApp,
-      undefined,
-      gatewayWasRunning,
-    );
+    if (installedDesktopHook) {
+      try {
+        if (previousManifest?.desktopCliPath) {
+          installCliPathAgent(
+            previousManifest.desktopCliPath.entryShimPath,
+            installedDesktopHook,
+          );
+        } else {
+          uninstallCliPathAgent(installedDesktopHook);
+        }
+      } catch (desktopError) {
+        process.stderr.write(`CCodex rollback could not restore the desktop hook: ${String(desktopError)}\n`);
+      }
+    }
     if (before) restoreRemoteCodexShim(installedRemoteShim, previousManifest?.remoteCodexShim);
     if (beforePrevious) atomicSymlink(beforePrevious, layout.previous);
     else removeActivationLink(layout.previous);
@@ -462,6 +409,9 @@ export async function setup(args: readonly string[]): Promise<number> {
     else rmSync(layout.manifest, { force: true });
     throw error;
   }
-  process.stdout.write(`CCodex ${requestedVersion} activated. Open a new shell or run: export PATH="${layout.bin}:$PATH"\n`);
+  process.stdout.write(
+    `CCodex ${requestedVersion} activated. Open a new shell or run: export PATH="${layout.bin}:$PATH"`
+    + `${process.platform === "darwin" ? "\nReconnect Codex App to use this version." : ""}\n`,
+  );
   return 0;
 }

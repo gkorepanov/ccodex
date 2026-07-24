@@ -146,18 +146,14 @@ class StdioFrontend {
   }
 
   private async connect(): Promise<WebSocket | undefined> {
+    await this.kick(this.config);
     const deadline = this.connectedOnce ? Number.POSITIVE_INFINITY : Date.now() + this.initialConnectDeadlineMs;
-    let kicked = false;
     while (!this.inputEnded && !this.outputFailed && Date.now() < deadline) {
       try {
         const socket = await openSocket(this.socketPath);
         this.connectedOnce = true;
         return socket;
       } catch {
-        if (!kicked) {
-          await this.kick(this.config);
-          kicked = true;
-        }
         await sleep(this.retryDelayMs);
       }
     }

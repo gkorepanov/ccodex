@@ -1,12 +1,11 @@
 import { constants, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { access } from "node:fs/promises";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
-import { createInterface } from "node:readline";
 import WebSocket from "ws";
 import type { HybridConfig } from "../config/config.js";
 import {
@@ -19,7 +18,6 @@ import { reconcileManagedProcess } from "../daemon/supervisor.js";
 import {
   getCodexCliPathEnv,
   launchAgentLoaded,
-  managedCliPath,
 } from "../desktop/launchAgent.js";
 import { installLayout } from "./layout.js";
 import { readInstallManifest } from "./setup.js";
@@ -120,79 +118,13 @@ function hashFile(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-function stdioModelCatalog(nodeExecutable: string, cliPath: string): Promise<string[]> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(nodeExecutable, [cliPath, "app-server", "--analytics-default-enabled"], {
-      env: { ...process.env, CCODEX_SHIM_ACTIVE: undefined },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const reader = createInterface({ input: child.stdout });
-    let stderr = "";
-    let settled = false;
-    const timer = setTimeout(() => finish(new Error(`timed out reading stdio model catalog: ${stderr}`)), 10_000);
-    const finish = (error?: Error, models?: string[]) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reader.close();
-      child.kill();
-      error ? reject(error) : resolve(models!);
-    };
-    child.stderr.on("data", (bytes: Buffer) => { stderr = `${stderr}${bytes.toString()}`.slice(-8_192); });
-    child.once("error", finish);
-    child.once("exit", (code, signal) => {
-      if (!settled) finish(new Error(`stdio frontend exited before model/list (${signal ?? code}): ${stderr}`));
-    });
-    reader.on("line", (line) => {
-      try {
-        const message = JSON.parse(line) as {
-          id?: number;
-          result?: { data?: Array<{ id?: unknown }> };
-          error?: { message?: string };
-        };
-        if (message.error) throw new Error(message.error.message ?? "stdio app-server RPC failed");
-        if (message.id === 1) {
-          child.stdin.write(`${JSON.stringify({ method: "initialized", params: {} })}\n`);
-          child.stdin.write(`${JSON.stringify({ id: 2, method: "model/list", params: { limit: 100 } })}\n`);
-        } else if (message.id === 2) {
-          finish(undefined, (message.result?.data ?? [])
-            .map((entry) => entry.id)
-            .filter((id): id is string => typeof id === "string"));
-        }
-      } catch (error) {
-        finish(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-    child.stdin.write(`${JSON.stringify({
-      id: 1,
-      method: "initialize",
-      params: {
-        clientInfo: {
-          name: "ccodex_doctor_stdio",
-          title: "CCodex Doctor stdio",
-          version: compatibilityManifest().productVersion,
-        },
-      },
-    })}\n`);
-  });
-}
-
-async function desktopChecks(config: HybridConfig, layout: ReturnType<typeof installLayout>): Promise<DoctorCheck[]> {
+async function desktopChecks(layout: ReturnType<typeof installLayout>): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
   const manifest = readInstallManifest(layout);
   const entry = join(layout.bin, "codex");
   const expectedHash = manifest?.shimHashes.codex;
   const entryOk = existsSync(entry) && expectedHash !== undefined && hashFile(entry) === expectedHash;
   checks.push(check("desktop-entry", entryOk, existsSync(entry) ? entry : "missing", "managed bin/codex", "ccodex setup --repair"));
-
-  const nodeExecutable = manifest?.nodeExecutable;
-  try {
-    if (!nodeExecutable) throw new Error("not recorded");
-    await access(nodeExecutable, constants.X_OK);
-    checks.push(check("desktop-node", true, `${nodeExecutable} (${await output(nodeExecutable, ["--version"])})`, "working absolute Node executable"));
-  } catch (error) {
-    checks.push(check("desktop-node", false, String(error), "working absolute Node executable", "npm install -g @gkorepanov/ccodex && ccodex setup --repair"));
-  }
 
   try {
     const detected = getCodexCliPathEnv();
@@ -201,29 +133,19 @@ async function desktopChecks(config: HybridConfig, layout: ReturnType<typeof ins
     checks.push(check("desktop-cli-path", false, String(error), entry, "ccodex setup --repair"));
   }
 
-  const gatewayAgent = manifest?.desktopApp?.gatewayAgent;
-  const gatewayAgentOk = Boolean(
-    gatewayAgent
-    && existsSync(gatewayAgent.path)
-    && hashFile(gatewayAgent.path) === gatewayAgent.contentHash,
+  const cliPathAgent = manifest?.desktopCliPath;
+  const agentOk = Boolean(
+    cliPathAgent
+    && existsSync(cliPathAgent.path)
+    && hashFile(cliPathAgent.path) === cliPathAgent.contentHash,
   );
   checks.push(check(
     "desktop-agent",
-    gatewayAgentOk && launchAgentLoaded(),
-    gatewayAgentOk ? "installed" : "missing or modified",
-    "loaded, byte-identical LaunchAgent",
+    agentOk && launchAgentLoaded(),
+    agentOk ? "installed" : "missing or modified",
+    "loaded CODEX_CLI_PATH login hook",
     "ccodex setup --repair",
   ));
-
-  try {
-    if (!nodeExecutable) throw new Error("desktop Node executable is not recorded");
-    const models = await stdioModelCatalog(nodeExecutable, managedCliPath(layout));
-    const stock = models.filter((id) => id.startsWith("gpt-")).length;
-    const claude = models.filter((id) => id.startsWith(config.modelPrefix)).length;
-    checks.push(check("desktop-stdio", stock > 0 && claude > 0, `${stock} Codex, ${claude} Claude`, "stdio frontend reaches merged model catalog", "ccodex setup --repair"));
-  } catch (error) {
-    checks.push(check("desktop-stdio", false, String(error), "stdio frontend reaches merged model catalog", "ccodex setup --repair"));
-  }
   return checks;
 }
 
@@ -254,7 +176,7 @@ async function deepChecks(config: HybridConfig): Promise<DoctorCheck[]> {
     checks.push(check("shell-routing", false, String(error), join(layout.bin, "codex"), "ccodex setup --repair"));
   }
 
-  if (process.platform === "darwin") checks.push(...await desktopChecks(config, layout));
+  if (process.platform === "darwin") checks.push(...await desktopChecks(layout));
 
   const socketParent = dirname(config.publicSocket);
   const parentMode = existsSync(socketParent) ? statSync(socketParent).mode & 0o777 : 0;
@@ -265,17 +187,11 @@ async function deepChecks(config: HybridConfig): Promise<DoctorCheck[]> {
 
   const pidFile = join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "app-server-daemon", "app-server.pid");
   const managed = reconcileManagedProcess(pidFile);
-  const manifest = readInstallManifest(layout);
-  const launchd = process.platform === "darwin"
-    && manifest?.desktopAppActive !== false
-    && Boolean(manifest?.desktopApp)
-    && launchAgentLoaded();
-  const singleOwner = launchd ? !managed : Boolean(managed);
   checks.push(check(
     "managed-process",
-    singleOwner,
-    launchd && managed ? `launchd + stale pid ${managed.pid}` : launchd ? "launchd" : managed ? `pid ${managed.pid}` : "not managed",
-    "one owned gateway process",
+    Boolean(managed),
+    managed ? `pid ${managed.pid}` : "not managed",
+    "one PID-managed gateway process",
     "codex app-server daemon restart",
   ));
   return checks;

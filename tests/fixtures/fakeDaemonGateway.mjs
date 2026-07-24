@@ -23,7 +23,11 @@ if (reservation.pid !== 0 || reservation.processStartTime !== `starting:${token}
   throw new Error("lost daemon child reservation");
 }
 const published = `${pidFile}.${process.pid}.tmp`;
-writeFileSync(published, JSON.stringify({ pid: process.pid, processStartTime: processStartTime(process.pid) }), { mode: 0o600 });
+writeFileSync(published, JSON.stringify({
+  pid: process.pid,
+  processStartTime: processStartTime(process.pid),
+  wrapperPath: reservation.wrapperPath,
+}), { mode: 0o600 });
 renameSync(published, pidFile);
 chmodSync(pidFile, 0o600);
 delete process.env.CODEX_HYBRID_DAEMON_PID_FILE;
