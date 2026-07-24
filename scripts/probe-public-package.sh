@@ -91,16 +91,24 @@ if kill -0 "$PREEXISTING_PID" 2>/dev/null; then
 fi
 wait "$PREEXISTING_PID" 2>/dev/null || true
 PREEXISTING_PID=
-test -f "$CODEX_HOME/app-server-daemon/app-server.pid"
+case "$(uname -s)" in
+  Darwin)
+    test ! -e "$CODEX_HOME/app-server-daemon/app-server.pid"
+    test -f "$HOME/Library/LaunchAgents/dev.ccodex.gateway.plist"
+    test -f "$HOME/Library/LaunchAgents/dev.ccodex.codex-cli-path.plist"
+    ;;
+  *) test -f "$CODEX_HOME/app-server-daemon/app-server.pid" ;;
+esac
 orphans=$(ps -eo args= | grep -F "$WORK/stage/node_modules" | grep -v grep || true)
 test -z "$orphans" || {
   printf '%s\n' "setup smoke left orphan processes:" "$orphans" >&2
   exit 1
 }
 test "$(/bin/sh -c '. "$HOME/.profile"; command -v codex')" = "$CCODEX_HOME/bin/codex"
-test "$(tail -n 3 "$HOME/.config/fish/config.fish")" = "# >>> ccodex >>>
-fish_add_path --move --prepend \"$CCODEX_HOME/bin\"
-# <<< ccodex <<<"
+grep -Fq "fish_add_path --move --prepend \"$CCODEX_HOME/bin\"" "$HOME/.config/fish/config.fish"
+if [ "$(uname -s)" = Darwin ]; then
+  grep -Fq "set -gx CODEX_CLI_PATH \"$CCODEX_HOME/bin/codex\"" "$HOME/.config/fish/config.fish"
+fi
 node -e 'const m=require(process.argv[1]);if(m.delegateCodex!==process.argv[2])process.exit(1)' \
   "$CCODEX_HOME/install.json" "$CCODEX_HOME/backups/remote-codex"
 remote_version=$(PATH="$WORK/upstream/bin:$tool_path" node -e '
@@ -116,11 +124,13 @@ PATH="$WORK/upstream/bin:$tool_path" node -e '
   if(r.error||r.status!==0){process.stderr.write(r.stderr||String(r.error));process.exit(1)}
 '
 grep -q 'app-server proxy --sock ' "$FAKE_CODEX_LOG"
-"$CCODEX_HOME/bin/ccodex" doctor --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{if(!JSON.parse(s).ok)process.exit(1)})'
+"$CCODEX_HOME/bin/ccodex" doctor --json --deep | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{if(!JSON.parse(s).ok)process.exit(1)})'
 touch "$CCODEX_HOME/state/preserved.sqlite"
 "$CCODEX_HOME/bin/ccodex" uninstall >/dev/null
 test -f "$CCODEX_HOME/state/preserved.sqlite"
 test "$(cat "$HOME/.config/fish/config.fish")" = 'set -gx PATH /usr/bin /bin'
+test ! -e "$HOME/Library/LaunchAgents/dev.ccodex.gateway.plist"
+test ! -e "$HOME/Library/LaunchAgents/dev.ccodex.codex-cli-path.plist"
 test "$(PATH="$WORK/upstream/bin:$tool_path" /bin/sh -c 'PATH="$HOME/.local/bin:$PATH"; codex --version')" = 'codex-cli 0.144.6'
 
 mkdir -p "$WORK/warn-stage" "$WORK/warn-home"
