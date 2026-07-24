@@ -77,6 +77,8 @@ export interface ToolResult {
   readonly toolUseId: string;
   readonly output: string;
   readonly isError: boolean;
+  readonly nonExecutionKind?: string;
+  readonly userFeedback?: string;
 }
 
 function outputText(value: unknown): string {
@@ -89,11 +91,37 @@ function outputText(value: unknown): string {
   }).join("\n");
 }
 
+function toolResultMetadata(message: SDKMessage): ReadonlyMap<string, {
+  readonly nonExecutionKind?: string;
+  readonly userFeedback?: string;
+}> {
+  if (message.type !== "user") return new Map();
+  const raw = (message as unknown as { tool_result_meta?: unknown }).tool_result_meta;
+  if (!Array.isArray(raw)) return new Map();
+  return new Map(raw.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const metadata = value as Record<string, unknown>;
+    if (typeof metadata.id !== "string") return [];
+    return [[metadata.id, {
+      ...(typeof metadata.non_execution_kind === "string"
+        ? { nonExecutionKind: metadata.non_execution_kind }
+        : {}),
+      ...(typeof metadata.user_feedback === "string" ? { userFeedback: metadata.user_feedback } : {}),
+    }] as const];
+  }));
+}
+
 export function toolResults(message: SDKMessage): ToolResult[] {
   if (message.type !== "user" || !Array.isArray(message.message.content)) return [];
+  const metadata = toolResultMetadata(message);
   return message.message.content.flatMap((block) => {
     if (!block || typeof block !== "object" || block.type !== "tool_result") return [];
-    return [{ toolUseId: block.tool_use_id, output: outputText(block.content), isError: block.is_error === true }];
+    return [{
+      toolUseId: block.tool_use_id,
+      output: outputText(block.content),
+      isError: block.is_error === true,
+      ...metadata.get(block.tool_use_id),
+    }];
   });
 }
 

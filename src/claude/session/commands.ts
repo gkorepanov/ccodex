@@ -119,7 +119,7 @@ export type MainStreamFact =
   | { readonly kind: "toolBegin"; readonly providerId: string }
   | { readonly kind: "toolFiles"; readonly providerId: string; readonly changes: Extract<ThreadItem, { type: "fileChange" }>["changes"] }
   | { readonly kind: "toolComplete"; readonly providerId: string; readonly output: string; readonly isError: boolean;
-      readonly result?: Record<string, unknown> }
+      readonly result?: Record<string, unknown>; readonly nonExecutionKind?: string }
   | { readonly kind: "toolProgress"; readonly providerId: string; readonly elapsedMs: number;
       readonly message?: string }
   | { readonly kind: "taskStart"; readonly taskId: string; readonly providerId?: string; readonly description: string;
@@ -499,6 +499,14 @@ export type ClaudeSessionCommand =
     readonly providerSessionId: string;
     readonly model: string;
     readonly cliVersion: string;
+    readonly fastModeState?: "off" | "cooldown" | "on";
+    readonly fastModeDisabledReason?: string;
+  }
+  | {
+    readonly type: "fastModeStatus";
+    readonly runtimeGeneration: number;
+    readonly state?: "off" | "cooldown" | "on";
+    readonly disabledReason?: string;
   }
   | {
     readonly type: "providerEventStarted";

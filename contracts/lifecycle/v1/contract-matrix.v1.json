@@ -3,8 +3,8 @@
   "contractVersion": "lifecycle-v1",
   "pinnedVersions": {
     "codexAppServer": "0.144.6",
-    "claudeAgentSdk": "0.3.215",
-    "claudeCode": "2.1.215"
+    "claudeAgentSdk": "0.3.219",
+    "claudeCode": "2.1.219"
   },
   "supportedLifecycleRpc": [
     "thread/start",
@@ -706,7 +706,7 @@
     },
     {
       "behavior": "Switching an existing ephemeral session into max effort",
-      "owner": "pinned Claude SDK 0.3.215 applyFlagSettings schema",
+      "owner": "pinned Claude SDK 0.3.219 applyFlagSettings schema",
       "contract": "preserve max when selected at session creation, but reject a later transition into max because the public dynamic effort control supports only low/medium/high/xhigh"
     },
     {

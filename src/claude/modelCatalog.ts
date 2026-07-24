@@ -3,7 +3,7 @@ import type { Model } from "../codex/generated/v2/Model.js";
 import type { HybridConfig } from "../config/config.js";
 import type { Logger } from "../observability/logger.js";
 import { MetricsRegistry } from "../observability/metrics.js";
-import { modelCatalogValue } from "./modelSelection.js";
+import { modelCatalogValue, normalizeClaudeModelIdentifier } from "./modelSelection.js";
 import { claudeEnvironment } from "./environment.js";
 
 const effortDescriptions: Record<string, string> = {
@@ -28,6 +28,21 @@ function defaultEffort(levels: readonly string[]): string {
   return levels[0] ?? "medium";
 }
 
+export function claudeModelDisplayName(model: ModelInfo): string {
+  const resolved = model.resolvedModel && normalizeClaudeModelIdentifier(model.resolvedModel);
+  const version = resolved && /^claude-([a-z][a-z0-9]*?)-(\d+)(?:-(\d{1,2})(?=-|$))?/u.exec(resolved);
+  if (!version) return model.displayName;
+  const [, family, major, minor] = version;
+  const label = `${family![0]!.toUpperCase()}${family!.slice(1)} ${major}${minor ? `.${minor}` : ""}`;
+  if (model.displayName.toLocaleLowerCase().includes(label.toLocaleLowerCase())) return model.displayName;
+  if (model.displayName.toLocaleLowerCase().startsWith(family!)) {
+    return `${model.displayName.slice(0, family!.length)} ${major}${minor ? `.${minor}` : ""}${model.displayName.slice(family!.length)}`;
+  }
+  return model.displayName.startsWith("Default")
+    ? `Default (recommended · ${label})`
+    : `${model.displayName} · ${label}`;
+}
+
 export function mapClaudeModel(model: ModelInfo, prefix: string): Model {
   const efforts = model.supportsEffort ? (model.supportedEffortLevels ?? []) : [];
   const serviceTiers = model.supportsFastMode
@@ -43,7 +58,7 @@ export function mapClaudeModel(model: ModelInfo, prefix: string): Model {
     upgrade: null,
     upgradeInfo: null,
     availabilityNux: null,
-    displayName: model.displayName,
+    displayName: claudeModelDisplayName(model),
     description: model.description,
     hidden: false,
     supportedReasoningEfforts: efforts.map((reasoningEffort) => ({

@@ -21,6 +21,9 @@ const fileTools = new Set(["Edit", "Write", "NotebookEdit"]);
 const commandTools = new Set(["Bash"]);
 const collabTools = new Set(["Agent", "Task", "SendMessage"]);
 const imageExtensions = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
+const declinedToolKinds = new Set([
+  "user-rejected", "permission-rule", "automode-blocked", "automode-unavailable", "automode-parsing-error",
+]);
 
 function text(value: unknown): string {
   return typeof value === "string" ? value : "";
@@ -206,6 +209,7 @@ export function projectToolCompletion(
   isError: boolean,
   result: Record<string, unknown> | undefined,
   cwd: string,
+  nonExecutionKind?: string,
 ): { started: ThreadItem; completed: ThreadItem } {
   const path = !isError ? imagePath(state.name, state.input, cwd) : undefined;
   if (path) {
@@ -214,7 +218,7 @@ export function projectToolCompletion(
   }
   return {
     started: item,
-    completed: completeTool(item, output, isError, result, state.startedAtMs),
+    completed: completeTool(item, output, isError, result, state.startedAtMs, nonExecutionKind),
   };
 }
 
@@ -232,16 +236,22 @@ export function completeTool(
   isError: boolean,
   result: Record<string, unknown> | undefined,
   startedAtMs: number,
+  nonExecutionKind?: string,
 ): ThreadItem {
   const durationMs = typeof result?.duration_ms === "number" ? result.duration_ms : Date.now() - startedAtMs;
+  const declined = nonExecutionKind !== undefined && declinedToolKinds.has(nonExecutionKind);
   if (item.type === "commandExecution") return {
-    ...item, status: isError ? "failed" : "completed", aggregatedOutput: output,
+    ...item, status: declined ? "declined" : isError ? "failed" : "completed", aggregatedOutput: output,
     exitCode: typeof result?.exit_code === "number" ? result.exit_code : typeof result?.exitCode === "number" ? result.exitCode : isError ? 1 : 0,
     durationMs,
   };
   if (item.type === "fileChange") {
     const changes = resultDiff(result);
-    return { ...item, status: isError ? "failed" : "completed", changes: changes.length > 0 ? changes : item.changes };
+    return {
+      ...item,
+      status: declined ? "declined" : isError ? "failed" : "completed",
+      changes: changes.length > 0 ? changes : item.changes,
+    };
   }
   if (item.type === "mcpToolCall") return {
     ...item, status: isError ? "failed" : "completed", durationMs,

@@ -106,6 +106,7 @@ import { createGoalMcpServer } from "../goalTools.js";
 import { mapUserInput } from "../inputMapper.js";
 import { bashCommandActions } from "../commandActions.js";
 import { safeSessionPermissionUpdates } from "./permissionUpdates.js";
+import { threadSettings } from "../threadSettings.js";
 import {
   StaleClaudeRuntimeSettingsError,
   createProviderRuntime,
@@ -216,7 +217,7 @@ function commandLane(command: SessionMailboxCommand): ClaudeMailboxLane {
     || command.type === "lifecycle"
       && ["interrupt", "interruptAck", "runtimeExit"].includes(command.fact.type)) return "control";
   if (["providerEventStarted", "providerEventFinished", "providerBoundary", "providerRetract",
-    "conversationReset", "modelFallback", "systemNotice", "runtimeNotification", "mainStream",
+    "conversationReset", "modelFallback", "fastModeStatus", "systemNotice", "runtimeNotification", "mainStream",
     "accountUsage", "accountCost", "publishUsage", "lifecycle", "compactBoundary", "compactFailed",
     "postCompact",
     ].includes(command.type)) return "provider";
@@ -1989,6 +1990,10 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         providerSessionId: message.session_id,
         model: message.model,
         cliVersion: message.claude_code_version,
+        ...(message.fast_mode_state ? { fastModeState: message.fast_mode_state } : {}),
+        ...(message.fast_mode_disabled_reason
+          ? { fastModeDisabledReason: message.fast_mode_disabled_reason }
+          : {}),
       });
       if (!initialized) return "stateOnly";
       runtime.setCapabilities(message.capabilities ?? []);
@@ -2153,6 +2158,16 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           message.errors[0] ?? "Claude compaction failed.",
         );
         if (compactFailure) return compactFailure.terminal ? "projected" : "stateOnly";
+      }
+      if (message.fast_mode_state || message.fast_mode_disabled_reason) {
+        await this.submitProviderProjection(runtimeGeneration, {
+          type: "fastModeStatus",
+          runtimeGeneration,
+          ...(message.fast_mode_state ? { state: message.fast_mode_state } : {}),
+          ...(message.fast_mode_disabled_reason
+            ? { disabledReason: message.fast_mode_disabled_reason }
+            : {}),
+        });
       }
       const result = await this.submitProviderProjection<ClaudeResultClassification>(
         runtimeGeneration,
@@ -3137,6 +3152,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
             providerId: result.toolUseId,
             output: result.output,
             isError: result.isError,
+            ...(result.nonExecutionKind ? { nonExecutionKind: result.nonExecutionKind } : {}),
             ...(resultData ? { result: resultData } : {}),
           }, ownerThreadId);
       if (projected?.tool && !projected.tool.foldedTaskId) {
@@ -4728,8 +4744,15 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         };
         this.repository.update(updated);
         this.record = updated;
-        return updated;
+        return this.applyFastModeStatus(
+          command.fastModeState,
+          command.fastModeDisabledReason,
+          "system/init",
+        );
       }
+      case "fastModeStatus":
+        if (command.runtimeGeneration !== this.runtimeGeneration) return undefined;
+        return this.applyFastModeStatus(command.state, command.disabledReason, "result");
       case "providerEventStarted": {
         const source = {
           providerEventId: command.providerEventId,
@@ -7014,6 +7037,26 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     };
   }
 
+  private applyFastModeStatus(
+    state: "off" | "cooldown" | "on" | undefined,
+    disabledReason: string | undefined,
+    providerEventType: string,
+  ): ClaudeThreadRecord {
+    const record = this.requireRecord(false);
+    if (record.serviceTier !== "fast" || state !== "off"
+      || disabledReason === undefined || disabledReason === "pending") return record;
+    const updated = { ...record, serviceTier: null };
+    const params = { threadId: this.threadId, threadSettings: threadSettings(updated) };
+    this.commitState(updated, [{ turnId: null, method: "thread/settings/updated", params }]);
+    this.appendSystemNotice(
+      `Fast mode is unavailable (${disabledReason.replaceAll("_", " ")}) — continuing in Standard.`,
+      "info",
+      this.threadId,
+      { providerEventId: null, providerEventType },
+    );
+    return updated;
+  }
+
   private appendSystemNotice(
     text: string,
     kind: "info" | "error",
@@ -7227,7 +7270,9 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         }, source);
       }
     } else if (fact.kind === "toolComplete" && tool) {
-      this.completeTool(turn, state, tool, fact.output, fact.isError, fact.result, source);
+      this.completeTool(
+        turn, state, tool, fact.output, fact.isError, fact.result, source, true, fact.nonExecutionKind,
+      );
     } else if (fact.kind === "toolProgress" && tool) {
       const item = turn.items.find((candidate) => candidate.id === tool!.itemId);
       if (item?.type === "commandExecution") item.durationMs = fact.elapsedMs;
@@ -7634,11 +7679,14 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
   private completeTool(
     turn: Turn, state: MainStreamState, tool: ActiveTool, output: string, isError: boolean,
     result: Record<string, unknown> | undefined, source: RuntimeFactSource, emitOutput = true,
+    nonExecutionKind?: string,
   ): void {
     const index = turn.items.findIndex((item) => item.id === tool.itemId);
     const item = turn.items[index];
     if (!item || state.completedItems.has(item.id)) return;
-    const projection = projectToolCompletion(item, tool, output, isError, result, state.record.thread.cwd);
+    const projection = projectToolCompletion(
+      item, tool, output, isError, result, state.record.thread.cwd, nonExecutionKind,
+    );
     turn.items[index] = projection.completed; state.completedItems.add(item.id);
     if (projection.completed.type === "collabAgentToolCall"
       && projection.completed.tool === "spawnAgent" && projection.completed.model) {

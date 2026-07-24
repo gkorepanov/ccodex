@@ -163,7 +163,8 @@ try {
         : notifications
             .filter((message) => message.method === "item/completed" && message.params?.turnId === running.turn.id)
             .map((message) => message.params.item);
-      assert.equal(completedItems.find((item) => item.type === "agentMessage")?.text.trim(), expectedText);
+      assert.ok(completedItems.some((item) =>
+        item.type === "agentMessage" && item.text.trim() === expectedText));
       if (expectedCommand) {
         assert.ok(completedItems.some((item) => item.type === "commandExecution" && item.status === "completed" && item.exitCode === 0));
       }

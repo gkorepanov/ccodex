@@ -15,6 +15,26 @@ describe("Claude tool projection", () => {
     });
   });
 
+  it("projects provider-stamped denials without guessing from result prose", () => {
+    const { state, item } = startTool(0, {
+      type: "tool_use", id: "tool-denied", name: "Bash", input: { command: "curl example.com" },
+    }, "/tmp/project", "thread-1");
+
+    expect(completeTool(
+      item, "opaque provider text", true, undefined, state.startedAtMs, "user-rejected",
+    )).toMatchObject({
+      type: "commandExecution",
+      status: "declined",
+      aggregatedOutput: "opaque provider text",
+    });
+    expect(completeTool(
+      item, "opaque provider text", true, undefined, state.startedAtMs, "interrupted",
+    )).toMatchObject({
+      type: "commandExecution",
+      status: "failed",
+    });
+  });
+
   it("fills a streamed Bash command and its mobile command action before announcement", () => {
     const { state, item } = startTool(0, {
       type: "tool_use", id: "tool-streamed", name: "Bash", input: {},

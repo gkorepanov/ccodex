@@ -26,6 +26,23 @@ describe("Claude result classification", () => {
   });
 
   it.each([
+    [429, "usageLimitExceeded"],
+    [529, "serverOverloaded"],
+  ] as const)("uses authoritative HTTP status %s when provider text is opaque", (apiErrorStatus, codexErrorInfo) => {
+    expect(classifyClaudeResult({
+      subtype: "error_during_execution",
+      is_error: true,
+      terminal_reason: "api_error",
+      api_error_status: apiErrorStatus,
+      errors: ["opaque upstream failure"],
+    })).toEqual({
+      status: "failed",
+      error: "opaque upstream failure",
+      codexErrorInfo,
+    });
+  });
+
+  it.each([
     ["authentication_failed", "unauthorized"],
     ["rate_limit", "usageLimitExceeded"],
     ["model_not_found", "badRequest"],

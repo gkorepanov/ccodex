@@ -1344,7 +1344,7 @@ describe("ClaudeSession Phase 3 slice", () => {
         runtimeGeneration: 5,
         providerSessionId: "wrong",
         model: "haiku",
-        cliVersion: "2.1.215",
+        cliVersion: "2.1.219",
       },
     )).rejects.toThrow("expected 'claude-thread-1'");
     await registry.submit("thread-1", {
@@ -1352,12 +1352,12 @@ describe("ClaudeSession Phase 3 slice", () => {
       runtimeGeneration: 5,
       providerSessionId: "claude-thread-1",
       model: "claude-haiku-4-5",
-      cliVersion: "2.1.215",
+      cliVersion: "2.1.219",
     });
     expect(store.getThreadRecord("thread-1")).toMatchObject({
       resolvedModel: "claude-haiku-4-5",
-      claudeCodeVersion: "2.1.215",
-      thread: { cliVersion: "2.1.215" },
+      claudeCodeVersion: "2.1.219",
+      thread: { cliVersion: "2.1.219" },
     });
     await registry.submit("thread-1", {
       type: "runtimeInitialized",
@@ -1367,6 +1367,70 @@ describe("ClaudeSession Phase 3 slice", () => {
       cliVersion: "stale",
     });
     expect(store.getThreadRecord("thread-1")?.resolvedModel).toBe("claude-haiku-4-5");
+    await registry.close();
+  });
+
+  it("falls back to Standard when Claude reports that Fast is unavailable", async () => {
+    const { store, hub, registry } = harness();
+    const events: Array<{ method: string; params: unknown }> = [];
+    hub.subscribe("thread-1", "fast-fallback", (method, params) => events.push({ method, params }));
+    await registry.submit("thread-1", {
+      type: "createThread",
+      record: { ...record("thread-1"), serviceTier: "fast" },
+    });
+    await registry.submit("thread-1", { type: "attachRuntime", runtimeGeneration: 1 });
+    await registry.submit("thread-1", {
+      type: "runtimeInitialized",
+      runtimeGeneration: 1,
+      providerSessionId: "claude-thread-1",
+      model: "claude-sonnet-5",
+      cliVersion: "2.1.219",
+      fastModeState: "off",
+      fastModeDisabledReason: "extra_usage_disabled",
+    });
+
+    expect(store.getThreadRecord("thread-1")?.serviceTier).toBeNull();
+    expect(events).toContainEqual(expect.objectContaining({
+      method: "thread/settings/updated",
+      params: expect.objectContaining({
+        threadSettings: expect.objectContaining({ serviceTier: null }),
+      }),
+    }));
+    expect(store.listTurns("thread-1").at(-1)?.items).toContainEqual(expect.objectContaining({
+      type: "agentMessage",
+      text: expect.stringContaining("Fast mode is unavailable (extra usage disabled)"),
+    }));
+    await registry.close();
+  });
+
+  it("accepts a later result-level Fast fallback after an enabled init", async () => {
+    const { store, registry } = harness();
+    await registry.submit("thread-1", {
+      type: "createThread",
+      record: { ...record("thread-1"), serviceTier: "fast" },
+    });
+    await registry.submit("thread-1", { type: "attachRuntime", runtimeGeneration: 1 });
+    await registry.submit("thread-1", {
+      type: "runtimeInitialized",
+      runtimeGeneration: 1,
+      providerSessionId: "claude-thread-1",
+      model: "claude-sonnet-5",
+      cliVersion: "2.1.219",
+      fastModeState: "on",
+    });
+    expect(store.getThreadRecord("thread-1")?.serviceTier).toBe("fast");
+
+    await registry.submit("thread-1", {
+      type: "fastModeStatus",
+      runtimeGeneration: 1,
+      state: "off",
+      disabledReason: "network_error",
+    });
+    expect(store.getThreadRecord("thread-1")?.serviceTier).toBeNull();
+    expect(store.listTurns("thread-1").at(-1)?.items).toContainEqual(expect.objectContaining({
+      type: "agentMessage",
+      text: expect.stringContaining("Fast mode is unavailable (network error)"),
+    }));
     await registry.close();
   });
 
@@ -2370,6 +2434,42 @@ describe("ClaudeSession Phase 3 slice", () => {
       type: "lifecycle", runtimeGeneration: 1, fact: { type: "interruptAck" }, source,
     })).resolves.toBeUndefined();
     expect(store.getTurn("thread-1", prepared.turn.id)?.status).toBe("interrupted");
+    await registry.close();
+  });
+
+  it("keeps depth-two subagent output in the nested child hierarchy", async () => {
+    const { store, registry } = harness();
+    const source: RuntimeFactSource = { providerEventId: "nested", providerEventType: "test" };
+    await registry.submit("thread-1", { type: "createThread", record: record("thread-1") });
+    await registry.submit("thread-1", { type: "attachRuntime", runtimeGeneration: 1 });
+    await registry.submit("thread-1", {
+      type: "prepareTurn",
+      params: { threadId: "thread-1", input: [{ type: "text", text: "nested agents", text_elements: [] }] },
+    });
+    const outer = await registry.submit<{ childThreadId: string }>("thread-1", {
+      type: "mainStream", runtimeGeneration: 1, source,
+      fact: {
+        kind: "taskStart", taskId: "outer-task", providerId: "outer-tool",
+        description: "outer", subagentType: "general-purpose", taskType: "agent",
+      },
+    });
+    const nested = await registry.submit<{ childThreadId: string }>("thread-1", {
+      type: "mainStream", runtimeGeneration: 1, ownerThreadId: outer.childThreadId, source,
+      fact: {
+        kind: "taskStart", taskId: "nested-task", providerId: "nested-tool",
+        description: "nested", subagentType: "Explore", taskType: "agent",
+      },
+    });
+    await registry.submit("thread-1", {
+      type: "mainStream", runtimeGeneration: 1, ownerThreadId: nested.childThreadId, source,
+      fact: { kind: "instantAgent", text: "depth-two result" },
+    });
+
+    expect(store.getThreadRecord(outer.childThreadId)?.thread.parentThreadId).toBe("thread-1");
+    expect(store.getThreadRecord(nested.childThreadId)?.thread.parentThreadId).toBe(outer.childThreadId);
+    expect(JSON.stringify(store.listTurns(nested.childThreadId))).toContain("depth-two result");
+    expect(JSON.stringify(store.listTurns(outer.childThreadId))).not.toContain("depth-two result");
+    expect(JSON.stringify(store.listTurns("thread-1"))).not.toContain("depth-two result");
     await registry.close();
   });
 

@@ -33,7 +33,6 @@ import type { ThreadStartParams } from "../codex/generated/v2/ThreadStartParams.
 import type { ThreadStartResponse } from "../codex/generated/v2/ThreadStartResponse.js";
 import type { SandboxMode } from "../codex/generated/v2/SandboxMode.js";
 import type { SandboxPolicy } from "../codex/generated/v2/SandboxPolicy.js";
-import type { ActivePermissionProfile } from "../codex/generated/v2/ActivePermissionProfile.js";
 import type { TurnStartParams } from "../codex/generated/v2/TurnStartParams.js";
 import type { TurnStartResponse } from "../codex/generated/v2/TurnStartResponse.js";
 import type { ApprovalsReviewer } from "../codex/generated/v2/ApprovalsReviewer.js";
@@ -103,6 +102,7 @@ import {
   stateModelName,
   type ThreadStateSnapshot,
 } from "../state/stateCommand.js";
+import { syncedCollaborationMode, threadSettings } from "./threadSettings.js";
 
 interface ModelCatalog {
   list(): Promise<Model[]>;
@@ -151,18 +151,6 @@ function existingThreadCwd(value: string): string {
   throw invalidParams(`Claude thread cwd '${cwd}' does not exist or is not a directory.`);
 }
 
-function syncedCollaborationMode(
-  value: unknown | null | undefined,
-  model: string,
-  effort: ThreadSettings["effort"],
-): ThreadSettings["collaborationMode"] {
-  const mode = (value ?? {
-    mode: "default",
-    settings: { model, reasoning_effort: effort, developer_instructions: null },
-  }) as ThreadSettings["collaborationMode"];
-  return { ...mode, settings: { ...mode.settings, model, reasoning_effort: effort } };
-}
-
 function turnReasoningEffort(params: TurnStartParams): TurnStartParams["effort"] | undefined {
   return params.collaborationMode?.settings.reasoning_effort ?? params.effort ?? undefined;
 }
@@ -186,38 +174,8 @@ function permissionProfileSandboxPolicy(profile: string, cwd: string): SandboxPo
   throw invalidParams(`Claude threads do not support Codex permission profile '${profile}'.`);
 }
 
-function activePermissionProfile(policy: SandboxPolicy): ActivePermissionProfile | null {
-  if (policy.type === "readOnly") return { id: ":read-only", extends: null };
-  if (policy.type === "workspaceWrite") return { id: ":workspace", extends: null };
-  if (policy.type === "dangerFullAccess") return { id: ":danger-full-access", extends: null };
-  return null;
-}
-
 function approvalsReviewer(value: ApprovalsReviewer | null | undefined, fallback: ApprovalsReviewer = "user"): ApprovalsReviewer {
   return value ?? fallback;
-}
-
-function threadSettings(record: ClaudeThreadRecord): ThreadSettings {
-  const sandboxPolicy = record.sandboxPolicy as ThreadSettings["sandboxPolicy"];
-  return {
-    cwd: record.thread.cwd,
-    approvalPolicy: record.approvalPolicy as ThreadSettings["approvalPolicy"],
-    approvalsReviewer: record.approvalsReviewer,
-    sandboxPolicy,
-    activePermissionProfile: activePermissionProfile(sandboxPolicy),
-    model: record.modelPickerId,
-    modelProvider: "claude",
-    serviceTier: record.serviceTier,
-    effort: record.reasoningEffort as ThreadSettings["effort"],
-    summary: record.reasoningSummary as ThreadSettings["summary"],
-    collaborationMode: syncedCollaborationMode(
-      record.collaborationMode,
-      record.modelPickerId,
-      record.reasoningEffort as ThreadSettings["effort"],
-    ),
-    multiAgentMode: "explicitRequestOnly",
-    personality: record.personality as ThreadSettings["personality"],
-  };
 }
 
 function threadResponse(record: ClaudeThreadRecord, includeTurns: boolean): ThreadStartResponse {

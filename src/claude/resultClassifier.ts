@@ -18,6 +18,7 @@ export interface ClaudeResultInput {
   readonly result?: string;
   readonly errors?: readonly string[];
   readonly terminal_reason?: string | null;
+  readonly api_error_status?: number | null;
 }
 
 function providerErrorInfo(providerError: string | undefined, message: string | undefined): CodexErrorInfo | undefined {
@@ -37,6 +38,12 @@ function providerErrorInfo(providerError: string | undefined, message: string | 
   if (/rate.?limit|billing|credit|usage.?limit/.test(normalized)) return "usageLimitExceeded";
   if (/overload/.test(normalized)) return "serverOverloaded";
   if (/model.?not.?found|invalid.?request/.test(normalized)) return "badRequest";
+  return undefined;
+}
+
+function httpErrorInfo(status: number | null | undefined): CodexErrorInfo | undefined {
+  if (status === 429) return "usageLimitExceeded";
+  if (status === 529) return "serverOverloaded";
   return undefined;
 }
 
@@ -61,7 +68,9 @@ export function classifyClaudeResult(
   const interrupted = message.terminal_reason === "aborted_tools" || message.terminal_reason === "aborted_streaming" ||
     errors.some((value) => value.toLocaleLowerCase().includes("interrupt") || value.toLocaleLowerCase().includes("abort"));
   const error = errors[0];
-  const codexErrorInfo = interrupted ? undefined : providerErrorInfo(providerError, error);
+  const codexErrorInfo = interrupted
+    ? undefined
+    : providerErrorInfo(providerError, error) ?? httpErrorInfo(message.api_error_status);
   return {
     status: interrupted ? "interrupted" : "failed",
     ...(error ? { error } : {}),

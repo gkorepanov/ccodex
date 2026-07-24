@@ -1,6 +1,6 @@
 {
   "name": "@gkorepanov/ccodex",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "Unofficial Codex App compatibility bridge for Codex CLI and Claude Code runtimes.",
   "homepage": "https://github.com/gkorepanov/ccodex#readme",
   "repository": {
@@ -69,7 +69,7 @@
     "prepack": "npm run check:codex-assets && npm run build:ts && npm run generate:notices"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.215",
+    "@anthropic-ai/claude-agent-sdk": "0.3.219",
     "@openai/codex": "0.144.6",
     "diff": "8.0.3",
     "smol-toml": "1.7.0",
@@ -78,9 +78,9 @@
     "zod": "4.4.3"
   },
   "optionalDependencies": {
-    "@gkorepanov/ccodex-relay-darwin-arm64": "0.4.7",
-    "@gkorepanov/ccodex-relay-linux-arm64-gnu": "0.4.7",
-    "@gkorepanov/ccodex-relay-linux-x64-gnu": "0.4.7"
+    "@gkorepanov/ccodex-relay-darwin-arm64": "0.4.8",
+    "@gkorepanov/ccodex-relay-linux-arm64-gnu": "0.4.8",
+    "@gkorepanov/ccodex-relay-linux-x64-gnu": "0.4.8"
   },
   "devDependencies": {
     "@types/node": "24.10.1",

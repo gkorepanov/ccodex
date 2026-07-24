@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { assertClaudeControlSurface, mapClaudeModel } from "../../src/claude/modelCatalog.js";
+import {
+  assertClaudeControlSurface,
+  claudeModelDisplayName,
+  mapClaudeModel,
+} from "../../src/claude/modelCatalog.js";
 
 describe("mapClaudeModel", () => {
   it("rejects an SDK query missing required lifecycle controls", () => {
@@ -32,7 +36,37 @@ describe("mapClaudeModel", () => {
       resolvedModel: "claude-fable-5",
       displayName: "Fable",
       description: "Largest Claude model.",
-    }, "claude:").id).toBe("claude:claude-fable-5");
+    }, "claude:")).toMatchObject({
+      id: "claude:claude-fable-5",
+      displayName: "Fable 5",
+    });
+  });
+
+  it("shows the resolved version beside every Claude alias", () => {
+    expect(claudeModelDisplayName({
+      value: "default",
+      resolvedModel: "claude-opus-5[1m]",
+      displayName: "Default (recommended)",
+      description: "Default Claude model.",
+    })).toBe("Default (recommended · Opus 5)");
+    expect(claudeModelDisplayName({
+      value: "sonnet",
+      resolvedModel: "claude-sonnet-5",
+      displayName: "Sonnet",
+      description: "Efficient Claude model.",
+    })).toBe("Sonnet 5");
+    expect(claudeModelDisplayName({
+      value: "haiku",
+      resolvedModel: "claude-haiku-4-5-20251001",
+      displayName: "Haiku",
+      description: "Fast Claude model.",
+    })).toBe("Haiku 4.5");
+    expect(claudeModelDisplayName({
+      value: "opus",
+      resolvedModel: "claude-opus-5",
+      displayName: "Opus 5",
+      description: "Already explicit.",
+    })).toBe("Opus 5");
   });
 
   it("does not invent effort or service tiers", () => {
