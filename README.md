@@ -129,28 +129,29 @@ closes that gap without ever touching the signed `.app` bundle (so Sparkle auto-
 keep working):
 
 - `ccodex setup` points the App at ccodex automatically via
-  `CODEX_CLI_PATH=~/.ccodex/bin/codex-desktop` — it runs `launchctl setenv` for the live
+  `CODEX_CLI_PATH=~/.ccodex/bin/codex` — it runs `launchctl setenv` for the live
   session, installs a one-shot login LaunchAgent (`dev.ccodex.codex-cli-path`) so the GUI
   session re-publishes it on every login/reboot, and exports it in the managed shell
-  blocks for terminal-launched instances. That managed entrypoint marks the launch and
-  execs the pinned ccodex runtime. **Fully quit the Codex App (`Cmd+Q`) and relaunch it**
+  blocks for terminal-launched instances. The same managed `codex` entrypoint is used
+  locally and over SSH. **Fully quit the Codex App (`Cmd+Q`) and relaunch it**
   (or log out and back in) so it picks up the variable.
-- The marked `app-server` launch runs a **stdio↔unix-socket bridge**: it translates the
-  App's newline-delimited JSON to the app-server-control socket, lazily starting the
-  gateway and retrying so a cold start never crashes the App.
+- A bare `app-server` launch runs a thin **stdio frontend**: it forwards the App's
+  newline-delimited JSON to the existing app-server-control socket, lazily starts the
+  gateway when cold, and reconnects after gateway restarts. Provider state and lifecycle
+  remain exclusively inside the existing gateway.
 - A **LaunchAgent** (`dev.ccodex.gateway`, `KeepAlive`) owns the control socket
   persistently and starts the remote-relay, replacing the detached daemon as the
   keepalive owner. All of it is installed by `ccodex setup`, reversed exactly by `ccodex
   uninstall` (`launchctl unsetenv`, both agents removed, shell export stripped — modified
   files preserved), and tracked in `install.json` under the same hash/owner guards as the
   shims. `ccodex doctor --deep` reports `desktop-entry`, `desktop-agent`, and
-  `desktop-bridge`.
+  `desktop-stdio`.
 
 ## Technical details
 
 | | |
 |---|---|
-| **CCodex** | `0.4.0` |
+| **CCodex** | `0.4.6` |
 | **Embedded Codex CLI** | `0.144.6` (pinned; a newer global Codex never replaces it) |
 | **Claude Agent SDK / Claude Code** | `0.3.215` / `2.1.215` |
 | **Runtime** | Node.js `>=22.13 <27`, npm `>=10` |
