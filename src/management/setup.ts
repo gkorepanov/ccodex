@@ -325,7 +325,11 @@ export function activate(layout: InstallLayout, version: string): string | null 
   const previous = activeVersion(layout);
   if (previous && previous !== version) atomicSymlink(join("versions", previous), layout.previous);
   atomicSymlink(join("versions", version), layout.current);
-  return previous;
+  // rollback() reads layout.previous, so the recorded predecessor must be whatever that link names:
+  // reactivating the live version leaves the link alone and must not overwrite the real predecessor.
+  return existsSync(layout.previous) && lstatSync(layout.previous).isSymbolicLink()
+    ? basename(readlinkSync(layout.previous))
+    : null;
 }
 
 export async function setup(args: readonly string[]): Promise<number> {

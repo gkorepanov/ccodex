@@ -8,7 +8,7 @@ import { compatibilityManifest } from "../../src/compatibility/probe.js";
 import { installLayout } from "../../src/management/layout.js";
 import { posixManagedBlock } from "../../src/management/shellRouting.js";
 import { rollback, uninstall } from "../../src/management/lifecycle.js";
-import type { InstallManifest } from "../../src/management/setup.js";
+import { activate, type InstallManifest } from "../../src/management/setup.js";
 
 const roots: string[] = [];
 const oldHome = process.env.HOME;
@@ -71,6 +71,30 @@ describe("public install lifecycle", () => {
     await rollback([]);
     expect(readlinkSync(layout.current)).toBe(join("versions", "0.2.9"));
     expect(readlinkSync(layout.previous)).toBe(join("versions", "0.3.0"));
+    expect(JSON.parse(readFileSync(layout.manifest, "utf8"))).toMatchObject({
+      activeVersion: "0.2.9", previousVersion: "0.3.0",
+    });
+  });
+
+  it("records the version activation displaced and rolls back to it", async () => {
+    const { layout, manifest } = fixture();
+    mkdirSync(join(layout.versions, "0.4.0"), { recursive: true });
+    expect(activate(layout, "0.4.0")).toBe("0.3.0");
+    writeFileSync(layout.manifest, JSON.stringify({ ...manifest, activeVersion: "0.4.0", previousVersion: "0.3.0" }));
+    await rollback([]);
+    expect(readlinkSync(layout.current)).toBe(join("versions", "0.3.0"));
+    expect(JSON.parse(readFileSync(layout.manifest, "utf8"))).toMatchObject({
+      activeVersion: "0.3.0", previousVersion: "0.4.0",
+    });
+  });
+
+  it("keeps the real predecessor when the live version is reactivated", async () => {
+    const { layout, manifest } = fixture();
+    const previousVersion = activate(layout, "0.3.0");
+    expect(previousVersion).toBe("0.2.9");
+    writeFileSync(layout.manifest, JSON.stringify({ ...manifest, previousVersion }));
+    await rollback([]);
+    expect(readlinkSync(layout.current)).toBe(join("versions", "0.2.9"));
     expect(JSON.parse(readFileSync(layout.manifest, "utf8"))).toMatchObject({
       activeVersion: "0.2.9", previousVersion: "0.3.0",
     });
