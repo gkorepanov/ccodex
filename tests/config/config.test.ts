@@ -77,16 +77,20 @@ describe("opinionated feature configuration", () => {
       sideChatPromotion: true,
       optimisticSideStartup: true,
       interactiveQuestions: true,
+      claudeSkills: true,
     });
     expect(configured().renamePrompt).toBeUndefined();
     expect(configured("[features]\nstatus_command = false\n").features)
       .toEqual({
         statusCommand: false, sideChatPromotion: true, optimisticSideStartup: true, interactiveQuestions: true,
+        claudeSkills: true,
       });
     expect(configured("[features]\ninteractive_questions = false\n").features)
       .toEqual({
         statusCommand: true, sideChatPromotion: true, optimisticSideStartup: true, interactiveQuestions: false,
+        claudeSkills: true,
       });
+    expect(configured("[features]\nclaude_skills = false\n").features?.claudeSkills).toBe(false);
   });
 
   it("uses rename_prompt presence as the title UX switch and ignores the retired feature key", () => {
@@ -101,6 +105,7 @@ status_command = true
       renamePrompt: "Use one rare emoji and a vivid title.",
       features: {
         statusCommand: true, sideChatPromotion: true, optimisticSideStartup: true, interactiveQuestions: true,
+        claudeSkills: true,
       },
     });
     expect(configured(`
@@ -110,6 +115,7 @@ status_command = false
 `)).toMatchObject({
       features: {
         statusCommand: false, sideChatPromotion: true, optimisticSideStartup: true, interactiveQuestions: true,
+        claudeSkills: true,
       },
     });
     expect(configured(`
@@ -128,6 +134,8 @@ status_command = false
       .toThrow("features.optimistic_side_startup must be a boolean.");
     expect(() => configured("[features]\ninteractive_questions = 1\n"))
       .toThrow("features.interactive_questions must be a boolean.");
+    expect(() => configured("[features]\nclaude_skills = 1\n"))
+      .toThrow("features.claude_skills must be a boolean.");
     expect(() => configured("rename_prompt = \"\"\n"))
       .toThrow("rename_prompt must be a non-empty string.");
     expect(() => configured("rename_prompt = false\n"))

@@ -35,6 +35,7 @@ export interface FeatureConfig {
   readonly sideChatPromotion: boolean;
   readonly optimisticSideStartup: boolean;
   readonly interactiveQuestions: boolean;
+  readonly claudeSkills: boolean;
 }
 
 interface ConfigFile {
@@ -64,6 +65,7 @@ export const DEFAULT_FEATURES: FeatureConfig = {
   sideChatPromotion: true,
   optimisticSideStartup: true,
   interactiveQuestions: true,
+  claudeSkills: true,
 };
 
 export const DEFAULT_RENAME_PROMPT = `Create a concise, vivid, memorable title for the task.
@@ -83,6 +85,7 @@ status_command = true
 side_chat_promotion = true
 optimistic_side_startup = true
 interactive_questions = true
+claude_skills = true
 `;
 }
 
@@ -127,7 +130,7 @@ function featureConfig(value: unknown): FeatureConfig {
   }
   const table = value as Record<string, unknown>;
   for (const key of [
-    "status_command", "side_chat_promotion", "optimistic_side_startup", "interactive_questions",
+    "status_command", "side_chat_promotion", "optimistic_side_startup", "interactive_questions", "claude_skills",
   ] as const) {
     if (table[key] !== undefined && typeof table[key] !== "boolean") {
       throw new Error(`features.${key} must be a boolean.`);
@@ -138,6 +141,7 @@ function featureConfig(value: unknown): FeatureConfig {
     sideChatPromotion: table.side_chat_promotion as boolean | undefined ?? true,
     optimisticSideStartup: table.optimistic_side_startup as boolean | undefined ?? true,
     interactiveQuestions: table.interactive_questions as boolean | undefined ?? true,
+    claudeSkills: table.claude_skills as boolean | undefined ?? true,
   };
 }
 

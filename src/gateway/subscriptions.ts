@@ -32,6 +32,10 @@ export class SubscriptionHub {
     this.connections.set(connectionId, { connectionId, sink, ...(requestSink ? { requestSink } : {}) });
   }
 
+  public emitGlobal(method: string, params: unknown): void {
+    for (const connection of this.connections.values()) connection.sink(method, params);
+  }
+
   public subscribe(
     threadId: string,
     connectionId: string,

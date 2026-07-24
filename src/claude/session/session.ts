@@ -244,6 +244,7 @@ export interface ClaudeSessionRuntimeDependencies {
   readonly transcripts: TranscriptBrancher;
   readonly rateLimits: ClaudeRateLimitCoordinator;
   readonly invalidateModelCatalog: () => void;
+  readonly skillsChanged?: (cwd: string) => void;
   readonly isClosing: () => boolean;
   readonly persistUserSideSessions: boolean;
   readonly interactiveQuestions?: boolean;
@@ -2389,7 +2390,9 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       case "system":
         switch (message.subtype) {
           case "thinking_tokens":
+            return "retainedOnly";
           case "commands_changed":
+            if (this.record) this.runtimeDependencies?.skillsChanged?.(this.record.thread.cwd);
             return "retainedOnly";
           case "control_request_progress":
             return "stateOnly";

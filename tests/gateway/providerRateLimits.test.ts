@@ -1071,6 +1071,7 @@ describe("provider-aware rate-limit gateway routing", () => {
       undefined,
       {
         statusCommand: false, sideChatPromotion: true, optimisticSideStartup: true, interactiveQuestions: true,
+        claudeSkills: true,
       },
     );
 

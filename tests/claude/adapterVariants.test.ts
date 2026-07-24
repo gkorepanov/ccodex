@@ -48,6 +48,7 @@ async function runInteraction(
       ...config(directory),
       features: {
         statusCommand: true, sideChatPromotion: true, optimisticSideStartup: true, interactiveQuestions,
+        claudeSkills: true,
       },
     },
     hub, new Logger("error"), new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory,

@@ -341,6 +341,7 @@ export class ClaudeService {
       provider: "claude",
       state: "ready",
     }),
+    private readonly skillsChanged?: (cwd: string) => void,
   ) {
     this.store = new LayeredHybridStore(durableStore);
     const sessionRepository = new ClaudeSessionRepository(this.store);
@@ -365,6 +366,7 @@ export class ClaudeService {
           transcripts: this.transcripts,
           rateLimits: this.rateLimits,
           invalidateModelCatalog: () => this.modelCatalog?.invalidate?.(),
+          ...(this.skillsChanged ? { skillsChanged: this.skillsChanged } : {}),
           isClosing: () => this.closing,
           persistUserSideSessions: this.config.features?.sideChatPromotion ?? true,
           interactiveQuestions: this.config.features?.interactiveQuestions ?? true,

@@ -4,6 +4,7 @@ import type { Socket } from "node:net";
 import { join } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import { ClaudeModelCatalog } from "../claude/modelCatalog.js";
+import { ClaudeSkillCatalog } from "../claude/skillCatalog.js";
 import { ClaudeService } from "../claude/service.js";
 import { DEFAULT_FEATURES, type HybridConfig } from "../config/config.js";
 import { startStockProcess } from "../codex/stockProcess.js";
@@ -47,11 +48,13 @@ async function startGatewayOwner(
   const metrics = new MetricsRegistry();
   const recorder = new RpcRecorder(config);
   const remoteControl = relayEnabled ? new RemoteControlHub() : undefined;
+  const features = config.features ?? DEFAULT_FEATURES;
   const claudeModels = new ClaudeModelCatalog(config, logger, metrics);
   await claudeModels.list().catch((error: unknown) => {
     logger.warn("compatibility.claude-unavailable", { error: error instanceof Error ? error.message : String(error) });
   });
   const subscriptions = new SubscriptionHub();
+  const claudeSkills = new ClaudeSkillCatalog(config, logger);
   const cursors = CursorCodec.load(config.dataDir);
   const providerAvailability = new ProviderAvailabilityService(config);
   const stockState = new StockStateTracker();
@@ -70,9 +73,14 @@ async function startGatewayOwner(
       const availability = await providerAvailability.read("claude");
       return availability.state === "ready" ? availability : providerAvailability.refresh("claude");
     },
+    features.claudeSkills
+      ? (cwd) => {
+          claudeSkills.invalidate(cwd);
+          subscriptions.emitGlobal("skills/changed", {});
+        }
+      : undefined,
   );
   await claude.ready();
-  const features = config.features ?? DEFAULT_FEATURES;
   const handoffs = new CrossProviderForks(
     new HandoffStore(join(config.dataDir, "handoffs.sqlite")),
     claude,
@@ -143,6 +151,7 @@ async function startGatewayOwner(
         stockState,
         stockSideThreads,
         features.optimisticSideStartup ? optimisticSideThreads : undefined,
+        claudeSkills,
       );
       connectionCleanups.add(connection.closed);
       const untrack = () => connectionCleanups.delete(connection.closed);

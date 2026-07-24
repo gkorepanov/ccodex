@@ -42,4 +42,38 @@ describe("mapUserInput", () => {
     expect(human.origin).toEqual({ kind: "human" });
     expect(synthetic.origin).toBeUndefined();
   });
+
+  it("turns captured Claude skill chips into native slash commands without rewriting the prompt", async () => {
+    const mapped = await mapUserInput([{
+      type: "text",
+      text: "используй [$claude:dataviz](/tmp/virtual/claude-skills/dataviz/SKILL.md) sales.csv",
+      text_elements: [],
+    }]);
+    expect(mapped.message.content).toBe("используй /dataviz sales.csv");
+
+    const direct = await mapUserInput([{
+      type: "text",
+      text: "[$claude:dataviz](/tmp/virtual/claude-skills/dataviz/SKILL.md) sales.csv",
+      text_elements: [],
+    }]);
+    expect(direct.message.content).toBe("/dataviz sales.csv");
+  });
+
+  it("keeps ordinary and multimodal messages on the SDK block transport", async () => {
+    const ordinary = await mapUserInput([{ type: "text", text: "$dataviz is plain text", text_elements: [] }]);
+    expect(ordinary.message.content).toEqual([{ type: "text", text: "$dataviz is plain text" }]);
+
+    const mixed = await mapUserInput([
+      {
+        type: "text",
+        text: "[$claude:dataviz](/tmp/virtual/claude-skills/dataviz/SKILL.md)",
+        text_elements: [],
+      },
+      { type: "image", url: "https://example.com/chart.png" },
+    ]);
+    expect(mixed.message.content).toEqual([
+      { type: "text", text: "/dataviz" },
+      { type: "image", source: { type: "url", url: "https://example.com/chart.png" } },
+    ]);
+  });
 });

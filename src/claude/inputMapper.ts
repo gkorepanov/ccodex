@@ -3,6 +3,7 @@ import { extname, isAbsolute, relative, resolve } from "node:path";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { UserInput } from "../codex/generated/v2/UserInput.js";
 import { invalidParams } from "../protocol/errors.js";
+import { decodeClaudeSkillChips } from "./skillCodec.js";
 
 const mediaTypes: Record<string, string> = {
   ".gif": "image/gif",
@@ -36,8 +37,13 @@ async function allowedImagePath(path: string, context: InputContext): Promise<st
 
 export async function mapUserInput(input: readonly UserInput[], uuid?: string, context?: InputContext): Promise<SDKUserMessage> {
   const content: Array<Record<string, unknown>> = [];
+  let decodedSkill = false;
   for (const item of input) {
-    if (item.type === "text") content.push({ type: "text", text: item.text });
+    if (item.type === "text") {
+      const decoded = decodeClaudeSkillChips(item.text);
+      decodedSkill ||= decoded.decoded;
+      content.push({ type: "text", text: decoded.text });
+    }
     else if (item.type === "mention") {
       content.push({ type: "text", text: `@${item.name} (${item.path})` });
     } else if (item.type === "skill") {
@@ -64,6 +70,11 @@ export async function mapUserInput(input: readonly UserInput[], uuid?: string, c
     parent_tool_use_id: null,
     ...(uuid ? { uuid } : {}),
     ...(context?.origin === "human" ? { origin: { kind: "human" } } : {}),
-    message: { role: "user", content },
+    message: {
+      role: "user",
+      content: decodedSkill && content.every((block) => block.type === "text")
+        ? content.map((block) => block.text).join("")
+        : content,
+    },
   } as unknown as SDKUserMessage;
 }

@@ -2,6 +2,7 @@ import { validate as isUuid, v7 as uuidv7 } from "uuid";
 import type WebSocket from "ws";
 import { WebSocket as WebSocketState } from "ws";
 import type { ModelListParams } from "../codex/generated/v2/ModelListParams.js";
+import type { SkillsListParams } from "../codex/generated/v2/SkillsListParams.js";
 import type { ThreadListParams } from "../codex/generated/v2/ThreadListParams.js";
 import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { ThreadLoadedListParams } from "../codex/generated/v2/ThreadLoadedListParams.js";
@@ -30,12 +31,14 @@ import type { ThreadBackgroundTerminalsListParams } from "../codex/generated/v2/
 import type { ThreadBackgroundTerminalsTerminateParams } from "../codex/generated/v2/ThreadBackgroundTerminalsTerminateParams.js";
 import type { GetAccountRateLimitsResponse } from "../codex/generated/v2/GetAccountRateLimitsResponse.js";
 import type { ClaudeModelCatalog } from "../claude/modelCatalog.js";
+import type { ClaudeSkillCatalog } from "../claude/skillCatalog.js";
 import type { ClaudeService } from "../claude/service.js";
 import { connectStock } from "../codex/stockConnection.js";
 import type { Logger } from "../observability/logger.js";
 import { isRequest, isResponse, parseRpcMessage } from "../protocol/envelopes.js";
 import { RpcError, rpcCodexErrorInfo, rpcError } from "../protocol/errors.js";
 import { mergedModelList } from "./modelList.js";
+import { providerSkillsList } from "./skillList.js";
 import { StockRpc } from "./stockRpc.js";
 import type { SubscriptionHub } from "./subscriptions.js";
 import type { CursorCodec } from "../protocol/cursor.js";
@@ -117,6 +120,7 @@ export function attachClientConnection(
   sharedStockState?: StockStateTracker,
   stockSideThreads?: StockSideThreads,
   optimisticSideThreads?: OptimisticSideThreads,
+  claudeSkills?: Pick<ClaudeSkillCatalog, "list">,
 ): ClientConnectionHandle {
   const connectionId = uuidv7();
   let resolveClosed!: () => void;
@@ -754,6 +758,22 @@ export function attachClientConnection(
             claudeModels,
             logger,
             cursors,
+          ));
+          return;
+        }
+        if (message.method === "skills/list" && features.claudeSkills && claudeSkills) {
+          const backendThreadId = foreground?.provider === "claude"
+            ? handoffs.logical?.(foreground.threadId)?.epoch.backendThreadId ?? foreground.threadId
+            : undefined;
+          const defaultCwd = backendThreadId && claude.ownsThread(backendThreadId)
+            ? claude.readThread(backendThreadId, false).thread.cwd
+            : undefined;
+          sendResult(message.id, await providerSkillsList(
+            (message.params ?? {}) as SkillsListParams,
+            stockRpc,
+            claudeSkills,
+            foreground?.provider,
+            defaultCwd,
           ));
           return;
         }

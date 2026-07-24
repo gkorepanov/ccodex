@@ -1784,6 +1784,7 @@ describe("ClaudeService", () => {
       ...config(directory),
       features: {
         statusCommand: true, sideChatPromotion: false, optimisticSideStartup: true, interactiveQuestions: true,
+        claudeSkills: true,
       },
     };
     const service = new ClaudeService(
@@ -4456,6 +4457,43 @@ describe("ClaudeService", () => {
       providerEventId: "ordered-provider-event",
       disposition: "projected",
     }));
+    await service.close();
+  });
+
+  it("invalidates Claude skills when the SDK reports commands_changed", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-commands-changed-"));
+    directories.push(directory);
+    const changed: string[] = [];
+    const message = {
+      type: "system",
+      subtype: "commands_changed",
+      commands: [{ name: "dataviz", description: "Charts", argumentHint: "" }],
+      uuid: randomUUID(),
+      session_id: "session",
+    } as unknown as SDKMessage;
+    const service = new ClaudeService(
+      config(directory),
+      new SubscriptionHub(),
+      new Logger("error"),
+      new SqliteHybridStore(join(directory, "state.sqlite")),
+      new FakeClaudeQuery(undefined, undefined, [], false, undefined, undefined, undefined, [message]).factory,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (cwd) => changed.push(cwd),
+    );
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const prepared = await service.prepareTurn({
+      threadId: started.thread.id,
+      input: [{ type: "text", text: "discover commands", text_elements: [] }],
+    });
+    prepared.announce();
+    prepared.start();
+    await waitFor(() => changed.length === 1, "commands_changed invalidation");
+    expect(changed).toEqual([directory]);
     await service.close();
   });
 

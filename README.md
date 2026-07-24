@@ -43,6 +43,8 @@ missing bridge.
   a compact context handoff, so your chat doesn't start from zero.
 - ⚡ **Native-feeling Codex features** — threads, turns, tools, approvals, `/compact`,
   Fork, effort and fast-mode settings all work with Claude models like they were built in.
+- 🧩 **Claude skills in `$` autocomplete** — project and user skills appear beside Codex
+  skills and invoke Claude's native slash commands.
 - 📊 **Status commands** — `/ccstatus` shows provider health and quotas for ❋ Claude
   and ֎ Codex; `/ccstate` shows the current task's model, context, traffic, cost, and
   session stats.
@@ -174,6 +176,7 @@ Return only the title.
 [features]
 status_command = false # forward /ccstatus and /ccstate to the provider as plain messages
 optimistic_side_startup = true # open `/side` immediately while provider context is prepared
+claude_skills = true # expose Claude skills in the Codex App `$` autocomplete
 ```
 
 Remove or comment out `rename_prompt` for byte-compatible stock Codex title generation.

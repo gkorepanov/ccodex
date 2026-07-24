@@ -2,6 +2,20 @@ import { describe, expect, it } from "vitest";
 import { SubscriptionHub } from "../../src/gateway/subscriptions.js";
 
 describe("SubscriptionHub", () => {
+  it("broadcasts global catalog invalidations once per attached App", () => {
+    const hub = new SubscriptionHub();
+    const desktop: string[] = [];
+    const mobile: string[] = [];
+    hub.attach("desktop", (method) => desktop.push(method));
+    hub.attach("mobile", (method) => mobile.push(method));
+    hub.subscribe("thread-1", "mobile", (method) => mobile.push(method));
+
+    hub.emitGlobal("skills/changed", {});
+
+    expect(desktop).toEqual(["skills/changed"]);
+    expect(mobile).toEqual(["skills/changed"]);
+  });
+
   it("broadcasts global thread lifecycle once while keeping turn details scoped", () => {
     const hub = new SubscriptionHub();
     const desktop: string[] = [];
