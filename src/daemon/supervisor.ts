@@ -27,6 +27,7 @@ const LOCK_TIMEOUT_MS = 75_000;
 export interface PidRecord {
   readonly pid: number;
   readonly processStartTime: string;
+  readonly wrapperPath?: string;
 }
 
 interface LockOwner extends PidRecord {
@@ -81,7 +82,11 @@ export function processMatches(record: PidRecord): boolean {
 
 function parseRecord(contents: string): PidRecord {
   const value = JSON.parse(contents) as Partial<PidRecord>;
-  if (!Number.isInteger(value.pid) || typeof value.processStartTime !== "string") {
+  if (
+    !Number.isInteger(value.pid)
+    || typeof value.processStartTime !== "string"
+    || (value.wrapperPath !== undefined && typeof value.wrapperPath !== "string")
+  ) {
     throw new Error("invalid pid record");
   }
   return value as PidRecord;
@@ -163,7 +168,11 @@ export async function publishDaemonChildRecord(): Promise<() => void> {
   }
   const startTime = processStartTime(process.pid);
   if (!startTime) throw new Error(`failed to record daemon child process ${process.pid} startup`);
-  const record = { pid: process.pid, processStartTime: startTime };
+  const record = {
+    pid: process.pid,
+    processStartTime: startTime,
+    ...(reservation.wrapperPath ? { wrapperPath: reservation.wrapperPath } : {}),
+  };
   atomicWrite(pidFile, record);
   delete process.env[CHILD_PID_FILE];
   delete process.env[CHILD_TOKEN];
@@ -177,7 +186,11 @@ export async function spawnDetachedGateway(options: {
   readonly remoteControlEnabled: boolean;
 }): Promise<number> {
   const token = randomUUID();
-  const reservation = { pid: 0, processStartTime: `starting:${token}` };
+  const reservation = {
+    pid: 0,
+    processStartTime: `starting:${token}`,
+    wrapperPath: options.wrapperPath,
+  };
   atomicWrite(options.pidFile, reservation);
   mkdirSync(dirname(options.stderrLog), { recursive: true, mode: 0o700 });
   const stderr = openSync(options.stderrLog, "w", 0o600);

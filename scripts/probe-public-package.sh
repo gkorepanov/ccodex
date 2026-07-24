@@ -5,8 +5,20 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 WORK=$(mktemp -d "/tmp/ccodex-public-package.XXXXXX")
 WORK=$(CDPATH= cd -- "$WORK" && pwd -P)
 PREEXISTING_PID=
+ORIGINAL_CODEX_CLI_PATH=$(/bin/launchctl getenv CODEX_CLI_PATH 2>/dev/null || true)
 cleanup() {
+  if [ -x "${CCODEX_HOME:-}/bin/ccodex" ]; then
+    "${CCODEX_HOME}/bin/ccodex" app-server daemon stop >/dev/null 2>&1 || true
+  fi
   if [ -n "$PREEXISTING_PID" ]; then kill "$PREEXISTING_PID" 2>/dev/null || true; fi
+  if [ "$(uname -s)" = Darwin ]; then
+    /bin/launchctl bootout "gui/$(id -u)/dev.ccodex.codex-cli-path" >/dev/null 2>&1 || true
+    if [ -n "$ORIGINAL_CODEX_CLI_PATH" ]; then
+      /bin/launchctl setenv CODEX_CLI_PATH "$ORIGINAL_CODEX_CLI_PATH"
+    else
+      /bin/launchctl unsetenv CODEX_CLI_PATH
+    fi
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT HUP INT TERM
@@ -81,26 +93,27 @@ PATH="$WORK/fake-bin:$HOME/.local/bin:$WORK/upstream/bin:$tool_path" SHELL=/bin/
 test -f "$CCODEX_HOME/config.toml"
 grep -q '^rename_prompt = """$' "$CCODEX_HOME/config.toml"
 grep -q 'rare, expressive, context-relevant emoji' "$CCODEX_HOME/config.toml"
-for _ in $(seq 1 200); do
-  kill -0 "$PREEXISTING_PID" 2>/dev/null || break
-  sleep 0.05
-done
-if kill -0 "$PREEXISTING_PID" 2>/dev/null; then
-  echo 'setup left the pre-existing stock app-server alive' >&2
+kill -0 "$PREEXISTING_PID" 2>/dev/null || {
+  echo 'setup interrupted the pre-existing app-server' >&2
   exit 1
-fi
-wait "$PREEXISTING_PID" 2>/dev/null || true
-PREEXISTING_PID=
-test -f "$CODEX_HOME/app-server-daemon/app-server.pid"
+}
+case "$(uname -s)" in
+  Darwin)
+    test ! -e "$CODEX_HOME/app-server-daemon/app-server.pid"
+    test -f "$HOME/Library/LaunchAgents/dev.ccodex.codex-cli-path.plist"
+    ;;
+  *) test ! -e "$CODEX_HOME/app-server-daemon/app-server.pid" ;;
+esac
 orphans=$(ps -eo args= | grep -F "$WORK/stage/node_modules" | grep -v grep || true)
 test -z "$orphans" || {
   printf '%s\n' "setup smoke left orphan processes:" "$orphans" >&2
   exit 1
 }
 test "$(/bin/sh -c '. "$HOME/.profile"; command -v codex')" = "$CCODEX_HOME/bin/codex"
-test "$(tail -n 3 "$HOME/.config/fish/config.fish")" = "# >>> ccodex >>>
-fish_add_path --move --prepend \"$CCODEX_HOME/bin\"
-# <<< ccodex <<<"
+grep -Fq "fish_add_path --move --prepend \"$CCODEX_HOME/bin\"" "$HOME/.config/fish/config.fish"
+if [ "$(uname -s)" = Darwin ]; then
+  grep -Fq "set -gx CODEX_CLI_PATH \"$CCODEX_HOME/bin/codex\"" "$HOME/.config/fish/config.fish"
+fi
 node -e 'const m=require(process.argv[1]);if(m.delegateCodex!==process.argv[2])process.exit(1)' \
   "$CCODEX_HOME/install.json" "$CCODEX_HOME/backups/remote-codex"
 remote_version=$(PATH="$WORK/upstream/bin:$tool_path" node -e '
@@ -112,15 +125,35 @@ remote_version=$(PATH="$WORK/upstream/bin:$tool_path" node -e '
 test "$remote_version" = 'codex-cli 0.144.6'
 PATH="$WORK/upstream/bin:$tool_path" node -e '
   const {spawnSync}=require("node:child_process");
-  const r=spawnSync("/bin/sh",["-c","PATH=\"$HOME/.local/bin:$PATH\"; codex app-server proxy"],{env:process.env,encoding:"utf8",timeout:5000});
+  const r=spawnSync("/bin/sh",["-c","PATH=\"$HOME/.local/bin:$PATH\"; codex app-server daemon start"],{env:process.env,encoding:"utf8",timeout:90000});
   if(r.error||r.status!==0){process.stderr.write(r.stderr||String(r.error));process.exit(1)}
 '
+PATH="$WORK/upstream/bin:$tool_path" /bin/sh -c 'PATH="$HOME/.local/bin:$PATH"; codex app-server proxy'
 grep -q 'app-server proxy --sock ' "$FAKE_CODEX_LOG"
-"$CCODEX_HOME/bin/ccodex" doctor --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{if(!JSON.parse(s).ok)process.exit(1)})'
+for _ in $(seq 1 200); do
+  kill -0 "$PREEXISTING_PID" 2>/dev/null || break
+  sleep 0.05
+done
+kill -0 "$PREEXISTING_PID" 2>/dev/null && {
+  echo 'first reconnect did not replace the old app-server' >&2
+  exit 1
+}
+wait "$PREEXISTING_PID" 2>/dev/null || true
+PREEXISTING_PID=
+test -f "$CODEX_HOME/app-server-daemon/app-server.pid"
+doctor=$("$CCODEX_HOME/bin/ccodex" doctor --json || true)
+printf '%s' "$doctor" | node -e '
+  let s="";
+  process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const report=JSON.parse(s);
+    if(!report.ok){process.stderr.write(`${JSON.stringify(report,null,2)}\n`);process.exit(1)}
+  })
+'
 touch "$CCODEX_HOME/state/preserved.sqlite"
 "$CCODEX_HOME/bin/ccodex" uninstall >/dev/null
 test -f "$CCODEX_HOME/state/preserved.sqlite"
 test "$(cat "$HOME/.config/fish/config.fish")" = 'set -gx PATH /usr/bin /bin'
+test ! -e "$HOME/Library/LaunchAgents/dev.ccodex.codex-cli-path.plist"
 test "$(PATH="$WORK/upstream/bin:$tool_path" /bin/sh -c 'PATH="$HOME/.local/bin:$PATH"; codex --version')" = 'codex-cli 0.144.6'
 
 mkdir -p "$WORK/warn-stage" "$WORK/warn-home"

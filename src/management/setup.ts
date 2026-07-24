@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  chmodSync, cpSync, existsSync, lstatSync, readFileSync, readlinkSync, renameSync, rmSync, statSync,
+  cpSync, existsSync, lstatSync, readFileSync, readlinkSync, renameSync, rmSync, statSync,
   unlinkSync, realpathSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -11,20 +11,27 @@ import { compatibilityManifest } from "../compatibility/probe.js";
 import { defaultConfigToml, delegatedCodexExecutable, loadConfig } from "../config/config.js";
 import { pinnedCodexExecutable, runtimePlatformKey } from "../runtime/dependencies.js";
 import { probeAppServer } from "../daemon/probe.js";
-import { reconcileManagedProcess, stopManagedProcess } from "../daemon/supervisor.js";
 import { atomicSymlink, atomicWrite, ensureLayout, installLayout, type InstallLayout } from "./layout.js";
-import { managedShim } from "./shims.js";
+import {
+  fishManagedBlock as fishBlock, MANAGED_BLOCK_BEGIN as BEGIN,
+  legacyFishManagedBlock as oldFishBlock, legacyPosixManagedBlock as legacyPosixBlock,
+  posixManagedBlock as posixBlock,
+} from "./shellRouting.js";
+import {
+  installManagedShims, restoreManagedShims, type ManagedShimChange,
+} from "./shims.js";
 import {
   installRemoteCodexShim, relocatedDelegate, restoreRemoteCodexShim, type RemoteCodexShim,
 } from "./remoteShim.js";
+import {
+  installCliPathAgent, uninstallCliPathAgent, type CliPathAgentInstall,
+} from "../desktop/launchAgent.js";
 
 const execute = promisify(execFile);
-const BEGIN = "# >>> ccodex >>>";
-const END = "# <<< ccodex <<<";
 
 interface ShellRouting {
   readonly managed: string[];
-  readonly added: string[];
+  readonly changed: Array<{ readonly path: string; readonly content?: string; readonly mode: number }>;
 }
 
 export interface InstallManifest {
@@ -38,6 +45,8 @@ export interface InstallManifest {
   readonly managedShellFiles: string[];
   readonly shimHashes: Readonly<Record<string, string>>;
   readonly remoteCodexShim?: RemoteCodexShim;
+  readonly desktopCliPath?: CliPathAgentInstall;
+  readonly nodeExecutable?: string;
   readonly platformPackage: string;
   readonly compatibility: ReturnType<typeof compatibilityManifest>;
   readonly doctor: { readonly ok: true; readonly checkedAt: string };
@@ -162,87 +171,72 @@ function hashFile(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-function installShims(layout: InstallLayout): Readonly<Record<string, string>> {
-  for (const name of ["ccodex", "codex"] as const) {
-    atomicWrite(join(layout.bin, name), managedShim(name), 0o755);
-    chmodSync(join(layout.bin, name), 0o755);
-  }
-  return Object.fromEntries(["ccodex", "codex"].map((name) => [name, hashFile(join(layout.bin, name))]));
+function validateManagedBlock(path: string, desired: string, legacy: string): void {
+  if (!existsSync(path)) return;
+  const existing = readFileSync(path, "utf8");
+  if (!existing.includes(BEGIN) || existing.includes(desired) || existing.includes(legacy)) return;
+  throw new Error(`Refusing to overwrite a modified CCodex block in ${path}`);
 }
 
-function appendManagedBlock(path: string, block: string): void {
-  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
-  if (existing.includes(BEGIN)) {
-    if (!existing.includes(block.trim())) throw new Error(`Refusing to overwrite a modified CCodex block in ${path}`);
-    return;
-  }
-  const mode = existsSync(path) ? statSync(path).mode & 0o777 : 0o600;
-  atomicWrite(path, `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${block}`, mode);
-}
-
-function posixBlock(layout: InstallLayout): string {
-  return `${BEGIN}\nexport PATH="${layout.bin}:$PATH"\n${END}\n`;
-}
-
-function fishBlock(layout: InstallLayout): string {
-  return `${BEGIN}\nfish_add_path --move --prepend "${layout.bin}"\n${END}\n`;
+function installManagedBlock(
+  path: string,
+  desired: string,
+  legacy: string,
+): { readonly path: string; readonly content?: string; readonly mode: number } | undefined {
+  const existed = existsSync(path);
+  const existing = existed ? readFileSync(path, "utf8") : "";
+  if (existing.includes(desired)) return undefined;
+  const mode = existed ? statSync(path).mode & 0o777 : 0o600;
+  const next = existing.includes(legacy)
+    ? existing.replace(legacy, desired)
+    : `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${desired}`;
+  atomicWrite(path, next, mode);
+  return { path, ...(existed ? { content: existing } : {}), mode };
 }
 
 function installShellPaths(layout: InstallLayout): ShellRouting {
   const home = homedir();
   const shellBlock = posixBlock(layout);
+  const oldShellBlock = legacyPosixBlock(layout);
   const bashLogin = existsSync(join(home, ".bash_profile")) ? join(home, ".bash_profile") : join(home, ".profile");
   const files = [bashLogin, join(home, ".bashrc"), join(home, ".zprofile"), join(home, ".zshrc")];
-  for (const path of files) {
-    const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
-    if (existing.includes(BEGIN) && !existing.includes(shellBlock.trim())) {
-      throw new Error(`Refusing to overwrite a modified CCodex block in ${path}`);
-    }
-  }
+  for (const path of files) validateManagedBlock(path, shellBlock, oldShellBlock);
   const fish = join(home, ".config", "fish", "config.fish");
   const fishConfigBlock = fishBlock(layout);
-  const fishExisting = existsSync(fish) ? readFileSync(fish, "utf8") : "";
-  if (fishExisting.includes(BEGIN) && !fishExisting.includes(fishConfigBlock.trim())) {
-    throw new Error(`Refusing to overwrite a modified CCodex block in ${fish}`);
-  }
+  const oldFishConfigBlock = oldFishBlock(layout);
+  validateManagedBlock(fish, fishConfigBlock, oldFishConfigBlock);
   const legacyFish = join(home, ".config", "fish", "conf.d", "ccodex.fish");
-  const legacyFishBlock = `# Managed by CCodex.\nfish_add_path --prepend "${layout.bin}"\n`;
-  if (existsSync(legacyFish) && readFileSync(legacyFish, "utf8") !== legacyFishBlock) {
+  const legacyFishFileBlock = `# Managed by CCodex.\nfish_add_path --prepend "${layout.bin}"\n`;
+  if (existsSync(legacyFish) && readFileSync(legacyFish, "utf8") !== legacyFishFileBlock) {
     throw new Error(`Refusing to overwrite ${legacyFish}`);
   }
 
-  const added: string[] = [];
+  const changed: Array<{ readonly path: string; readonly content?: string; readonly mode: number }> = [];
   try {
     for (const path of files) {
-      if (!existsSync(path) || !readFileSync(path, "utf8").includes(BEGIN)) {
-        appendManagedBlock(path, shellBlock);
-        added.push(path);
-      }
+      const change = installManagedBlock(path, shellBlock, oldShellBlock);
+      if (change) changed.push(change);
     }
-    if (!fishExisting.includes(BEGIN)) {
-      appendManagedBlock(fish, fishConfigBlock);
-      added.push(fish);
-    }
+    const fishChange = installManagedBlock(fish, fishConfigBlock, oldFishConfigBlock);
+    if (fishChange) changed.push(fishChange);
     return {
       managed: [...files, fish, ...(existsSync(legacyFish) ? [legacyFish] : [])],
-      added,
+      changed,
     };
   } catch (error) {
-    removeFirstInstallRouting(layout, added, {});
+    removeFirstInstallRouting(layout, changed, {});
     throw error;
   }
 }
 
-function removeFirstInstallRouting(layout: InstallLayout, files: readonly string[], hashes: Readonly<Record<string, string>>): void {
-  for (const path of files) {
-    if (!existsSync(path)) continue;
-    const content = readFileSync(path, "utf8");
-    if (path.endsWith("ccodex.fish")) {
-      if (content === `# Managed by CCodex.\nfish_add_path --prepend "${layout.bin}"\n`) rmSync(path);
-    } else {
-      const block = path.endsWith("config.fish") ? fishBlock(layout) : posixBlock(layout);
-      if (content.includes(block)) atomicWrite(path, content.replace(block, ""), statSync(path).mode & 0o777);
-    }
+function removeFirstInstallRouting(
+  layout: InstallLayout,
+  changed: ReadonlyArray<{ readonly path: string; readonly content?: string; readonly mode: number }>,
+  hashes: Readonly<Record<string, string>>,
+): void {
+  for (const change of [...changed].reverse()) {
+    if (change.content === undefined) rmSync(change.path, { force: true });
+    else atomicWrite(change.path, change.content, change.mode);
   }
   for (const [name, hash] of Object.entries(hashes)) {
     const path = join(layout.bin, name);
@@ -292,20 +286,6 @@ export function activate(layout: InstallLayout, version: string): string | null 
   return previous;
 }
 
-function daemonPidFile(): string {
-  return join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "app-server-daemon", "app-server.pid");
-}
-
-async function replaceRunningDaemon(layout: InstallLayout, version: string): Promise<void> {
-  const command = join(layout.versions, version, "node_modules", ".bin", "ccodex");
-  await execute(command, ["app-server", "daemon", "restart"], { timeout: 90_000, maxBuffer: 512 * 1024 });
-}
-
-async function stopDaemon(layout: InstallLayout, version: string): Promise<void> {
-  const command = join(layout.versions, version, "node_modules", ".bin", "ccodex");
-  await execute(command, ["app-server", "daemon", "stop"], { timeout: 90_000, maxBuffer: 512 * 1024 });
-}
-
 export async function setup(args: readonly string[]): Promise<number> {
   if (process.getuid?.() === 0) throw new Error("Do not run CCodex setup as root or with sudo.");
   const stagedIndex = args.indexOf("--staged");
@@ -351,23 +331,31 @@ export async function setup(args: readonly string[]): Promise<number> {
     : undefined;
   const beforeManifest = existsSync(layout.manifest) ? readFileSync(layout.manifest, "utf8") : undefined;
   const previousManifest = beforeManifest ? JSON.parse(beforeManifest) as InstallManifest : undefined;
-  const daemonWasRunning = Boolean(reconcileManagedProcess(daemonPidFile()));
-  const gatewayWasRunning = await probeAppServer(publicSocket).then(() => true, () => false);
-  let installedShellFiles: string[] = [];
-  let installedShimHashes: Readonly<Record<string, string>> = {};
+  let installedShellChanges: ShellRouting["changed"] = [];
+  let installedShimChanges: readonly ManagedShimChange[] = [];
   let installedRemoteShim: RemoteCodexShim | undefined;
+  let installedDesktopHook: CliPathAgentInstall | undefined;
   const configPath = join(layout.home, "config.toml");
   let installedConfig = false;
   try {
     const previous = activate(layout, requestedVersion);
-    const shimHashes = installShims(layout);
-    installedShimHashes = shimHashes;
+    const installedShims = installManagedShims(
+      layout.bin,
+      process.execPath,
+      previousManifest?.shimHashes,
+    );
+    const shimHashes = installedShims.hashes;
+    installedShimChanges = installedShims.changes;
     const shellRouting = installShellPaths(layout);
-    installedShellFiles = shellRouting.added;
+    installedShellChanges = shellRouting.changed;
     await verifyShellPaths(layout);
     installedRemoteShim = installRemoteCodexShim(layout, previousManifest?.remoteCodexShim);
     delegateCodex = relocatedDelegate(installedRemoteShim, delegateCodex);
     installedConfig = installInitialConfig(layout);
+    const desktopCliPath = process.platform === "darwin"
+      ? installCliPathAgent(join(layout.bin, "codex"), previousManifest?.desktopCliPath)
+      : undefined;
+    installedDesktopHook = desktopCliPath;
     const manifest: InstallManifest = {
       schemaVersion: 1,
       method: supplied ? "curl" : "npm",
@@ -379,31 +367,40 @@ export async function setup(args: readonly string[]): Promise<number> {
       managedShellFiles: shellRouting.managed,
       shimHashes,
       ...(installedRemoteShim ? { remoteCodexShim: installedRemoteShim } : {}),
+      ...(desktopCliPath ? { desktopCliPath } : {}),
+      nodeExecutable: process.execPath,
       platformPackage: compatibility.relayPackages[runtimePlatformKey()] ?? "unsupported",
       compatibility,
       doctor: { ok: true, checkedAt: new Date().toISOString() },
       installedAt: new Date().toISOString(),
     };
     atomicWrite(layout.manifest, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
-    // setup is the ownership boundary: after the remote shim is in place, always
-    // leave one detached PID-managed gateway ready for App and proxy reconnects.
-    await replaceRunningDaemon(layout, requestedVersion);
   } catch (error) {
-    await stopDaemon(layout, requestedVersion).catch(async () => {
-      const managed = reconcileManagedProcess(daemonPidFile());
-      if (managed) await stopManagedProcess(daemonPidFile(), managed).catch((cleanupError: unknown) => {
-        process.stderr.write(`CCodex rollback could not stop partial gateway: ${String(cleanupError)}\n`);
-      });
-    });
     if (installedConfig) rmSync(configPath, { force: true });
     if (before) {
       atomicSymlink(join("versions", before), layout.current);
-      if (daemonWasRunning || gatewayWasRunning) await replaceRunningDaemon(layout, before).catch(() => undefined);
+      removeFirstInstallRouting(layout, installedShellChanges, {});
+      restoreManagedShims(installedShimChanges);
     }
     else {
       removeActivationLink(layout.current);
       restoreRemoteCodexShim(installedRemoteShim, previousManifest?.remoteCodexShim);
-      removeFirstInstallRouting(layout, installedShellFiles, installedShimHashes);
+      removeFirstInstallRouting(layout, installedShellChanges, {});
+      restoreManagedShims(installedShimChanges);
+    }
+    if (installedDesktopHook) {
+      try {
+        if (previousManifest?.desktopCliPath) {
+          installCliPathAgent(
+            previousManifest.desktopCliPath.entryShimPath,
+            installedDesktopHook,
+          );
+        } else {
+          uninstallCliPathAgent(installedDesktopHook);
+        }
+      } catch (desktopError) {
+        process.stderr.write(`CCodex rollback could not restore the desktop hook: ${String(desktopError)}\n`);
+      }
     }
     if (before) restoreRemoteCodexShim(installedRemoteShim, previousManifest?.remoteCodexShim);
     if (beforePrevious) atomicSymlink(beforePrevious, layout.previous);
@@ -412,6 +409,9 @@ export async function setup(args: readonly string[]): Promise<number> {
     else rmSync(layout.manifest, { force: true });
     throw error;
   }
-  process.stdout.write(`CCodex ${requestedVersion} activated. Open a new shell or run: export PATH="${layout.bin}:$PATH"\n`);
+  process.stdout.write(
+    `CCodex ${requestedVersion} activated. Open a new shell or run: export PATH="${layout.bin}:$PATH"`
+    + `${process.platform === "darwin" ? "\nReconnect Codex App to use this version." : ""}\n`,
+  );
   return 0;
 }

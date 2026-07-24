@@ -20,6 +20,7 @@ export type Invocation =
   | { readonly kind: "delegate" }
   | { readonly kind: "daemon"; readonly command: DaemonCommand; readonly remoteControl: boolean }
   | { readonly kind: "proxy"; readonly socketPath: string; readonly proxyArgs: string[] }
+  | { readonly kind: "stdioFrontend"; readonly socketPath: string }
   | { readonly kind: "gateway"; readonly socketPath: string; readonly stockArgs: string[] };
 
 const daemonCommands = new Set<DaemonCommand>([
@@ -104,7 +105,10 @@ export function classifyInvocation(args: readonly string[], config: HybridConfig
     };
   }
 
-  const listen = optionValue(appArgs, "--listen") ?? (appArgs.includes("--stdio") ? "stdio://" : undefined);
+  const listen = optionValue(appArgs, "--listen");
+  if (!listen || appArgs.includes("--stdio")) {
+    return { kind: "stdioFrontend", socketPath: config.publicSocket };
+  }
   const socketPath = socketPathFromListen(listen, config);
   const cleanAppArgs = stripOption(appArgs, "--listen").filter((value) => value !== "--stdio");
   return {

@@ -1,5 +1,7 @@
 # Packaged installs normally use their pinned Codex/Claude binaries and ~/.ccodex/state.
 # Override only when deliberately testing another executable or state location.
+# On macOS the local Codex App reaches ccodex via CODEX_CLI_PATH=~/.ccodex/bin/codex
+# (installed by `ccodex setup`); no config key is required for it.
 # app_server_codex = "/absolute/path/to/codex"
 # delegate_codex = "/absolute/path/to/stock/codex"
 # claude_binary = "/absolute/path/to/claude"

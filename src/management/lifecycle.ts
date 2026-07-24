@@ -1,27 +1,33 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  existsSync, lstatSync, readFileSync, readlinkSync, rmSync, statSync,
+  existsSync, lstatSync, readFileSync, readlinkSync, renameSync, rmSync, statSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { atomicSymlink, atomicWrite, ensureLayout, installLayout } from "./layout.js";
 import { readInstallManifest, setup, type InstallManifest } from "./setup.js";
-import { reconcileManagedProcess } from "../daemon/supervisor.js";
+import { reconcileManagedProcess, stopManagedProcess } from "../daemon/supervisor.js";
+import { reconcileOwnedGateway, stopSocketOwner } from "../daemon/ownership.js";
 import { uninstallRemoteCodexShim } from "./remoteShim.js";
+import {
+  fileHash, installCliPathAgent, uninstallCliPathAgent,
+} from "../desktop/launchAgent.js";
+import {
+  fishManagedBlock as fishBlock,
+  legacyFishManagedBlock as legacyFishBlock,
+  legacyPosixManagedBlock as legacyPosixBlock,
+  migrateDesktopShellBlocks,
+  posixManagedBlock as posixBlock,
+  restoreShellBlockChanges,
+  type ShellBlockChange,
+} from "./shellRouting.js";
+import {
+  installManagedShims, restoreManagedShims, type ManagedShimChange,
+} from "./shims.js";
 
 const execute = promisify(execFile);
-const BEGIN = "# >>> ccodex >>>";
-const END = "# <<< ccodex <<<";
-
-function posixBlock(layout: ReturnType<typeof installLayout>): string {
-  return `${BEGIN}\nexport PATH="${layout.bin}:$PATH"\n${END}\n`;
-}
-
-function fishBlock(layout: ReturnType<typeof installLayout>): string {
-  return `${BEGIN}\nfish_add_path --move --prepend "${layout.bin}"\n${END}\n`;
-}
 
 async function registryVersion(channel: string): Promise<string> {
   const { stdout } = await execute("npm", ["view", "@gkorepanov/ccodex", `dist-tags.${channel}`, "--json"], {
@@ -39,9 +45,17 @@ function daemonPidFile(): string {
   return join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "app-server-daemon", "app-server.pid");
 }
 
-async function daemon(layout: ReturnType<typeof installLayout>, version: string, operation: "restart" | "stop"): Promise<void> {
-  const command = join(layout.versions, version, "node_modules", ".bin", "ccodex");
-  await execute(command, ["app-server", "daemon", operation], { timeout: 90_000, maxBuffer: 512 * 1024 });
+function supportsDesktopApp(layout: ReturnType<typeof installLayout>, version: string): boolean {
+  return existsSync(join(
+    layout.versions,
+    version,
+    "node_modules",
+    "@gkorepanov",
+    "ccodex",
+    "dist",
+    "desktop",
+    "stdioFrontend.js",
+  ));
 }
 
 export async function update(args: readonly string[]): Promise<number> {
@@ -78,20 +92,67 @@ export async function rollback(args: readonly string[]): Promise<number> {
   const previous = basename(readlinkSync(layout.previous));
   const current = manifest.activeVersion;
   if (!existsSync(join(layout.versions, previous))) throw new Error(`Previous CCodex ${previous} is missing.`);
-  const daemonWasRunning = Boolean(reconcileManagedProcess(daemonPidFile()));
-  atomicSymlink(join("versions", previous), layout.current);
-  atomicSymlink(join("versions", current), layout.previous);
+  const desktopWasActive = process.platform === "darwin" && Boolean(manifest.desktopCliPath);
+  const targetDesktop = process.platform === "darwin" && supportsDesktopApp(layout, previous);
+  let shellChanges: ShellBlockChange[] = [];
+  let removedDesktop = false;
+  let installedDesktop: InstallManifest["desktopCliPath"];
+  let shimChanges: readonly ManagedShimChange[] = [];
   try {
-    if (daemonWasRunning) await daemon(layout, previous, "restart");
-    const next: InstallManifest = { ...manifest, activeVersion: previous, previousVersion: current };
+    if (desktopWasActive && !targetDesktop) {
+      if (
+        !existsSync(manifest.desktopCliPath!.path)
+        || fileHash(manifest.desktopCliPath!.path) !== manifest.desktopCliPath!.contentHash
+      ) {
+        throw new Error("Cannot roll back: managed desktop files were modified.");
+      }
+      uninstallCliPathAgent(manifest.desktopCliPath!);
+      removedDesktop = true;
+      shellChanges = migrateDesktopShellBlocks(layout, manifest.managedShellFiles, false);
+    }
+
+    atomicSymlink(join("versions", previous), layout.current);
+    atomicSymlink(join("versions", current), layout.previous);
+    const shims = installManagedShims(layout.bin, process.execPath, manifest.shimHashes);
+    shimChanges = shims.changes;
+
+    let desktopCliPath = targetDesktop ? manifest.desktopCliPath : undefined;
+    if (targetDesktop && !desktopWasActive) {
+      shellChanges = migrateDesktopShellBlocks(layout, manifest.managedShellFiles, true);
+      desktopCliPath = installCliPathAgent(join(layout.bin, "codex"));
+      installedDesktop = desktopCliPath;
+    }
+    const {
+      desktopCliPath: _oldDesktop, desktopApp: _legacyDesktop, desktopAppActive: _legacyActive, ...base
+    } = manifest as InstallManifest & {
+      readonly desktopApp?: unknown;
+      readonly desktopAppActive?: boolean;
+    };
+    const next: InstallManifest = {
+      ...base,
+      activeVersion: previous,
+      previousVersion: current,
+      nodeExecutable: process.execPath,
+      shimHashes: shims.hashes,
+      ...(desktopCliPath ? { desktopCliPath } : {}),
+    };
     atomicWrite(layout.manifest, `${JSON.stringify(next, null, 2)}\n`, 0o600);
   } catch (error) {
     atomicSymlink(join("versions", current), layout.current);
     atomicSymlink(join("versions", previous), layout.previous);
-    await daemon(layout, current, "restart").catch(() => undefined);
+    restoreManagedShims(shimChanges);
+    restoreShellBlockChanges(shellChanges);
+    if (installedDesktop) uninstallCliPathAgent(installedDesktop);
+    if (removedDesktop && manifest.desktopCliPath) {
+      installCliPathAgent(manifest.desktopCliPath.entryShimPath, manifest.desktopCliPath);
+    }
+    atomicWrite(layout.manifest, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
     throw error;
   }
-  process.stdout.write(`CCodex rolled back from ${current} to ${previous}.\n`);
+  process.stdout.write(
+    `CCodex rolled back from ${current} to ${previous}.`
+    + `${process.platform === "darwin" ? " Reconnect Codex App." : ""}\n`,
+  );
   return 0;
 }
 
@@ -109,9 +170,11 @@ function removeManagedShellFile(path: string, layout: ReturnType<typeof installL
     return true;
   }
   const block = path.endsWith("config.fish") ? fishBlock(layout) : posixBlock(layout);
-  if (!content.includes(block)) return false;
+  const legacy = path.endsWith("config.fish") ? legacyFishBlock(layout) : legacyPosixBlock(layout);
+  const present = content.includes(block) ? block : content.includes(legacy) ? legacy : undefined;
+  if (!present) return false;
   const mode = statSync(path).mode & 0o777;
-  atomicWrite(path, content.replace(block, ""), mode);
+  atomicWrite(path, content.replace(present, ""), mode);
   return true;
 }
 
@@ -128,8 +191,21 @@ export async function uninstall(args: readonly string[]): Promise<number> {
     "app-server-control",
     "app-server-control.sock",
   );
-  if (existsSync(daemonPidFile()) || existsSync(`${publicSocket}.ccodex-owner.json`)) {
-    await daemon(layout, manifest.activeVersion, "stop");
+  const disabledCurrent = `${layout.current}.uninstalling-${process.pid}`;
+  const currentTarget = existsSync(layout.current) && lstatSync(layout.current).isSymbolicLink()
+    ? readlinkSync(layout.current)
+    : undefined;
+  if (currentTarget) renameSync(layout.current, disabledCurrent);
+  try {
+    const managed = reconcileManagedProcess(daemonPidFile());
+    if (managed) await stopManagedProcess(daemonPidFile(), managed);
+    else {
+      const owner = reconcileOwnedGateway(publicSocket);
+      if (owner) await stopSocketOwner(publicSocket, owner);
+    }
+  } catch (error) {
+    if (currentTarget && existsSync(disabledCurrent)) renameSync(disabledCurrent, layout.current);
+    throw error;
   }
 
   const preserved: string[] = [];
@@ -139,13 +215,16 @@ export async function uninstall(args: readonly string[]): Promise<number> {
   if (manifest.remoteCodexShim && !uninstallRemoteCodexShim(manifest.remoteCodexShim)) {
     preserved.push(manifest.remoteCodexShim.path);
   }
+  if (manifest.desktopCliPath && !uninstallCliPathAgent(manifest.desktopCliPath)) {
+    preserved.push(manifest.desktopCliPath.path);
+  }
   for (const [name, expected] of Object.entries(manifest.shimHashes)) {
     const path = join(layout.bin, name);
     if (!existsSync(path)) continue;
     if (hashFile(path) === expected) rmSync(path);
     else preserved.push(path);
   }
-  for (const path of [layout.current, layout.previous, layout.versions, layout.staging, layout.manifest]) {
+  for (const path of [disabledCurrent, layout.current, layout.previous, layout.versions, layout.staging, layout.manifest]) {
     rmSync(path, { recursive: true, force: true });
   }
   if (args.includes("--purge")) {

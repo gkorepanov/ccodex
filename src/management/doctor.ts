@@ -1,6 +1,7 @@
-import { constants, existsSync, mkdirSync, statSync } from "node:fs";
+import { constants, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -14,7 +15,12 @@ import { relayBinary } from "../gateway/remoteRelay.js";
 import { runtimePlatformKey } from "../runtime/dependencies.js";
 import { probeAppServer } from "../daemon/probe.js";
 import { reconcileManagedProcess } from "../daemon/supervisor.js";
+import {
+  getCodexCliPathEnv,
+  launchAgentLoaded,
+} from "../desktop/launchAgent.js";
 import { installLayout } from "./layout.js";
+import { readInstallManifest } from "./setup.js";
 import {
   probeClaudeAvailability, probeCodexAvailability, type ProviderAvailability,
 } from "../runtime/providerAvailability.js";
@@ -108,6 +114,41 @@ async function modelCatalog(socketPath: string): Promise<string[]> {
   });
 }
 
+function hashFile(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+async function desktopChecks(layout: ReturnType<typeof installLayout>): Promise<DoctorCheck[]> {
+  const checks: DoctorCheck[] = [];
+  const manifest = readInstallManifest(layout);
+  const entry = join(layout.bin, "codex");
+  const expectedHash = manifest?.shimHashes.codex;
+  const entryOk = existsSync(entry) && expectedHash !== undefined && hashFile(entry) === expectedHash;
+  checks.push(check("desktop-entry", entryOk, existsSync(entry) ? entry : "missing", "managed bin/codex", "ccodex setup --repair"));
+
+  try {
+    const detected = getCodexCliPathEnv();
+    checks.push(check("desktop-cli-path", detected === entry, detected ?? "unset", entry, "ccodex setup --repair"));
+  } catch (error) {
+    checks.push(check("desktop-cli-path", false, String(error), entry, "ccodex setup --repair"));
+  }
+
+  const cliPathAgent = manifest?.desktopCliPath;
+  const agentOk = Boolean(
+    cliPathAgent
+    && existsSync(cliPathAgent.path)
+    && hashFile(cliPathAgent.path) === cliPathAgent.contentHash,
+  );
+  checks.push(check(
+    "desktop-agent",
+    agentOk && launchAgentLoaded(),
+    agentOk ? "installed" : "missing or modified",
+    "loaded CODEX_CLI_PATH login hook",
+    "ccodex setup --repair",
+  ));
+  return checks;
+}
+
 async function deepChecks(config: HybridConfig): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
   const expected = compatibilityManifest();
@@ -135,6 +176,8 @@ async function deepChecks(config: HybridConfig): Promise<DoctorCheck[]> {
     checks.push(check("shell-routing", false, String(error), join(layout.bin, "codex"), "ccodex setup --repair"));
   }
 
+  if (process.platform === "darwin") checks.push(...await desktopChecks(layout));
+
   const socketParent = dirname(config.publicSocket);
   const parentMode = existsSync(socketParent) ? statSync(socketParent).mode & 0o777 : 0;
   checks.push(check("socket-dir-mode", parentMode !== 0 && (parentMode & 0o077) === 0, parentMode.toString(8), "0700", `chmod 700 ${socketParent}`));
@@ -144,7 +187,13 @@ async function deepChecks(config: HybridConfig): Promise<DoctorCheck[]> {
 
   const pidFile = join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "app-server-daemon", "app-server.pid");
   const managed = reconcileManagedProcess(pidFile);
-  checks.push(check("managed-process", Boolean(managed), managed ? `pid ${managed.pid}` : "not managed", "one owned gateway process", "codex app-server daemon restart"));
+  checks.push(check(
+    "managed-process",
+    Boolean(managed),
+    managed ? `pid ${managed.pid}` : "not managed",
+    "one PID-managed gateway process",
+    "codex app-server daemon restart",
+  ));
   return checks;
 }
 

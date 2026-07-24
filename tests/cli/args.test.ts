@@ -76,4 +76,13 @@ describe("classifyInvocation", () => {
     expect(classifyInvocation(["app-server", "generate-ts", "--out", "schemas"], config))
       .toEqual({ kind: "delegate" });
   });
+
+  it("routes bare and explicit stdio app-server launches through the existing gateway", () => {
+    expect(classifyInvocation(["app-server", "--analytics-default-enabled"], config))
+      .toEqual({ kind: "stdioFrontend", socketPath: "/tmp/hybrid.sock" });
+    expect(classifyInvocation(["app-server", "--stdio"], config))
+      .toEqual({ kind: "stdioFrontend", socketPath: "/tmp/hybrid.sock" });
+    expect(classifyInvocation(["app-server", "--listen", "unix://"], config))
+      .toMatchObject({ kind: "gateway", socketPath: "/tmp/hybrid.sock" });
+  });
 });

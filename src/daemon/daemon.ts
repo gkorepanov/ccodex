@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { HybridConfig } from "../config/config.js";
 import type { DaemonCommand } from "../cli/args.js";
@@ -55,7 +57,7 @@ function paths(config: HybridConfig, wrapperPath: string): DaemonPaths {
     pidFile: join(stateDirectory, "app-server.pid"),
     stderrLog: join(stateDirectory, "app-server.stderr.log"),
     socketPath: config.publicSocket,
-    wrapperPath: resolve(wrapperPath),
+    wrapperPath: realpathSync(resolve(wrapperPath)),
   };
 }
 
@@ -246,10 +248,11 @@ class HybridDaemon {
     const info = await probeMaybe(this.paths.socketPath);
     const managed = reconcileManagedProcess(this.paths.pidFile);
     const managedOwnsSocket = managed ? this.ownsSocket(managed) : false;
-    if (info && managed && managedOwnsSocket) {
+    const currentVersion = managed?.wrapperPath === this.paths.wrapperPath;
+    if (info && managed && managedOwnsSocket && currentVersion) {
       return this.lifecycleOutput("alreadyRunning", "pid", undefined, info.appServerVersion);
     }
-    if (managed && managedOwnsSocket) {
+    if (managed && managedOwnsSocket && currentVersion) {
       const ready = await waitUntilReady(this.paths.socketPath);
       return this.lifecycleOutput("alreadyRunning", "pid", undefined, ready.appServerVersion);
     }

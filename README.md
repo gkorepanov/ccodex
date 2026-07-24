@@ -117,14 +117,42 @@ commands to your global Codex installation:
 
 Setup is deliberately **fail-closed and transactional**: it validates the platform,
 exact runtimes, and provider availability before atomically activating a new version.
-A failed install or update leaves your previous version and daemon running, and a
-failed readiness check after switching rolls back automatically.
+A failed install or update leaves your previous version running. Setup never interrupts
+an active App session; the new version takes over on the next reconnect.
+
+### Local Codex App (same-Mac)
+
+Over SSH the App resolves `codex` through your `PATH`, so the shim engages. The **local
+Codex App**, however, launches its bundled `codex app-server` directly and ignores
+`PATH`, so ccodex never sees it and no `claude:*` models appear. On macOS `ccodex setup`
+closes that gap without ever touching the signed `.app` bundle (so Sparkle auto-updates
+keep working):
+
+- `ccodex setup` points the App at ccodex automatically via
+  `CODEX_CLI_PATH=~/.ccodex/bin/codex` — it runs `launchctl setenv` for the live
+  session, installs a one-shot login LaunchAgent (`dev.ccodex.codex-cli-path`) so the GUI
+  session re-publishes it on every login/reboot, and exports it in the managed shell
+  blocks for terminal-launched instances. The same managed `codex` entrypoint is used
+  locally and over SSH. **Fully quit the Codex App (`Cmd+Q`) and relaunch it**
+  (or log out and back in) so it picks up the variable.
+- A bare `app-server` launch runs a thin **stdio frontend**: it forwards the App's
+  newline-delimited JSON to the existing app-server-control socket, lazily starts the
+  gateway when cold, and reconnects after gateway restarts. Provider state and lifecycle
+  remain exclusively inside the existing gateway.
+- There is **no extra macOS gateway service**. The same PID-managed gateway used over SSH
+  starts lazily when the App connects and stops through the existing daemon contract.
+  Setup/update/rollback only switch files and ask you to reconnect; they never restart a
+  live gateway underneath a task.
+- `ccodex uninstall` removes the login hook, restores any previous `CODEX_CLI_PATH`,
+  strips the managed shell export, and stops only CCodex's own PID-managed gateway.
+  Modified files are preserved. `ccodex doctor --deep` reports the entrypoint and login
+  hook separately from gateway health.
 
 ## Technical details
 
 | | |
 |---|---|
-| **CCodex** | `0.4.0` |
+| **CCodex** | `0.4.6` |
 | **Embedded Codex CLI** | `0.144.6` (pinned; a newer global Codex never replaces it) |
 | **Claude Agent SDK / Claude Code** | `0.3.215` / `2.1.215` |
 | **Runtime** | Node.js `>=22.13 <27`, npm `>=10` |
