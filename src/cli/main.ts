@@ -34,9 +34,9 @@ async function main(): Promise<number> {
       withProxySocket(invocation.proxyArgs, invocation.socketPath),
     );
   }
-  if (invocation.kind === "bridge") {
-    const { runDesktopBridge } = await import("../desktop/bridge.js");
-    return runDesktopBridge(config, invocation.socketPath);
+  if (invocation.kind === "stdioFrontend") {
+    const { runStdioFrontend } = await import("../desktop/stdioFrontend.js");
+    return runStdioFrontend(config, invocation.socketPath);
   }
 
   const { startGateway } = await import("../gateway/server.js");
