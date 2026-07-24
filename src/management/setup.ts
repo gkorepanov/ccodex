@@ -66,8 +66,10 @@ async function npmStage(destination: string, version = packageVersion()): Promis
   });
 }
 
+const stagedCli = (staged: string) => join(staged, "node_modules", ".bin", "ccodex");
+
 async function stagedDoctor(staged: string, layout: InstallLayout): Promise<void> {
-  const command = join(staged, "node_modules", ".bin", "ccodex");
+  const command = stagedCli(staged);
   if (!existsSync(command)) throw new Error(`Staged CCodex executable is missing: ${command}`);
   try {
     const { stdout } = await execute(command, ["doctor", "--json"], {
@@ -98,7 +100,7 @@ async function stagedDoctor(staged: string, layout: InstallLayout): Promise<void
 
 async function startupSmoke(staged: string, layout: InstallLayout): Promise<void> {
   if (process.env.CCODEX_SKIP_STARTUP_SMOKE === "1") return;
-  const command = join(staged, "node_modules", ".bin", "ccodex");
+  const command = stagedCli(staged);
   const socket = join(layout.staging, `smoke-${process.pid}.sock`);
   rmSync(socket, { force: true });
   const detached = process.platform !== "win32";
@@ -150,8 +152,48 @@ async function startupSmoke(staged: string, layout: InstallLayout): Promise<void
 
 function stagedCompatibility(staged: string): ReturnType<typeof compatibilityManifest> {
   const path = join(staged, "node_modules", "@gkorepanov", "ccodex", "config", "compatibility.json");
-  const value = JSON.parse(readFileSync(path, "utf8")) as ReturnType<typeof compatibilityManifest>;
-  return value;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as ReturnType<typeof compatibilityManifest>;
+  } catch (error) {
+    throw new Error(`Staged CCodex package at ${staged} is unreadable. Nothing was activated.`, { cause: error });
+  }
+}
+
+const versionOrder = (value: string): number[] => value.split(/[-+]/u)[0]!.split(".").map(Number);
+
+// Compares release cores only, so moves that share one — 0.5.0-rc.1 to 0.5.0, or between two
+// prereleases — are not upgrades and stay in this process, as they did before handoff existed.
+function isUpgrade(from: string, to: string): boolean {
+  const [current, next] = [versionOrder(from), versionOrder(to)];
+  for (let index = 0; index < Math.max(current.length, next.length); index += 1) {
+    const [a, b] = [current[index] ?? 0, next[index] ?? 0];
+    if (a !== b) return b > a;
+  }
+  return false;
+}
+
+function handOffSetup(staged: string, version: string, layout: InstallLayout): Promise<number> {
+  const command = stagedCli(staged);
+  if (!existsSync(command)) throw new Error(`Staged CCodex executable is missing: ${command}`);
+  const child = spawn(process.execPath, [command, "setup", "--staged", staged, "--version", version], {
+    // CCODEX_DATA_DIR is deliberately not pinned: the resumed setup writes real state, which must
+    // keep resolving from the user's config.toml.
+    // CCODEX_SETUP_HANDOFF is belt-and-braces: the staged CLI's own version is the requested one,
+    // so isUpgrade already returns false there. It is an env var rather than a flag so that a
+    // version which stops honouring it degrades to the old in-process behaviour instead of dying
+    // on an unknown argument.
+    env: { ...process.env, CCODEX_HOME: layout.home, CCODEX_SETUP_HANDOFF: "1" },
+    // The child's output is the user's transcript of the install, and it carries its own deadlines
+    // (npmStage, stagedDoctor, startupSmoke), so this wrapper adds no timeout of its own.
+    stdio: "inherit",
+  });
+  return new Promise((settle, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (signal) reject(new Error(`CCodex ${version} setup was terminated by ${signal}.`));
+      else settle(code ?? 1);
+    });
+  });
 }
 
 function migrateLegacyState(layout: InstallLayout): void {
@@ -311,12 +353,23 @@ export async function setup(args: readonly string[]): Promise<number> {
     rmSync(staged, { recursive: true, force: true });
     await npmStage(staged, requestedVersion);
   }
-  await stagedDoctor(staged, layout);
-  await startupSmoke(staged, layout);
   const compatibility = stagedCompatibility(staged);
   if (compatibility.productVersion !== requestedVersion) {
     throw new Error(`Staged package is ${compatibility.productVersion}, expected ${requestedVersion}. Nothing was activated.`);
   }
+  // Activation and everything after it belongs to the version being installed: only its own code
+  // knows the post-activation steps it introduced. Downgrades keep running here, because the newer
+  // code still tracks hooks an older manifest cannot record.
+  if (!process.env.CCODEX_SETUP_HANDOFF && isUpgrade(packageVersion(), requestedVersion)) {
+    try {
+      return await handOffSetup(staged, requestedVersion, layout);
+    } finally {
+      const inner = relative(layout.staging, staged);
+      if (inner && !inner.startsWith("..")) rmSync(staged, { recursive: true, force: true });
+    }
+  }
+  await stagedDoctor(staged, layout);
+  await startupSmoke(staged, layout);
 
   if (!existsSync(versionPath)) {
     renameSync(staged, versionPath);
@@ -358,7 +411,7 @@ export async function setup(args: readonly string[]): Promise<number> {
     installedDesktopHook = desktopCliPath;
     const manifest: InstallManifest = {
       schemaVersion: 1,
-      method: supplied ? "curl" : "npm",
+      method: previousManifest?.method ?? (supplied ? "curl" : "npm"),
       package: "@gkorepanov/ccodex",
       activeVersion: requestedVersion,
       previousVersion: previous,
