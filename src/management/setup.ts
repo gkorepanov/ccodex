@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  chmodSync, cpSync, existsSync, lstatSync, readFileSync, readlinkSync, renameSync, rmSync, statSync,
+  cpSync, existsSync, lstatSync, readFileSync, readlinkSync, renameSync, rmSync, statSync,
   unlinkSync, realpathSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -12,24 +12,29 @@ import { defaultConfigToml, delegatedCodexExecutable, loadConfig } from "../conf
 import { pinnedCodexExecutable, runtimePlatformKey } from "../runtime/dependencies.js";
 import { probeAppServer } from "../daemon/probe.js";
 import { reconcileManagedProcess, stopManagedProcess } from "../daemon/supervisor.js";
+import { daemonStateDirectory } from "../daemon/supervisor.js";
+import { loadDaemonSettings } from "../daemon/settings.js";
 import { atomicSymlink, atomicWrite, ensureLayout, installLayout, type InstallLayout } from "./layout.js";
 import {
-  fishManagedBlock as fishBlock, MANAGED_BLOCK_BEGIN as BEGIN, MANAGED_BLOCK_END as END,
+  fishManagedBlock as fishBlock, MANAGED_BLOCK_BEGIN as BEGIN,
+  legacyFishManagedBlock as oldFishBlock, legacyPosixManagedBlock as legacyPosixBlock,
   posixManagedBlock as posixBlock,
 } from "./shellRouting.js";
-import { managedShim } from "./shims.js";
+import {
+  installManagedShims, restoreManagedShims, type ManagedShimChange,
+} from "./shims.js";
 import {
   installRemoteCodexShim, relocatedDelegate, restoreRemoteCodexShim, type RemoteCodexShim,
 } from "./remoteShim.js";
 import {
-  installDesktopApp, restoreDesktopApp, startDesktopApp, stopDesktopApp, type DesktopAppInstall,
+  installDesktopApp, restoreDesktopApp, type DesktopAppInstall,
 } from "../desktop/install.js";
 
 const execute = promisify(execFile);
 
 interface ShellRouting {
   readonly managed: string[];
-  readonly added: string[];
+  readonly changed: Array<{ readonly path: string; readonly content?: string; readonly mode: number }>;
 }
 
 export interface InstallManifest {
@@ -44,6 +49,8 @@ export interface InstallManifest {
   readonly shimHashes: Readonly<Record<string, string>>;
   readonly remoteCodexShim?: RemoteCodexShim;
   readonly desktopApp?: DesktopAppInstall;
+  readonly desktopAppActive?: boolean;
+  readonly nodeExecutable?: string;
   readonly platformPackage: string;
   readonly compatibility: ReturnType<typeof compatibilityManifest>;
   readonly doctor: { readonly ok: true; readonly checkedAt: string };
@@ -168,80 +175,72 @@ function hashFile(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-function installShims(layout: InstallLayout): Readonly<Record<string, string>> {
-  const names = ["ccodex", "codex", "codex-desktop"] as const;
-  for (const name of names) {
-    atomicWrite(join(layout.bin, name), managedShim(name), 0o755);
-    chmodSync(join(layout.bin, name), 0o755);
-  }
-  return Object.fromEntries(names.map((name) => [name, hashFile(join(layout.bin, name))]));
+function validateManagedBlock(path: string, desired: string, legacy: string): void {
+  if (!existsSync(path)) return;
+  const existing = readFileSync(path, "utf8");
+  if (!existing.includes(BEGIN) || existing.includes(desired) || existing.includes(legacy)) return;
+  throw new Error(`Refusing to overwrite a modified CCodex block in ${path}`);
 }
 
-function appendManagedBlock(path: string, block: string): void {
-  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
-  if (existing.includes(BEGIN)) {
-    if (!existing.includes(block.trim())) throw new Error(`Refusing to overwrite a modified CCodex block in ${path}`);
-    return;
-  }
-  const mode = existsSync(path) ? statSync(path).mode & 0o777 : 0o600;
-  atomicWrite(path, `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${block}`, mode);
+function installManagedBlock(
+  path: string,
+  desired: string,
+  legacy: string,
+): { readonly path: string; readonly content?: string; readonly mode: number } | undefined {
+  const existed = existsSync(path);
+  const existing = existed ? readFileSync(path, "utf8") : "";
+  if (existing.includes(desired)) return undefined;
+  const mode = existed ? statSync(path).mode & 0o777 : 0o600;
+  const next = existing.includes(legacy)
+    ? existing.replace(legacy, desired)
+    : `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${desired}`;
+  atomicWrite(path, next, mode);
+  return { path, ...(existed ? { content: existing } : {}), mode };
 }
 
 function installShellPaths(layout: InstallLayout): ShellRouting {
   const home = homedir();
   const shellBlock = posixBlock(layout);
+  const oldShellBlock = legacyPosixBlock(layout);
   const bashLogin = existsSync(join(home, ".bash_profile")) ? join(home, ".bash_profile") : join(home, ".profile");
   const files = [bashLogin, join(home, ".bashrc"), join(home, ".zprofile"), join(home, ".zshrc")];
-  for (const path of files) {
-    const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
-    if (existing.includes(BEGIN) && !existing.includes(shellBlock.trim())) {
-      throw new Error(`Refusing to overwrite a modified CCodex block in ${path}`);
-    }
-  }
+  for (const path of files) validateManagedBlock(path, shellBlock, oldShellBlock);
   const fish = join(home, ".config", "fish", "config.fish");
   const fishConfigBlock = fishBlock(layout);
-  const fishExisting = existsSync(fish) ? readFileSync(fish, "utf8") : "";
-  if (fishExisting.includes(BEGIN) && !fishExisting.includes(fishConfigBlock.trim())) {
-    throw new Error(`Refusing to overwrite a modified CCodex block in ${fish}`);
-  }
+  const oldFishConfigBlock = oldFishBlock(layout);
+  validateManagedBlock(fish, fishConfigBlock, oldFishConfigBlock);
   const legacyFish = join(home, ".config", "fish", "conf.d", "ccodex.fish");
-  const legacyFishBlock = `# Managed by CCodex.\nfish_add_path --prepend "${layout.bin}"\n`;
-  if (existsSync(legacyFish) && readFileSync(legacyFish, "utf8") !== legacyFishBlock) {
+  const legacyFishFileBlock = `# Managed by CCodex.\nfish_add_path --prepend "${layout.bin}"\n`;
+  if (existsSync(legacyFish) && readFileSync(legacyFish, "utf8") !== legacyFishFileBlock) {
     throw new Error(`Refusing to overwrite ${legacyFish}`);
   }
 
-  const added: string[] = [];
+  const changed: Array<{ readonly path: string; readonly content?: string; readonly mode: number }> = [];
   try {
     for (const path of files) {
-      if (!existsSync(path) || !readFileSync(path, "utf8").includes(BEGIN)) {
-        appendManagedBlock(path, shellBlock);
-        added.push(path);
-      }
+      const change = installManagedBlock(path, shellBlock, oldShellBlock);
+      if (change) changed.push(change);
     }
-    if (!fishExisting.includes(BEGIN)) {
-      appendManagedBlock(fish, fishConfigBlock);
-      added.push(fish);
-    }
+    const fishChange = installManagedBlock(fish, fishConfigBlock, oldFishConfigBlock);
+    if (fishChange) changed.push(fishChange);
     return {
       managed: [...files, fish, ...(existsSync(legacyFish) ? [legacyFish] : [])],
-      added,
+      changed,
     };
   } catch (error) {
-    removeFirstInstallRouting(layout, added, {});
+    removeFirstInstallRouting(layout, changed, {});
     throw error;
   }
 }
 
-function removeFirstInstallRouting(layout: InstallLayout, files: readonly string[], hashes: Readonly<Record<string, string>>): void {
-  for (const path of files) {
-    if (!existsSync(path)) continue;
-    const content = readFileSync(path, "utf8");
-    if (path.endsWith("ccodex.fish")) {
-      if (content === `# Managed by CCodex.\nfish_add_path --prepend "${layout.bin}"\n`) rmSync(path);
-    } else {
-      const block = path.endsWith("config.fish") ? fishBlock(layout) : posixBlock(layout);
-      if (content.includes(block)) atomicWrite(path, content.replace(block, ""), statSync(path).mode & 0o777);
-    }
+function removeFirstInstallRouting(
+  layout: InstallLayout,
+  changed: ReadonlyArray<{ readonly path: string; readonly content?: string; readonly mode: number }>,
+  hashes: Readonly<Record<string, string>>,
+): void {
+  for (const change of [...changed].reverse()) {
+    if (change.content === undefined) rmSync(change.path, { force: true });
+    else atomicWrite(change.path, change.content, change.mode);
   }
   for (const [name, hash] of Object.entries(hashes)) {
     const path = join(layout.bin, name);
@@ -296,13 +295,23 @@ function daemonPidFile(): string {
 }
 
 async function replaceRunningDaemon(layout: InstallLayout, version: string): Promise<void> {
-  const command = join(layout.versions, version, "node_modules", ".bin", "ccodex");
-  await execute(command, ["app-server", "daemon", "restart"], { timeout: 90_000, maxBuffer: 512 * 1024 });
+  const command = join(
+    layout.versions, version, "node_modules", "@gkorepanov", "ccodex", "dist", "cli", "main.js",
+  );
+  await execute(process.execPath, [command, "app-server", "daemon", "restart"], {
+    timeout: 90_000,
+    maxBuffer: 512 * 1024,
+  });
 }
 
 async function stopDaemon(layout: InstallLayout, version: string): Promise<void> {
-  const command = join(layout.versions, version, "node_modules", ".bin", "ccodex");
-  await execute(command, ["app-server", "daemon", "stop"], { timeout: 90_000, maxBuffer: 512 * 1024 });
+  const command = join(
+    layout.versions, version, "node_modules", "@gkorepanov", "ccodex", "dist", "cli", "main.js",
+  );
+  await execute(process.execPath, [command, "app-server", "daemon", "stop"], {
+    timeout: 90_000,
+    maxBuffer: 512 * 1024,
+  });
 }
 
 export async function setup(args: readonly string[]): Promise<number> {
@@ -352,26 +361,41 @@ export async function setup(args: readonly string[]): Promise<number> {
   const previousManifest = beforeManifest ? JSON.parse(beforeManifest) as InstallManifest : undefined;
   const daemonWasRunning = Boolean(reconcileManagedProcess(daemonPidFile()));
   const gatewayWasRunning = await probeAppServer(publicSocket).then(() => true, () => false);
-  let installedShellFiles: string[] = [];
-  let installedShimHashes: Readonly<Record<string, string>> = {};
+  let installedShellChanges: ShellRouting["changed"] = [];
+  let installedShimChanges: readonly ManagedShimChange[] = [];
   let installedRemoteShim: RemoteCodexShim | undefined;
   let installedDesktopApp: DesktopAppInstall | undefined;
+  let daemonReplacementAttempted = false;
   const configPath = join(layout.home, "config.toml");
   let installedConfig = false;
   try {
     const previous = activate(layout, requestedVersion);
-    const shimHashes = installShims(layout);
-    installedShimHashes = shimHashes;
+    const installedShims = installManagedShims(
+      layout.bin,
+      process.execPath,
+      previousManifest?.shimHashes,
+    );
+    const shimHashes = installedShims.hashes;
+    installedShimChanges = installedShims.changes;
     const shellRouting = installShellPaths(layout);
-    installedShellFiles = shellRouting.added;
+    installedShellChanges = shellRouting.changed;
     await verifyShellPaths(layout);
     installedRemoteShim = installRemoteCodexShim(layout, previousManifest?.remoteCodexShim);
     delegateCodex = relocatedDelegate(installedRemoteShim, delegateCodex);
     installedConfig = installInitialConfig(layout);
     // The local Codex App only exists on macOS; the LaunchAgent + control socket are
     // never touched elsewhere so Linux/CI stays byte-identical.
+    const remoteControlEnabled = loadDaemonSettings(
+      join(daemonStateDirectory(), "settings.json"),
+    ).remoteControlEnabled;
     const desktopApp = process.platform === "darwin"
-      ? installDesktopApp(layout, publicSocket, previousManifest?.desktopApp)
+      ? installDesktopApp(
+        layout,
+        publicSocket,
+        process.execPath,
+        remoteControlEnabled,
+        previousManifest?.desktopApp,
+      )
       : undefined;
     installedDesktopApp = desktopApp;
     const manifest: InstallManifest = {
@@ -386,34 +410,32 @@ export async function setup(args: readonly string[]): Promise<number> {
       shimHashes,
       ...(installedRemoteShim ? { remoteCodexShim: installedRemoteShim } : {}),
       ...(desktopApp ? { desktopApp } : {}),
+      ...(desktopApp ? { desktopAppActive: true } : {}),
+      nodeExecutable: process.execPath,
       platformPackage: compatibility.relayPackages[runtimePlatformKey()] ?? "unsupported",
       compatibility,
       doctor: { ok: true, checkedAt: new Date().toISOString() },
       installedAt: new Date().toISOString(),
     };
     atomicWrite(layout.manifest, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
-    // setup is the ownership boundary: after the remote shim is in place, leave exactly
-    // one persistent gateway owning the control socket. On macOS the KeepAlive LaunchAgent
-    // is that owner (not a detached PID daemon), so unload it before retiring any stale
-    // detached daemon — otherwise KeepAlive races the socket takeover — then start it back
-    // up; startup-lock + owner-file fencing (gateway/socket.ts) keep a single live gateway.
-    if (desktopApp) {
-      stopDesktopApp(desktopApp);
-      await stopDaemon(layout, requestedVersion);
-      startDesktopApp(desktopApp);
-    } else {
-      await replaceRunningDaemon(layout, requestedVersion);
-    }
+    // One lifecycle entrypoint selects launchd on installed macOS hosts and the
+    // PID supervisor elsewhere. No setup-specific socket ownership choreography.
+    daemonReplacementAttempted = true;
+    await replaceRunningDaemon(layout, requestedVersion);
   } catch (error) {
-    await stopDaemon(layout, requestedVersion).catch(async () => {
-      const managed = reconcileManagedProcess(daemonPidFile());
-      if (managed) await stopManagedProcess(daemonPidFile(), managed).catch((cleanupError: unknown) => {
-        process.stderr.write(`CCodex rollback could not stop partial gateway: ${String(cleanupError)}\n`);
+    if (daemonReplacementAttempted) {
+      await stopDaemon(layout, requestedVersion).catch(async () => {
+        const managed = reconcileManagedProcess(daemonPidFile());
+        if (managed) await stopManagedProcess(daemonPidFile(), managed).catch((cleanupError: unknown) => {
+          process.stderr.write(`CCodex rollback could not stop partial gateway: ${String(cleanupError)}\n`);
+        });
       });
-    });
+    }
     if (installedConfig) rmSync(configPath, { force: true });
     if (before) {
       atomicSymlink(join("versions", before), layout.current);
+      removeFirstInstallRouting(layout, installedShellChanges, {});
+      restoreManagedShims(installedShimChanges);
       // Skip the detached-daemon restore when a previous LaunchAgent owns the socket;
       // restoreDesktopApp below reloads it, and a detached daemon would flap against it.
       if ((daemonWasRunning || gatewayWasRunning) && !previousManifest?.desktopApp) {
@@ -423,9 +445,16 @@ export async function setup(args: readonly string[]): Promise<number> {
     else {
       removeActivationLink(layout.current);
       restoreRemoteCodexShim(installedRemoteShim, previousManifest?.remoteCodexShim);
-      removeFirstInstallRouting(layout, installedShellFiles, installedShimHashes);
+      removeFirstInstallRouting(layout, installedShellChanges, {});
+      restoreManagedShims(installedShimChanges);
     }
-    restoreDesktopApp(installedDesktopApp, previousManifest?.desktopApp);
+    restoreDesktopApp(
+      layout,
+      installedDesktopApp,
+      previousManifest?.desktopApp,
+      undefined,
+      gatewayWasRunning,
+    );
     if (before) restoreRemoteCodexShim(installedRemoteShim, previousManifest?.remoteCodexShim);
     if (beforePrevious) atomicSymlink(beforePrevious, layout.previous);
     else removeActivationLink(layout.previous);

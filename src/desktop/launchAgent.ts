@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -8,15 +9,25 @@ export const LAUNCH_AGENT_LABEL = "dev.ccodex.gateway";
 export const CODEX_CLI_PATH_LABEL = "dev.ccodex.codex-cli-path";
 export const CODEX_CLI_PATH_ENV = "CODEX_CLI_PATH";
 const LAUNCHCTL = "/bin/launchctl";
-const MANAGED_MARKER = "Managed by CCodex — run 'ccodex uninstall' to remove.";
+export const MANAGED_PLIST_MARKER = "Managed by CCodex — run 'ccodex uninstall' to remove.";
 
 export interface LaunchAgentInstall {
   readonly path: string;
   readonly label: string;
   readonly socket: string;
+  readonly nodeExecutable: string;
+  readonly remoteControlEnabled: boolean;
+  readonly contentHash: string;
 }
 
-interface AgentRef {
+export interface CliPathAgentInstall {
+  readonly path: string;
+  readonly label: string;
+  readonly entryShimPath: string;
+  readonly contentHash: string;
+}
+
+export interface AgentRef {
   readonly path: string;
   readonly label: string;
 }
@@ -33,7 +44,7 @@ export interface LaunchctlRuntime {
 
 export const systemLaunchctl: LaunchctlRuntime = {
   run: (args) => {
-    const result = spawnSync("launchctl", args, { encoding: "utf8" });
+    const result = spawnSync(LAUNCHCTL, args, { encoding: "utf8" });
     if (result.error) throw result.error;
     return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
   },
@@ -45,6 +56,14 @@ function currentUid(): number {
 
 function codexHome(): string {
   return process.env.CODEX_HOME ?? join(homedir(), ".codex");
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+export function fileHash(path: string): string {
+  return sha256(readFileSync(path, "utf8"));
 }
 
 function xmlEscape(value: string): string {
@@ -68,7 +87,7 @@ function renderPlist(options: {
     }\n  </dict>\n`
     : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
-<!-- ${MANAGED_MARKER} -->
+<!-- ${MANAGED_PLIST_MARKER} -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -95,10 +114,34 @@ export function codexCliPathAgentPath(): string {
   return join(homedir(), "Library", "LaunchAgents", `${CODEX_CLI_PATH_LABEL}.plist`);
 }
 
-export function desktopPlist(layout: InstallLayout, socket: string): string {
+export function managedCliPath(layout: InstallLayout): string {
+  return join(
+    layout.current,
+    "node_modules",
+    "@gkorepanov",
+    "ccodex",
+    "dist",
+    "cli",
+    "main.js",
+  );
+}
+
+export function desktopPlist(
+  layout: InstallLayout,
+  socket: string,
+  nodeExecutable: string,
+  remoteControlEnabled: boolean,
+): string {
   return renderPlist({
     label: LAUNCH_AGENT_LABEL,
-    programArguments: [join(layout.bin, "ccodex"), "app-server", "--remote-control", "--listen", `unix://${socket}`],
+    programArguments: [
+      nodeExecutable,
+      managedCliPath(layout),
+      "app-server",
+      ...(remoteControlEnabled ? ["--remote-control"] : []),
+      "--listen",
+      `unix://${socket}`,
+    ],
     environment: { CCODEX_HOME: layout.home, CODEX_HOME: codexHome() },
     runAtLoad: true,
     keepAlive: true,
@@ -106,8 +149,6 @@ export function desktopPlist(layout: InstallLayout, socket: string): string {
 }
 
 export function codexCliPathPlist(entryShimPath: string): string {
-  // A one-shot login agent (KeepAlive=false) that publishes CODEX_CLI_PATH into the GUI
-  // launchd session so Finder/Dock-launched Codex App instances reach bin/codex-desktop.
   return renderPlist({
     label: CODEX_CLI_PATH_LABEL,
     programArguments: [LAUNCHCTL, "setenv", CODEX_CLI_PATH_ENV, entryShimPath],
@@ -116,92 +157,127 @@ export function codexCliPathPlist(entryShimPath: string): string {
   });
 }
 
-function isOwnedPlist(path: string): boolean {
-  return existsSync(path) && readFileSync(path, "utf8").includes(MANAGED_MARKER);
+function assertReplaceable(path: string, desired: string, previousHash?: string): void {
+  if (!existsSync(path)) return;
+  const current = readFileSync(path, "utf8");
+  if (current === desired) return;
+  if (previousHash && sha256(current) === previousHash) return;
+  throw new Error(`Refusing to overwrite modified or unmanaged LaunchAgent ${path}`);
+}
+
+export function launchAgentLoaded(
+  label = LAUNCH_AGENT_LABEL,
+  runtime: LaunchctlRuntime = systemLaunchctl,
+): boolean {
+  return runtime.run(["print", `gui/${currentUid()}/${label}`]).status === 0;
 }
 
 export function bootoutLaunchAgent(ref: AgentRef, runtime: LaunchctlRuntime = systemLaunchctl): void {
-  // Ignore the status: launchctl reports failure when the label is not loaded.
   runtime.run(["bootout", `gui/${currentUid()}/${ref.label}`]);
 }
 
-export function bootstrapLaunchAgent(ref: AgentRef, runtime: LaunchctlRuntime = systemLaunchctl, kickstart = true): void {
+export function bootstrapLaunchAgent(
+  ref: AgentRef,
+  runtime: LaunchctlRuntime = systemLaunchctl,
+  kickstart = true,
+): void {
   const domain = `gui/${currentUid()}`;
   const bootstrap = runtime.run(["bootstrap", domain, ref.path]);
   if (bootstrap.status !== 0) {
-    // Older launchd releases lack bootstrap/bootout; fall back to load/unload.
     runtime.run(["unload", ref.path]);
     const load = runtime.run(["load", ref.path]);
     if (load.status !== 0) {
       throw new Error(`launchctl could not load ${ref.path}: ${(bootstrap.stderr || load.stderr).trim()}`);
     }
   }
-  // Force a clean (re)start so a KeepAlive agent owns its socket immediately.
   if (kickstart) runtime.run(["kickstart", "-k", `${domain}/${ref.label}`]);
 }
 
 export function setCodexCliPathEnv(entryShimPath: string, runtime: LaunchctlRuntime = systemLaunchctl): void {
-  // Best-effort: fails on a session without a GUI launchd domain (SSH/CI); the login
-  // agent still republishes it at next login.
-  try {
-    runtime.run(["setenv", CODEX_CLI_PATH_ENV, entryShimPath]);
-  } catch {
-    // No GUI launchd session to publish into.
-  }
+  const result = runtime.run(["setenv", CODEX_CLI_PATH_ENV, entryShimPath]);
+  if (result.status !== 0) throw new Error(`launchctl could not set ${CODEX_CLI_PATH_ENV}: ${result.stderr.trim()}`);
+}
+
+export function getCodexCliPathEnv(runtime: LaunchctlRuntime = systemLaunchctl): string | undefined {
+  const result = runtime.run(["getenv", CODEX_CLI_PATH_ENV]);
+  return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : undefined;
 }
 
 export function unsetCodexCliPathEnv(runtime: LaunchctlRuntime = systemLaunchctl): void {
-  try {
-    runtime.run(["unsetenv", CODEX_CLI_PATH_ENV]);
-  } catch {
-    // No GUI launchd session; nothing to clear.
-  }
+  const result = runtime.run(["unsetenv", CODEX_CLI_PATH_ENV]);
+  if (result.status !== 0) throw new Error(`launchctl could not unset ${CODEX_CLI_PATH_ENV}: ${result.stderr.trim()}`);
 }
 
 export function installLaunchAgent(
   layout: InstallLayout,
   socket: string,
+  nodeExecutable: string,
+  remoteControlEnabled: boolean,
   previous?: LaunchAgentInstall,
-  runtime: LaunchctlRuntime = systemLaunchctl,
 ): LaunchAgentInstall {
   const path = launchAgentPath();
-  if (previous && existsSync(previous.path) && !isOwnedPlist(previous.path)) {
-    throw new Error(`Refusing to overwrite modified managed LaunchAgent ${previous.path}`);
-  }
-  if (existsSync(path) && !isOwnedPlist(path)) {
-    throw new Error(`Refusing to overwrite unmanaged LaunchAgent ${path}`);
-  }
-  const record: LaunchAgentInstall = { path, label: LAUNCH_AGENT_LABEL, socket };
-  atomicWrite(path, desktopPlist(layout, socket), 0o644);
-  bootoutLaunchAgent(record, runtime);
-  bootstrapLaunchAgent(record, runtime);
-  return record;
+  const content = desktopPlist(layout, socket, nodeExecutable, remoteControlEnabled);
+  assertReplaceable(path, content, previous?.contentHash);
+  atomicWrite(path, content, 0o644);
+  return {
+    path,
+    label: LAUNCH_AGENT_LABEL,
+    socket,
+    nodeExecutable,
+    remoteControlEnabled,
+    contentHash: sha256(content),
+  };
 }
 
-export function uninstallLaunchAgent(record: LaunchAgentInstall, runtime: LaunchctlRuntime = systemLaunchctl): boolean {
+export function uninstallLaunchAgent(
+  record: LaunchAgentInstall,
+  runtime: LaunchctlRuntime = systemLaunchctl,
+): boolean {
   if (!existsSync(record.path)) return true;
-  if (!isOwnedPlist(record.path)) return false;
+  if (fileHash(record.path) !== record.contentHash) return false;
   bootoutLaunchAgent(record, runtime);
   rmSync(record.path, { force: true });
   return true;
 }
 
-export function installCliPathAgent(entryShimPath: string, runtime: LaunchctlRuntime = systemLaunchctl): string {
+export function installCliPathAgent(
+  entryShimPath: string,
+  previous?: CliPathAgentInstall,
+  runtime: LaunchctlRuntime = systemLaunchctl,
+): CliPathAgentInstall {
   const path = codexCliPathAgentPath();
-  if (existsSync(path) && !isOwnedPlist(path)) {
-    throw new Error(`Refusing to overwrite unmanaged LaunchAgent ${path}`);
+  const content = codexCliPathPlist(entryShimPath);
+  assertReplaceable(path, content, previous?.contentHash);
+  const before = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+  const wasLoaded = launchAgentLoaded(CODEX_CLI_PATH_LABEL, runtime);
+  atomicWrite(path, content, 0o644);
+  const record = {
+    path,
+    label: CODEX_CLI_PATH_LABEL,
+    entryShimPath,
+    contentHash: sha256(content),
+  };
+  try {
+    bootoutLaunchAgent(record, runtime);
+    bootstrapLaunchAgent(record, runtime, false);
+    return record;
+  } catch (error) {
+    if (before === undefined) rmSync(path, { force: true });
+    else atomicWrite(path, before, 0o644);
+    if (wasLoaded && before !== undefined) {
+      bootstrapLaunchAgent({ path, label: CODEX_CLI_PATH_LABEL }, runtime, false);
+    }
+    throw error;
   }
-  atomicWrite(path, codexCliPathPlist(entryShimPath), 0o644);
-  const ref: AgentRef = { path, label: CODEX_CLI_PATH_LABEL };
-  bootoutLaunchAgent(ref, runtime);
-  bootstrapLaunchAgent(ref, runtime, false);
-  return path;
 }
 
-export function uninstallCliPathAgent(path: string, runtime: LaunchctlRuntime = systemLaunchctl): boolean {
-  if (!existsSync(path)) return true;
-  if (!isOwnedPlist(path)) return false;
-  bootoutLaunchAgent({ path, label: CODEX_CLI_PATH_LABEL }, runtime);
-  rmSync(path, { force: true });
+export function uninstallCliPathAgent(
+  record: CliPathAgentInstall,
+  runtime: LaunchctlRuntime = systemLaunchctl,
+): boolean {
+  if (!existsSync(record.path)) return true;
+  if (fileHash(record.path) !== record.contentHash) return false;
+  bootoutLaunchAgent(record, runtime);
+  rmSync(record.path, { force: true });
   return true;
 }

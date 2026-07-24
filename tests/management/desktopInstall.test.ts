@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { installLayout } from "../../src/management/layout.js";
 import {
-  codexCliPathAgentPath, launchAgentPath, LAUNCH_AGENT_LABEL, type LaunchctlRuntime,
+  codexCliPathAgentPath, launchAgentPath, type LaunchctlRuntime,
 } from "../../src/desktop/launchAgent.js";
 import {
-  installDesktopApp, restoreDesktopApp, uninstallDesktopApp,
+  desktopAppFilesIntact, installDesktopApp, restoreDesktopApp, uninstallDesktopApp,
 } from "../../src/desktop/install.js";
 
 const roots: string[] = [];
@@ -30,7 +30,11 @@ function recordingLaunchctl(): { runtime: LaunchctlRuntime; calls: string[][] } 
 }
 
 function fixture(): {
-  layout: ReturnType<typeof installLayout>; socket: string; plist: string; cliPlist: string;
+  layout: ReturnType<typeof installLayout>;
+  socket: string;
+  node: string;
+  plist: string;
+  cliPlist: string;
 } {
   const root = mkdtempSync(join(tmpdir(), "ccodex-desktop-"));
   roots.push(root);
@@ -42,37 +46,34 @@ function fixture(): {
   return {
     layout,
     socket: join(root, ".codex", "app-server-control", "app-server-control.sock"),
+    node: join(root, "node-toolchain", "bin", "node"),
     plist: launchAgentPath(),
     cliPlist: codexCliPathAgentPath(),
   };
 }
 
 describe("desktop app install orchestration", () => {
-  it("installs both agents, publishes CODEX_CLI_PATH, and reports the managed record", () => {
-    const { layout, socket, plist, cliPlist } = fixture();
+  it("installs both managed files and points CODEX_CLI_PATH at the existing codex shim", () => {
+    const { layout, socket, node, plist, cliPlist } = fixture();
     const { runtime, calls } = recordingLaunchctl();
-    const record = installDesktopApp(layout, socket, undefined, runtime);
-    expect(record).toEqual({
-      launchAgentPath: plist,
-      label: LAUNCH_AGENT_LABEL,
-      controlSocket: socket,
-      entryShimPath: join(layout.bin, "codex-desktop"),
-      cliPathAgentPath: cliPlist,
+    const record = installDesktopApp(layout, socket, node, false, undefined, runtime);
+    expect(record.entryShimPath).toBe(join(layout.bin, "codex"));
+    expect(record.gatewayAgent).toMatchObject({
+      path: plist,
+      socket,
+      nodeExecutable: node,
+      remoteControlEnabled: false,
     });
-    expect(existsSync(plist)).toBe(true);
-    expect(existsSync(cliPlist)).toBe(true);
-    expect(calls.map((call) => call[0])).toEqual([
-      "bootout", "bootstrap", "kickstart", // gateway agent
-      "bootout", "bootstrap", // login agent (no kickstart)
-      "setenv", // immediate GUI publish
-    ]);
-    expect(calls.at(-1)).toEqual(["setenv", "CODEX_CLI_PATH", join(layout.bin, "codex-desktop")]);
+    expect(record.cliPathAgent.path).toBe(cliPlist);
+    expect(desktopAppFilesIntact(record)).toBe(true);
+    expect(calls.map((call) => call[0])).toEqual(["print", "bootout", "bootstrap", "setenv"]);
+    expect(calls.at(-1)).toEqual(["setenv", "CODEX_CLI_PATH", join(layout.bin, "codex")]);
   });
 
-  it("uninstalls both agents and clears the GUI env", () => {
-    const { layout, socket, plist, cliPlist } = fixture();
+  it("uninstalls both agents and clears the GUI environment", () => {
+    const { layout, socket, node, plist, cliPlist } = fixture();
     const { runtime, calls } = recordingLaunchctl();
-    const record = installDesktopApp(layout, socket, undefined, runtime);
+    const record = installDesktopApp(layout, socket, node, false, undefined, runtime);
     calls.length = 0;
     expect(uninstallDesktopApp(record, runtime)).toEqual([]);
     expect(existsSync(plist)).toBe(false);
@@ -80,33 +81,48 @@ describe("desktop app install orchestration", () => {
     expect(calls.map((call) => call[0])).toEqual(["unsetenv", "bootout", "bootout"]);
   });
 
-  it("preserves user-modified plists and still clears the GUI env", () => {
-    const { layout, socket, plist, cliPlist } = fixture();
+  it("preserves modified plists instead of trusting only a marker", () => {
+    const { layout, socket, node, plist, cliPlist } = fixture();
     const { runtime } = recordingLaunchctl();
-    const record = installDesktopApp(layout, socket, undefined, runtime);
-    writeFileSync(plist, "<plist>user gateway</plist>\n");
-    writeFileSync(cliPlist, "<plist>user cli-path</plist>\n");
+    const record = installDesktopApp(layout, socket, node, false, undefined, runtime);
+    writeFileSync(plist, "<plist><!-- Managed by CCodex — run 'ccodex uninstall' to remove. --><user/></plist>");
+    writeFileSync(cliPlist, "<plist><!-- Managed by CCodex — run 'ccodex uninstall' to remove. --><user/></plist>");
+    expect(desktopAppFilesIntact(record)).toBe(false);
     expect(uninstallDesktopApp(record, runtime).sort()).toEqual([cliPlist, plist].sort());
-    expect(existsSync(plist)).toBe(true);
-    expect(existsSync(cliPlist)).toBe(true);
   });
 
-  it("removes freshly-added agents on rollback with no previous", () => {
-    const { layout, socket, plist, cliPlist } = fixture();
+  it("removes a partial first install during transactional rollback", () => {
+    const { layout, socket, node, plist, cliPlist } = fixture();
     const { runtime } = recordingLaunchctl();
-    const record = installDesktopApp(layout, socket, undefined, runtime);
-    restoreDesktopApp(record, undefined, runtime);
+    const record = installDesktopApp(layout, socket, node, false, undefined, runtime);
+    restoreDesktopApp(layout, record, undefined, runtime);
     expect(existsSync(plist)).toBe(false);
     expect(existsSync(cliPlist)).toBe(false);
   });
 
-  it("reloads the previous gateway agent on rollback across versions", () => {
-    const { layout, socket, plist } = fixture();
-    const { runtime, calls } = recordingLaunchctl();
-    const record = installDesktopApp(layout, socket, undefined, runtime);
-    calls.length = 0;
-    restoreDesktopApp(record, record, runtime);
-    expect(existsSync(plist)).toBe(true);
-    expect(calls.map((call) => call[0])).toEqual(["bootout", "bootstrap", "kickstart"]);
+  it("restores the previous absolute Node path and plist hashes", () => {
+    const { layout, socket, node } = fixture();
+    const { runtime } = recordingLaunchctl();
+    const previous = installDesktopApp(layout, socket, node, false, undefined, runtime);
+    const current = installDesktopApp(layout, socket, "/new/node", true, previous, runtime);
+    restoreDesktopApp(layout, current, previous, runtime);
+    const restored = installDesktopApp(layout, socket, node, false, previous, runtime);
+    expect(restored.gatewayAgent.nodeExecutable).toBe(node);
+    expect(restored.gatewayAgent.remoteControlEnabled).toBe(false);
+  });
+
+  it("removes both partial plists when launchctl setup fails", () => {
+    const { layout, socket, node, plist, cliPlist } = fixture();
+    const runtime: LaunchctlRuntime = {
+      run: (args) => {
+        if (args[0] === "print") return { status: 1, stdout: "", stderr: "" };
+        if (args[0] === "bootstrap") throw new Error("fixture launchctl failure");
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    };
+    expect(() => installDesktopApp(layout, socket, node, false, undefined, runtime))
+      .toThrow("fixture launchctl failure");
+    expect(existsSync(plist)).toBe(false);
+    expect(existsSync(cliPlist)).toBe(false);
   });
 });

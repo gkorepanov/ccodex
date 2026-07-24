@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { compareSemver, packageIsNewer } from "../../src/management/shimSelect.js";
-import { CCODEX_SHIM, repairManagedCcodexShim } from "../../src/management/shims.js";
+import {
+  CCODEX_SHIM,
+  installManagedShims,
+  repairManagedCcodexShim,
+} from "../../src/management/shims.js";
 
 const roots: string[] = [];
 const sha256 = (content: string) => createHash("sha256").update(content).digest("hex");
@@ -92,5 +96,37 @@ describe("managed CCodex launcher", () => {
       },
     });
     expect(output.trim()).toBe("new-global:setup");
+  });
+
+  it("uses the recorded absolute Node executable even when Node is absent from PATH", () => {
+    const { root, home } = fixture();
+    const node = join(root, "toolchains", "node");
+    mkdirSync(join(root, "toolchains"));
+    writeFileSync(node, "#!/bin/sh\nprintf '%s\\n' \"$*\"\n", { mode: 0o755 });
+    const installed = installManagedShims(join(home, "bin"), node);
+    chmodSync(join(home, "bin", "codex"), 0o755);
+
+    const output = execFileSync(join(home, "bin", "codex"), ["--version"], {
+      encoding: "utf8",
+      env: { HOME: root, CCODEX_HOME: home, PATH: "/usr/bin:/bin" },
+    });
+    expect(output.trim()).toBe(
+      `${home}/current/node_modules/@gkorepanov/ccodex/dist/cli/main.js --version`,
+    );
+    expect(installed.hashes).toHaveProperty("codex");
+  });
+
+  it("validates every existing shim before changing either one", () => {
+    const { home } = fixture();
+    const bin = join(home, "bin");
+    const oldCcodex = "#!/bin/sh\necho old\n";
+    writeFileSync(join(bin, "ccodex"), oldCcodex);
+    writeFileSync(join(bin, "codex"), "#!/bin/sh\necho user-owned\n");
+
+    expect(() => installManagedShims(bin, "/absolute/node", {
+      ccodex: sha256(oldCcodex),
+      codex: sha256("#!/bin/sh\necho different\n"),
+    })).toThrow(/modified or unmanaged/u);
+    expect(readFileSync(join(bin, "ccodex"), "utf8")).toBe(oldCcodex);
   });
 });

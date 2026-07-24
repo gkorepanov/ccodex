@@ -23,6 +23,7 @@ export function delegate(command: string, args: readonly string[]): Promise<numb
   refuseManagedEntrypoint(command);
   const env = { ...process.env };
   delete env.CCODEX_SHIM_ACTIVE;
+  delete env.CODEX_CLI_PATH;
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       env,

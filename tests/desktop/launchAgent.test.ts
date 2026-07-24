@@ -1,12 +1,24 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { installLayout } from "../../src/management/layout.js";
 import {
-  codexCliPathAgentPath, codexCliPathPlist, CODEX_CLI_PATH_LABEL, desktopPlist,
-  installCliPathAgent, installLaunchAgent, launchAgentPath, LAUNCH_AGENT_LABEL,
-  type LaunchctlRuntime, setCodexCliPathEnv, uninstallCliPathAgent, uninstallLaunchAgent,
+  bootstrapLaunchAgent,
+  codexCliPathAgentPath,
+  codexCliPathPlist,
+  CODEX_CLI_PATH_LABEL,
+  desktopPlist,
+  getCodexCliPathEnv,
+  installCliPathAgent,
+  installLaunchAgent,
+  launchAgentLoaded,
+  launchAgentPath,
+  LAUNCH_AGENT_LABEL,
+  type LaunchctlRuntime,
+  setCodexCliPathEnv,
+  uninstallCliPathAgent,
+  uninstallLaunchAgent,
   unsetCodexCliPathEnv,
 } from "../../src/desktop/launchAgent.js";
 
@@ -21,7 +33,7 @@ afterEach(() => {
   }
 });
 
-function fixture(): { layout: ReturnType<typeof installLayout>; socket: string; plist: string } {
+function fixture(): { layout: ReturnType<typeof installLayout>; socket: string; node: string } {
   const root = mkdtempSync(join(tmpdir(), "ccodex-agent-"));
   roots.push(root);
   process.env.HOME = root;
@@ -29,157 +41,120 @@ function fixture(): { layout: ReturnType<typeof installLayout>; socket: string; 
   process.env.CODEX_HOME = join(root, ".codex");
   const layout = installLayout();
   mkdirSync(layout.bin, { recursive: true });
-  return { layout, socket: join(root, ".codex", "app-server-control", "app-server-control.sock"), plist: launchAgentPath() };
+  return {
+    layout,
+    socket: join(root, ".codex", "app-server-control", "app-server-control.sock"),
+    node: join(root, "toolchains", "node", "bin", "node"),
+  };
 }
 
-function recordingLaunchctl(): { runtime: LaunchctlRuntime; calls: string[][] } {
+function recordingLaunchctl(): {
+  runtime: LaunchctlRuntime;
+  calls: string[][];
+  environment: Map<string, string>;
+  loaded: Set<string>;
+} {
   const calls: string[][] = [];
+  const environment = new Map<string, string>();
+  const loaded = new Set<string>();
   return {
     calls,
-    runtime: { run: (args) => { calls.push([...args]); return { status: 0, stdout: "", stderr: "" }; } },
+    environment,
+    loaded,
+    runtime: {
+      run: (args) => {
+        calls.push([...args]);
+        if (args[0] === "setenv") environment.set(args[1]!, args[2]!);
+        if (args[0] === "unsetenv") environment.delete(args[1]!);
+        if (args[0] === "getenv") {
+          const value = environment.get(args[1]!);
+          return { status: value === undefined ? 1 : 0, stdout: value ?? "", stderr: "" };
+        }
+        if (args[0] === "bootstrap" || args[0] === "load") loaded.add(LAUNCH_AGENT_LABEL);
+        if (args[0] === "bootout" || args[0] === "unload") {
+          const label = args.at(-1)?.split("/").at(-1);
+          if (label) loaded.delete(label);
+        }
+        if (args[0] === "print") {
+          const label = args.at(-1)?.split("/").at(-1);
+          return { status: label && loaded.has(label) ? 0 : 1, stdout: "", stderr: "" };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    },
   };
 }
 
 describe("desktop LaunchAgent", () => {
-  it("targets the per-user LaunchAgents directory", () => {
-    const { plist } = fixture();
-    expect(plist).toBe(join(process.env.HOME!, "Library", "LaunchAgents", `${LAUNCH_AGENT_LABEL}.plist`));
+  it("uses an absolute Node executable and does not force remote control", () => {
+    const { layout, socket, node } = fixture();
+    const plist = desktopPlist(layout, socket, node, false);
+    expect(plist).toContain(`<string>${node}</string>`);
+    expect(plist).toContain(`<string>${join(layout.current, "node_modules", "@gkorepanov", "ccodex", "dist", "cli", "main.js")}</string>`);
+    expect(plist).not.toContain("<string>--remote-control</string>");
+    expect(desktopPlist(layout, socket, node, true)).toContain("<string>--remote-control</string>");
   });
 
-  it("renders a KeepAlive plist that runs the managed ccodex remote-control gateway", () => {
-    const { layout, socket } = fixture();
-    const plist = desktopPlist(layout, socket);
-    expect(plist).toContain(`<string>${LAUNCH_AGENT_LABEL}</string>`);
-    expect(plist).toContain(`<string>${join(layout.bin, "ccodex")}</string>`);
-    expect(plist).toContain("<string>--remote-control</string>");
-    expect(plist).toContain(`<string>unix://${socket}</string>`);
-    expect(plist).toContain(`<key>CCODEX_HOME</key>\n    <string>${layout.home}</string>`);
-    expect(plist).toContain(`<key>CODEX_HOME</key>\n    <string>${process.env.CODEX_HOME}</string>`);
-    expect(plist).toContain("<key>RunAtLoad</key>\n  <true/>");
-    expect(plist).toContain("<key>KeepAlive</key>\n  <true/>");
+  it("writes but does not start the gateway agent until the unified supervisor does", () => {
+    const { layout, socket, node } = fixture();
+    const record = installLaunchAgent(layout, socket, node, false);
+    expect(record.path).toBe(launchAgentPath());
+    expect(statSync(record.path).mode & 0o777).toBe(0o644);
+    expect(record.contentHash).toHaveLength(64);
+
+    const { runtime, calls, loaded } = recordingLaunchctl();
+    bootstrapLaunchAgent(record, runtime);
+    expect(calls.map((call) => call[0])).toEqual(["bootstrap", "kickstart"]);
+    expect(loaded.has(LAUNCH_AGENT_LABEL)).toBe(true);
+    expect(launchAgentLoaded(LAUNCH_AGENT_LABEL, runtime)).toBe(true);
   });
 
-  it("writes a 0644 plist and registers it via launchctl bootout + bootstrap", () => {
-    const { layout, socket, plist } = fixture();
-    const { runtime, calls } = recordingLaunchctl();
-    const record = installLaunchAgent(layout, socket, undefined, runtime);
-    expect(record).toEqual({ path: plist, label: LAUNCH_AGENT_LABEL, socket });
-    expect(existsSync(plist)).toBe(true);
-    expect(statSync(plist).mode & 0o777).toBe(0o644);
-    expect(calls.map((call) => call[0])).toEqual(["bootout", "bootstrap", "kickstart"]);
-    expect(calls[1]).toContain(plist);
+  it("allows an exact managed rewrite and rejects a modified plist", () => {
+    const { layout, socket, node } = fixture();
+    const first = installLaunchAgent(layout, socket, node, false);
+    const second = installLaunchAgent(layout, socket, node, true, first);
+    expect(second.remoteControlEnabled).toBe(true);
+    writeFileSync(second.path, `${readFileSync(second.path, "utf8")}<!-- user -->\n`);
+    expect(() => installLaunchAgent(layout, socket, node, false, second))
+      .toThrow("Refusing to overwrite modified or unmanaged");
   });
 
-  it("refuses to overwrite a user-modified managed plist", () => {
-    const { layout, socket, plist } = fixture();
+  it("removes only a byte-identical owned gateway plist", () => {
+    const { layout, socket, node } = fixture();
+    const record = installLaunchAgent(layout, socket, node, false);
     const { runtime } = recordingLaunchctl();
-    installLaunchAgent(layout, socket, undefined, runtime);
-    writeFileSync(plist, "<plist>hand edited, no marker</plist>\n");
-    expect(() => installLaunchAgent(layout, socket, { path: plist, label: LAUNCH_AGENT_LABEL, socket }, runtime))
-      .toThrow("Refusing to overwrite modified managed LaunchAgent");
-  });
-
-  it("refuses to overwrite an unmanaged plist squatting the label path", () => {
-    const { layout, socket, plist } = fixture();
-    mkdirSync(join(plist, ".."), { recursive: true });
-    writeFileSync(plist, "<plist>someone else</plist>\n");
-    const { runtime } = recordingLaunchctl();
-    expect(() => installLaunchAgent(layout, socket, undefined, runtime))
-      .toThrow("Refusing to overwrite unmanaged LaunchAgent");
-  });
-
-  it("removes an owned plist but preserves a user-modified one", () => {
-    const { layout, socket, plist } = fixture();
-    const { runtime, calls } = recordingLaunchctl();
-    const record = installLaunchAgent(layout, socket, undefined, runtime);
-    calls.length = 0;
-
-    writeFileSync(plist, "<plist>user owned now</plist>\n");
+    writeFileSync(record.path, `${readFileSync(record.path, "utf8")}<!-- changed -->`);
     expect(uninstallLaunchAgent(record, runtime)).toBe(false);
-    expect(existsSync(plist)).toBe(true);
-    expect(calls).toEqual([]);
-
-    writeFileSync(plist, desktopPlist(layout, socket));
-    expect(uninstallLaunchAgent(record, runtime)).toBe(true);
-    expect(existsSync(plist)).toBe(false);
-    expect(calls.map((call) => call[0])).toEqual(["bootout"]);
-  });
-
-  it("treats an already-absent plist as removed", () => {
-    const { socket, plist } = fixture();
-    const { runtime, calls } = recordingLaunchctl();
-    expect(uninstallLaunchAgent({ path: plist, label: LAUNCH_AGENT_LABEL, socket }, runtime)).toBe(true);
-    expect(calls).toEqual([]);
+    expect(existsSync(record.path)).toBe(true);
   });
 });
 
 describe("CODEX_CLI_PATH login agent", () => {
-  it("renders a one-shot login agent that publishes CODEX_CLI_PATH", () => {
+  it("publishes the existing managed codex shim, not a desktop-only shim", () => {
     const { layout } = fixture();
-    const entry = join(layout.bin, "codex-desktop");
+    const entry = join(layout.bin, "codex");
     const plist = codexCliPathPlist(entry);
     expect(plist).toContain(`<string>${CODEX_CLI_PATH_LABEL}</string>`);
-    expect(plist).toContain("<string>/bin/launchctl</string>");
-    expect(plist).toContain("<string>setenv</string>");
-    expect(plist).toContain("<string>CODEX_CLI_PATH</string>");
     expect(plist).toContain(`<string>${entry}</string>`);
-    expect(plist).toContain("<key>RunAtLoad</key>\n  <true/>");
-    expect(plist).toContain("<key>KeepAlive</key>\n  <false/>");
-    expect(plist).not.toContain("EnvironmentVariables");
+    expect(plist).not.toContain("codex-desktop");
   });
 
-  it("installs the login agent (bootout + bootstrap, no kickstart) and removes it when owned", () => {
+  it("installs, hashes, and removes only an unchanged login agent", () => {
     const { layout } = fixture();
-    const entry = join(layout.bin, "codex-desktop");
-    const { runtime, calls } = recordingLaunchctl();
-    const path = installCliPathAgent(entry, runtime);
-    expect(path).toBe(codexCliPathAgentPath());
-    expect(existsSync(path)).toBe(true);
-    expect(statSync(path).mode & 0o777).toBe(0o644);
-    expect(calls.map((call) => call[0])).toEqual(["bootout", "bootstrap"]);
-
-    calls.length = 0;
-    expect(uninstallCliPathAgent(path, runtime)).toBe(true);
-    expect(existsSync(path)).toBe(false);
-    expect(calls.map((call) => call[0])).toEqual(["bootout"]);
-  });
-
-  it("preserves a user-modified login agent and treats absent as removed", () => {
-    const { layout } = fixture();
-    const entry = join(layout.bin, "codex-desktop");
     const { runtime } = recordingLaunchctl();
-    const path = installCliPathAgent(entry, runtime);
-    writeFileSync(path, "<plist>user owned</plist>\n");
-    expect(uninstallCliPathAgent(path, runtime)).toBe(false);
-    expect(existsSync(path)).toBe(true);
-
-    rmSync(path);
-    expect(uninstallCliPathAgent(path, runtime)).toBe(true);
+    const record = installCliPathAgent(join(layout.bin, "codex"), undefined, runtime);
+    expect(record.path).toBe(codexCliPathAgentPath());
+    expect(record.contentHash).toHaveLength(64);
+    expect(uninstallCliPathAgent(record, runtime)).toBe(true);
+    expect(existsSync(record.path)).toBe(false);
   });
 
-  it("refuses to overwrite an unmanaged login agent plist", () => {
-    const { layout } = fixture();
-    const entry = join(layout.bin, "codex-desktop");
-    const path = codexCliPathAgentPath();
-    mkdirSync(join(path, ".."), { recursive: true });
-    writeFileSync(path, "<plist>someone else</plist>\n");
-    const { runtime } = recordingLaunchctl();
-    expect(() => installCliPathAgent(entry, runtime)).toThrow("Refusing to overwrite unmanaged LaunchAgent");
-  });
-
-  it("publishes and clears CODEX_CLI_PATH in the GUI launchd session", () => {
+  it("sets, reads, and clears the GUI environment", () => {
     fixture();
-    const entry = "/Users/x/.ccodex/bin/codex-desktop";
-    const { runtime, calls } = recordingLaunchctl();
-    setCodexCliPathEnv(entry, runtime);
+    const { runtime } = recordingLaunchctl();
+    setCodexCliPathEnv("/managed/codex", runtime);
+    expect(getCodexCliPathEnv(runtime)).toBe("/managed/codex");
     unsetCodexCliPathEnv(runtime);
-    expect(calls).toEqual([["setenv", "CODEX_CLI_PATH", entry], ["unsetenv", "CODEX_CLI_PATH"]]);
-  });
-
-  it("swallows launchctl failures when there is no GUI session", () => {
-    fixture();
-    const throwing: LaunchctlRuntime = { run: () => { throw new Error("Could not find domain for uid"); } };
-    expect(() => setCodexCliPathEnv("/x", throwing)).not.toThrow();
-    expect(() => unsetCodexCliPathEnv(throwing)).not.toThrow();
+    expect(getCodexCliPathEnv(runtime)).toBeUndefined();
   });
 });

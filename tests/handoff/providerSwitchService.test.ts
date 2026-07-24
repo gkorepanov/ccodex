@@ -154,7 +154,7 @@ describe("provider switch service", () => {
       id: "archive-switch-job",
       publicThreadId: source.id,
       expectedEpochId: "archive-source-epoch",
-      pendingRevision: pending.revision,
+      pendingRevision: pending.revision!,
       targetProvider: "stock",
       targetModel: "gpt-5.6-sol",
       settings: pending.settings,
