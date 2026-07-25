@@ -1,4 +1,6 @@
 import type { Thread } from "../codex/generated/v2/Thread.js";
+import type { ApprovalsReviewer } from "../codex/generated/v2/ApprovalsReviewer.js";
+import type { AskForApproval } from "../codex/generated/v2/AskForApproval.js";
 import type { ThreadListParams } from "../codex/generated/v2/ThreadListParams.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
@@ -80,10 +82,115 @@ function handoffInstructions(original: string | null | undefined, summary: strin
     .filter(Boolean).join("\n\n");
 }
 
-function sandboxMode(policy: ThreadSettings["sandboxPolicy"]): "read-only" | "workspace-write" | "danger-full-access" {
-  if (policy.type === "dangerFullAccess") return "danger-full-access";
-  if (policy.type === "readOnly") return "read-only";
-  return "workspace-write";
+interface ExplicitPermissions {
+  readonly approvalPolicy: AskForApproval;
+  readonly approvalsReviewer: ApprovalsReviewer;
+  readonly permissions: string;
+}
+
+function value<T>(...candidates: unknown[]): T | undefined {
+  return candidates.find((candidate) => candidate !== undefined && candidate !== null) as T | undefined;
+}
+
+function object(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function sandboxPermission(value: unknown): string | undefined {
+  if (value === "danger-full-access") return ":danger-full-access";
+  if (value === "read-only") return ":read-only";
+  if (value === "workspace-write") return ":workspace";
+  const type = object(value)?.type;
+  if (type === "dangerFullAccess") return ":danger-full-access";
+  if (type === "readOnly") return ":read-only";
+  if (type === "workspaceWrite" || type === "externalSandbox") return ":workspace";
+  return undefined;
+}
+
+function activePermission(value: unknown): string | undefined {
+  const id = object(value)?.id;
+  return typeof id === "string" ? id : undefined;
+}
+
+function explicitPermissions(
+  source: Record<string, unknown>,
+  staged: Partial<ThreadSettingsUpdateParams | TurnStartParams> = {},
+  turn: Partial<TurnStartParams> = {},
+): ExplicitPermissions {
+  const permissions = value<string>(
+    typeof turn.permissions === "string" ? turn.permissions : undefined,
+    sandboxPermission(turn.sandboxPolicy),
+    typeof staged.permissions === "string" ? staged.permissions : undefined,
+    sandboxPermission(staged.sandboxPolicy),
+    typeof source.permissions === "string" ? source.permissions : undefined,
+    activePermission(source.activePermissionProfile),
+    sandboxPermission(source.sandboxPolicy),
+    sandboxPermission(source.sandbox),
+  ) ?? ":workspace";
+  return {
+    approvalPolicy: value<AskForApproval>(
+      turn.approvalPolicy,
+      staged.approvalPolicy,
+      source.approvalPolicy,
+    ) ?? (permissions === ":danger-full-access" ? "never" : "on-request"),
+    approvalsReviewer: value<ApprovalsReviewer>(
+      turn.approvalsReviewer,
+      staged.approvalsReviewer,
+      source.approvalsReviewer,
+    ) ?? "user",
+    permissions,
+  };
+}
+
+function explicitPermissionParams<T extends Record<string, unknown>>(
+  params: T,
+  permissions: ExplicitPermissions,
+): T & ExplicitPermissions {
+  const { sandbox: _sandbox, sandboxPolicy: _sandboxPolicy, ...rest } = params;
+  return { ...rest, ...permissions } as T & ExplicitPermissions;
+}
+
+function permissionSandbox(
+  permissions: string,
+  cwd: string,
+  fallback: unknown,
+): unknown {
+  if (permissions === ":danger-full-access") return { type: "dangerFullAccess" };
+  if (permissions === ":read-only") return { type: "readOnly", networkAccess: false };
+  if (permissions === ":workspace") {
+    return {
+      type: "workspaceWrite",
+      writableRoots: [cwd],
+      networkAccess: false,
+      excludeTmpdirEnvVar: false,
+      excludeSlashTmp: false,
+    };
+  }
+  return fallback;
+}
+
+function canonicalSettings(
+  source: Record<string, unknown>,
+  staged: ThreadSettingsUpdateParams,
+  turn: TurnStartParams,
+  cwd: string,
+): Record<string, unknown> {
+  const permissions = explicitPermissions(source, staged, turn);
+  const { threadId: _threadId, ...merged } = { ...source, ...staged };
+  const sandbox = permissionSandbox(
+    permissions.permissions,
+    cwd,
+    turn.sandboxPolicy ?? staged.sandboxPolicy ?? source.sandboxPolicy ?? source.sandbox,
+  );
+  return {
+    ...merged,
+    ...permissions,
+    sandbox,
+    sandboxPolicy: sandbox,
+    activePermissionProfile: { id: permissions.permissions, extends: null },
+  };
 }
 
 function agentText(turn: Turn): string {
@@ -107,12 +214,19 @@ function stagedSettings(base: ThreadSettings, pending: PendingProviderSwitch): T
   const settings = pending.settings;
   const effort = settings.effort === undefined ? base.effort : settings.effort;
   const collaborationMode = settings.collaborationMode ?? base.collaborationMode;
+  const permissions = explicitPermissions(base as unknown as Record<string, unknown>, settings);
+  const sandbox = permissionSandbox(
+    permissions.permissions,
+    settings.cwd ?? base.cwd,
+    settings.sandboxPolicy ?? base.sandboxPolicy,
+  ) as ThreadSettings["sandboxPolicy"];
   return {
     ...base,
     ...(settings.cwd !== undefined && settings.cwd !== null ? { cwd: settings.cwd } : {}),
-    ...(settings.approvalPolicy !== undefined && settings.approvalPolicy !== null ? { approvalPolicy: settings.approvalPolicy } : {}),
-    ...(settings.approvalsReviewer !== undefined && settings.approvalsReviewer !== null ? { approvalsReviewer: settings.approvalsReviewer } : {}),
-    ...(settings.sandboxPolicy !== undefined && settings.sandboxPolicy !== null ? { sandboxPolicy: settings.sandboxPolicy } : {}),
+    approvalPolicy: permissions.approvalPolicy,
+    approvalsReviewer: permissions.approvalsReviewer,
+    sandboxPolicy: sandbox,
+    activePermissionProfile: { id: permissions.permissions, extends: null },
     model: pending.targetModel,
     modelProvider: pending.targetProvider === "claude" ? "claude" : "openai",
     serviceTier: settings.serviceTier === undefined ? base.serviceTier : settings.serviceTier,
@@ -366,7 +480,17 @@ export class CrossProviderForks {
     const resolved = this.epochs.resolve(publicThreadId);
     if (!resolved) throw invalidParams(`Unknown logical thread '${publicThreadId}'.`);
     const owner = { publicThreadId, backendThreadId: resolved.epoch.backendThreadId };
-    const params = projectRpcToBackendThread({ params: publicParams }, owner).params as Record<string, unknown>;
+    let params = projectRpcToBackendThread({ params: publicParams }, owner).params as Record<string, unknown>;
+    if (method === "thread/settings/update" || method === "turn/start") {
+      params = explicitPermissionParams(
+        params,
+        explicitPermissions(
+          resolved.epoch.settings,
+          publicParams as ThreadSettingsUpdateParams,
+          method === "turn/start" ? publicParams as TurnStartParams : {},
+        ),
+      );
+    }
     if (method === "thread/delete") {
       await this.deleteLogicalThread(publicThreadId, clientStock);
       return { provider: resolved.epoch.provider, result: {} };
@@ -965,24 +1089,27 @@ export class CrossProviderForks {
       const workerConnectionId = this.daemonStock
         ? `${HANDOFF_DAEMON_CONNECTION_ID}:switch:${job.id}`
         : connectionId;
-      const { source, summary, sourceTurns, developerInstructions, targetSettings } =
+      const { source, summary, sourceTurns, developerInstructions, targetSettings, permissionSettings } =
         await this.providerSwitchMaterial(job, stock, workerConnectionId);
 
       if (job.targetProvider === "claude") {
         const started = await this.claude.startHiddenThread(this.targetThreadStart(
-          job, source.thread, developerInstructions,
+          job, source.thread, developerInstructions, permissionSettings,
         ));
         target = { provider: "claude", threadId: started.thread.id };
         if (!this.store.checkpointProviderSwitchTarget(job.id, {
           backendThreadId: started.thread.id,
           summary,
         })) throw new Error("Provider switch target lost its durable checkpoint.");
-        await this.claude.updateThreadSettings({
-          ...job.settings,
+        await this.claude.updateThreadSettings(explicitPermissionParams({
+          ...job.settings as unknown as Record<string, unknown>,
           threadId: started.thread.id,
           model: job.targetModel,
-        });
-        const prepared = await this.claude.prepareTurn({ ...params, threadId: started.thread.id });
+        }, permissionSettings) as unknown as ThreadSettingsUpdateParams);
+        const prepared = await this.claude.prepareTurn(explicitPermissionParams({
+          ...params as unknown as Record<string, unknown>,
+          threadId: started.thread.id,
+        }, permissionSettings) as unknown as TurnStartParams);
         await prepared.startAndWait();
         if (!this.store.checkpointProviderSwitchTarget(job.id, {
           backendThreadId: started.thread.id,
@@ -1003,24 +1130,24 @@ export class CrossProviderForks {
       };
       this.stockTargetBuilds.set(workerConnectionId, build);
       const started = await stock.request("thread/start", this.targetThreadStart(
-        job, source.thread, developerInstructions,
+        job, source.thread, developerInstructions, permissionSettings,
       )) as ThreadStartResponse;
       target = { provider: "stock", threadId: started.thread.id };
       if (build.awaitingStart) build.awaitingStart = false;
       build.threadIds.add(started.thread.id);
-      await stock.request("thread/settings/update", {
-        ...job.settings,
+      await stock.request("thread/settings/update", explicitPermissionParams({
+        ...job.settings as unknown as Record<string, unknown>,
         threadId: started.thread.id,
         model: job.targetModel,
-      });
+      }, permissionSettings));
       if (!this.store.checkpointProviderSwitchTarget(job.id, {
         backendThreadId: started.thread.id,
         summary,
       })) throw new Error("Provider switch target lost its durable checkpoint.");
-      const delivered = await stock.request("turn/start", {
-        ...params,
+      const delivered = await stock.request("turn/start", explicitPermissionParams({
+        ...params as unknown as Record<string, unknown>,
         threadId: started.thread.id,
-      }) as TurnStartResponse;
+      }, permissionSettings)) as TurnStartResponse;
       if (!this.store.checkpointProviderSwitchTarget(job.id, {
         backendThreadId: started.thread.id,
         providerTurnId: delivered.turn.id,
@@ -1551,7 +1678,12 @@ export class CrossProviderForks {
     resolved: ResolvedProviderEpoch,
     params: Record<string, unknown>,
   ): void {
-    const settings = { ...params };
+    const settings = canonicalSettings(
+      resolved.epoch.settings,
+      params as ThreadSettingsUpdateParams,
+      params as TurnStartParams,
+      typeof params.cwd === "string" ? params.cwd : resolved.logical.thread.cwd,
+    );
     delete settings.threadId;
     delete settings.input;
     delete settings.clientUserMessageId;
@@ -1631,10 +1763,13 @@ export class CrossProviderForks {
     sourceTurns: NewLogicalTurn[];
     developerInstructions: string;
     targetSettings: Record<string, unknown>;
+    permissionSettings: ExplicitPermissions;
   }> {
     const source = await this.providerSwitchSource(job, stock, connectionId);
     const summary = job.summary
       ?? await this.providerSwitchSummary(job, source.turns, stock, connectionId);
+    const cwd = job.turnParams.cwd ?? job.settings.cwd ?? source.thread.cwd;
+    const permissionSettings = explicitPermissions(source.settings, job.settings, job.turnParams);
     const completedAt = Math.floor(Date.now() / 1_000);
     const compactTurn: Turn = {
       ...job.compactionTurn,
@@ -1653,11 +1788,11 @@ export class CrossProviderForks {
       ],
       developerInstructions: handoffInstructions(source.developerInstructions, summary),
       targetSettings: {
-        ...source.settings,
-        ...job.settings,
+        ...canonicalSettings(source.settings, job.settings, job.turnParams, cwd),
         model: job.targetModel,
         modelProvider: job.targetProvider === "claude" ? "claude" : "openai",
       },
+      permissionSettings,
     };
   }
 
@@ -1706,30 +1841,19 @@ export class CrossProviderForks {
     job: ProviderSwitchJob,
     source: Thread,
     developerInstructions: string,
+    permissionSettings: ExplicitPermissions,
   ): ThreadStartParams {
     const turn = job.turnParams;
     const settings = job.settings;
-    const sandbox = turn.sandboxPolicy ?? settings.sandboxPolicy;
     return {
       model: job.targetModel,
       modelProvider: job.targetProvider === "claude" ? "claude" : "openai",
       cwd: turn.cwd ?? settings.cwd ?? source.cwd,
       developerInstructions,
+      ...permissionSettings,
       ...(turn.serviceTier !== undefined
         ? { serviceTier: turn.serviceTier }
         : settings.serviceTier !== undefined ? { serviceTier: settings.serviceTier } : {}),
-      ...(turn.approvalPolicy !== undefined
-        ? { approvalPolicy: turn.approvalPolicy }
-        : settings.approvalPolicy !== undefined ? { approvalPolicy: settings.approvalPolicy } : {}),
-      ...(turn.approvalsReviewer !== undefined
-        ? { approvalsReviewer: turn.approvalsReviewer }
-        : settings.approvalsReviewer !== undefined ? { approvalsReviewer: settings.approvalsReviewer } : {}),
-      ...(turn.permissions !== undefined
-        ? { permissions: turn.permissions }
-        : settings.permissions !== undefined ? { permissions: settings.permissions } : {}),
-      ...(sandbox && turn.permissions === undefined && settings.permissions === undefined
-        ? { sandbox: sandboxMode(sandbox) }
-        : {}),
       ephemeral: false,
       threadSource: source.threadSource,
     };

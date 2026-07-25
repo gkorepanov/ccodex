@@ -493,7 +493,7 @@
     },
     {
       "path": "tests/claude/modelCatalog.test.ts",
-      "title": "shows the resolved version beside every Claude alias",
+      "title": "hides the moving default alias and shows concise explicit versions",
       "classification": "provider-mapping",
       "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
     },

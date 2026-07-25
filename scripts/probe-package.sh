@@ -68,7 +68,7 @@ run_hybrid env \
 run_hybrid env \
   CODEX_HYBRID_PROXY_COMMAND="$CLI app-server proxy" \
   CODEX_HYBRID_PROBE_CWD="$ROOT" \
-  CODEX_HYBRID_TEST_MODEL="claude:default" \
+  CODEX_HYBRID_TEST_MODEL="claude:claude-opus-5" \
   CODEX_HYBRID_TEST_SERVICE_TIER="priority" \
   CODEX_HYBRID_TEST_EFFORT="xhigh" \
   node "$ROOT/scripts/probe-proxy.mjs"

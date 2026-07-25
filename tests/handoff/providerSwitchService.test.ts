@@ -369,6 +369,16 @@ describe("provider switch service", () => {
 
     expect(completed).toHaveBeenCalledOnce();
     expect(claude.compactForHandoff).toHaveBeenCalledWith(hidden.id, expect.stringContaining("/compact"));
+    for (const request of requests.filter(({ method }) =>
+      method === "thread/start" || method === "thread/settings/update" || method === "turn/start")) {
+      expect(request.params).toMatchObject({
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        permissions: ":read-only",
+      });
+      expect(request.params).not.toHaveProperty("sandbox");
+      expect(request.params).not.toHaveProperty("sandboxPolicy");
+    }
     expect(requests).toContainEqual({
       method: "turn/start",
       params: expect.objectContaining({ threadId: target.id, input }),
@@ -465,19 +475,19 @@ describe("provider switch service", () => {
     const claude = {
       ownsModel: (model: string) => model.startsWith("claude:"),
       ownsThread: () => false,
-      startHiddenThread: vi.fn(async () => {
+      startHiddenThread: vi.fn(async (_params: unknown) => {
         hub.suppress(target.id);
         hub.emit(target.id, "thread/started", { thread: target });
         expect(service.projectThreadCatalog([], [target])).toEqual([]);
         return { thread: target, model: "claude:sonnet" };
       }),
-      updateThreadSettings: vi.fn(async () => {
+      updateThreadSettings: vi.fn(async (_params: unknown) => {
         hub.emit(target.id, "thread/settings/updated", {
           threadId: target.id, threadSettings: { model: "claude:sonnet" },
         });
         return {};
       }),
-      prepareTurn: vi.fn(async () => prepared),
+      prepareTurn: vi.fn(async (_params: unknown) => prepared),
       deleteThread: vi.fn(async () => ({})),
     };
     const stock = {
@@ -485,8 +495,9 @@ describe("provider switch service", () => {
         if (method === "thread/read") return { thread: source };
         if (method === "thread/resume") return {
           thread: { ...source, turns: [] }, model: "gpt-5.6-sol", modelProvider: "openai",
-          serviceTier: "default", cwd: source.cwd, approvalPolicy: "on-request",
-          approvalsReviewer: "user", sandbox: { type: "readOnly" }, activePermissionProfile: null,
+          serviceTier: "default", cwd: source.cwd, approvalPolicy: "never",
+          approvalsReviewer: "user", sandbox: { type: "dangerFullAccess" },
+          activePermissionProfile: { id: ":danger-full-access", extends: null },
           reasoningEffort: "high", multiAgentMode: "explicitRequestOnly",
           runtimeWorkspaceRoots: [], instructionSources: [], initialTurnsPage: null,
         };
@@ -507,7 +518,21 @@ describe("provider switch service", () => {
       threadId: source.id, model: "claude:sonnet", effort: "high", input,
     }, compact, stock as never, "client", completed);
 
-    expect(claude.prepareTurn).toHaveBeenCalledWith(expect.objectContaining({ threadId: target.id, input }));
+    const explicitFullAccess = {
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      permissions: ":danger-full-access",
+    };
+    expect(claude.startHiddenThread).toHaveBeenCalledWith(expect.objectContaining(explicitFullAccess));
+    expect(claude.updateThreadSettings).toHaveBeenCalledWith(expect.objectContaining(explicitFullAccess));
+    expect(claude.prepareTurn).toHaveBeenCalledWith(expect.objectContaining({
+      threadId: target.id,
+      input,
+      ...explicitFullAccess,
+    }));
+    expect(claude.startHiddenThread.mock.calls[0]?.[0]).not.toHaveProperty("sandbox");
+    expect(claude.updateThreadSettings.mock.calls[0]?.[0]).not.toHaveProperty("sandboxPolicy");
+    expect(claude.prepareTurn.mock.calls[0]?.[0]).not.toHaveProperty("sandboxPolicy");
     expect(order).toEqual(["start", "compact-completed", "announce"]);
     const serializedEvents = JSON.stringify(appEvents);
     expect(serializedEvents).not.toContain(`"threadId":"${target.id}"`);
@@ -524,6 +549,59 @@ describe("provider switch service", () => {
     });
     expect(store.listLogicalTurns(source.id).map((value) => value.publicTurnId))
       .toEqual([sourceTurn.id, compact.id]);
+    service.close();
+  });
+
+  it("explicitly forwards and retains permissions when App omits them on later logical turns", async () => {
+    const backend = thread("logical-claude-backend", "claude");
+    const publicThread = { ...backend, id: "logical-public", sessionId: "logical-public" };
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    store.createLogicalThread({
+      thread: publicThread,
+      epoch: {
+        id: "logical-claude-epoch",
+        provider: "claude",
+        backendThreadId: backend.id,
+        model: "claude:sonnet",
+        settings: {
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          permissions: ":danger-full-access",
+          sandboxPolicy: { type: "dangerFullAccess" },
+        },
+      },
+    });
+    const prepared = {
+      response: { turn: turn("logical-turn", "answer") },
+      announce: vi.fn(async () => undefined),
+      start: vi.fn(),
+    };
+    const claude = {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: (id: string) => id === backend.id,
+      prepareTurn: vi.fn(async (_params: unknown) => prepared),
+    };
+    const service = new CrossProviderForks(store, claude as never);
+
+    await service.requestLogical("turn/start", {
+      threadId: publicThread.id,
+      input: [{ type: "text", text: "continue", text_elements: [] }],
+    }, { request: vi.fn() } as never);
+
+    expect(claude.prepareTurn).toHaveBeenCalledWith(expect.objectContaining({
+      threadId: backend.id,
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      permissions: ":danger-full-access",
+    }));
+    expect(claude.prepareTurn.mock.calls[0]?.[0]).not.toHaveProperty("sandboxPolicy");
+    expect(service.logical(publicThread.id)?.epoch.settings).toMatchObject({
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      permissions: ":danger-full-access",
+      activePermissionProfile: { id: ":danger-full-access" },
+      sandboxPolicy: { type: "dangerFullAccess" },
+    });
     service.close();
   });
 

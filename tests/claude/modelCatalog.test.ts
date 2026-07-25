@@ -3,6 +3,7 @@ import {
   assertClaudeControlSurface,
   claudeModelDisplayName,
   mapClaudeModel,
+  mapClaudeModels,
 } from "../../src/claude/modelCatalog.js";
 
 describe("mapClaudeModel", () => {
@@ -22,6 +23,7 @@ describe("mapClaudeModel", () => {
     }, "claude:")).toMatchObject({
       id: "claude:claude-opus-4-8",
       model: "claude:claude-opus-4-8",
+      displayName: "Opus 4.8",
       defaultReasoningEffort: "high",
       inputModalities: ["text", "image"],
       isDefault: false,
@@ -42,13 +44,24 @@ describe("mapClaudeModel", () => {
     });
   });
 
-  it("shows the resolved version beside every Claude alias", () => {
-    expect(claudeModelDisplayName({
+  it("hides the moving default alias and shows concise explicit versions", () => {
+    const models = mapClaudeModels([{
       value: "default",
       resolvedModel: "claude-opus-5[1m]",
       displayName: "Default (recommended)",
       description: "Default Claude model.",
-    })).toBe("Default (recommended · Opus 5)");
+    }, {
+      value: "opus[1m]",
+      resolvedModel: "claude-opus-5[1m]",
+      displayName: "Opus (1M context)",
+      description: "Largest Claude context.",
+    }], "claude:");
+    expect(models).toHaveLength(1);
+    expect(models[0]).toMatchObject({
+      id: "claude:claude-opus-5",
+      displayName: "Opus 5",
+    });
+
     expect(claudeModelDisplayName({
       value: "sonnet",
       resolvedModel: "claude-sonnet-5",

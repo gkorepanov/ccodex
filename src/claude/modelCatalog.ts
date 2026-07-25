@@ -29,18 +29,17 @@ function defaultEffort(levels: readonly string[]): string {
 }
 
 export function claudeModelDisplayName(model: ModelInfo): string {
+  const displayName = model.displayName.replace(/\s*\(1M context\)\s*$/iu, "");
   const resolved = model.resolvedModel && normalizeClaudeModelIdentifier(model.resolvedModel);
   const version = resolved && /^claude-([a-z][a-z0-9]*?)-(\d+)(?:-(\d{1,2})(?=-|$))?/u.exec(resolved);
-  if (!version) return model.displayName;
+  if (!version) return displayName;
   const [, family, major, minor] = version;
   const label = `${family![0]!.toUpperCase()}${family!.slice(1)} ${major}${minor ? `.${minor}` : ""}`;
-  if (model.displayName.toLocaleLowerCase().includes(label.toLocaleLowerCase())) return model.displayName;
-  if (model.displayName.toLocaleLowerCase().startsWith(family!)) {
-    return `${model.displayName.slice(0, family!.length)} ${major}${minor ? `.${minor}` : ""}${model.displayName.slice(family!.length)}`;
+  if (displayName.toLocaleLowerCase().includes(label.toLocaleLowerCase())) return displayName;
+  if (displayName.toLocaleLowerCase().startsWith(family!)) {
+    return `${displayName.slice(0, family!.length)} ${major}${minor ? `.${minor}` : ""}${displayName.slice(family!.length)}`;
   }
-  return model.displayName.startsWith("Default")
-    ? `Default (recommended · ${label})`
-    : `${model.displayName} · ${label}`;
+  return `${displayName} · ${label}`;
 }
 
 export function mapClaudeModel(model: ModelInfo, prefix: string): Model {
@@ -73,6 +72,11 @@ export function mapClaudeModel(model: ModelInfo, prefix: string): Model {
     defaultServiceTier: serviceTiers.length > 0 ? "default" : null,
     isDefault: false,
   };
+}
+
+export function mapClaudeModels(models: readonly ModelInfo[], prefix: string): Model[] {
+  return models.filter((model) => model.value !== "default")
+    .map((model) => mapClaudeModel(model, prefix));
 }
 
 async function* idlePrompt(signal: AbortSignal): AsyncGenerator<SDKUserMessage> {
@@ -129,7 +133,7 @@ export class ClaudeModelCatalog {
       ]);
       await sdkQuery.reinitialize();
       await sdkQuery.interrupt();
-      const mapped = models.map((model) => mapClaudeModel(model, this.config.modelPrefix));
+      const mapped = mapClaudeModels(models, this.config.modelPrefix);
       this.cache = {
         key: this.cacheKey(),
         expiresAt: Date.now() + this.config.modelCacheSeconds * 1_000,

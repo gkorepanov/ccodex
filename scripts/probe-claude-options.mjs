@@ -21,7 +21,7 @@ const sdkQuery = query({
     sessionId,
     persistSession: false,
     abortController: abort,
-    model: "claude-opus-4-8",
+    model: "claude-opus-5",
     effort: "xhigh",
     settings: { fastMode: true },
     allowedTools: [],
@@ -34,10 +34,10 @@ try {
   const { stdout } = await execFileAsync("ps", ["-eo", "args="], { maxBuffer: 4 * 1024 * 1024 });
   const command = stdout.split("\n").find((line) => line.includes(sessionId));
   assert.ok(command, "Claude CLI process for the probe session was not found.");
-  assert.match(command, /--model claude-opus-4-8(?:\s|$)/u);
+  assert.match(command, /--model claude-opus-5(?:\s|$)/u);
   assert.match(command, /--effort xhigh(?:\s|$)/u);
   assert.match(command, /--settings .*fastMode/u);
-  process.stdout.write(`${JSON.stringify({ cliOptions: true, model: "claude-opus-4-8", effort: "xhigh", fastMode: true })}\n`);
+  process.stdout.write(`${JSON.stringify({ cliOptions: true, model: "claude-opus-5", effort: "xhigh", fastMode: true })}\n`);
 } finally {
   abort.abort();
   sdkQuery.close();
