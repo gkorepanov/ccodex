@@ -49,6 +49,7 @@ import {
   type StockHistoryOverlay,
 } from "./store.js";
 import {
+  stockSwitchThreadSource,
   ProviderEpochs,
   type LegacyProviderSnapshots,
   type ResolvedProviderEpoch,
@@ -316,6 +317,7 @@ interface StockTargetBuild {
   readonly threadIds: Set<string>;
   readonly messages: Array<{ id?: string | number; method: string; params?: unknown }>;
   readonly expectedForkedFromId?: string;
+  readonly expectedThreadSource?: string;
 }
 
 interface InternalStockBuild extends StockTargetBuild {
@@ -524,7 +526,12 @@ export class CrossProviderForks {
     if (typeof publicThreadId !== "string") throw invalidParams("Logical thread request has no threadId.");
     const unresolved = this.epochs.resolve(publicThreadId);
     if (!unresolved) throw invalidParams(`Unknown logical thread '${publicThreadId}'.`);
-    const resolved = await this.hydrate(unresolved, this.daemonStock ?? clientStock);
+    // An archived stock backend rejects read/resume, so unarchive must reach the
+    // provider before metadata hydration. The lineage mapping is sufficient to
+    // route this lifecycle operation.
+    const resolved = method === "thread/unarchive"
+      ? unresolved
+      : await this.hydrate(unresolved, this.daemonStock ?? clientStock);
     const owner = { publicThreadId, backendThreadId: resolved.epoch.backendThreadId };
     let params = projectRpcToBackendThread({ params: publicParams }, owner).params as Record<string, unknown>;
     if (method === "thread/settings/update" || method === "turn/start") {
@@ -1273,11 +1280,13 @@ export class CrossProviderForks {
         awaitingStart: true,
         threadIds: new Set(),
         messages: [],
+        expectedThreadSource: stockSwitchThreadSource(job.id, source.thread.threadSource),
       };
       this.stockTargetBuilds.set(workerConnectionId, build);
-      const started = await stock.request("thread/start", this.targetThreadStart(
-        job, source.thread, developerInstructions, permissionSettings,
-      )) as ThreadStartResponse;
+      const started = await stock.request("thread/start", {
+        ...this.targetThreadStart(job, source.thread, developerInstructions, permissionSettings),
+        threadSource: build.expectedThreadSource,
+      }) as ThreadStartResponse;
       target = { provider: "stock", threadId: started.thread.id };
       if (build.awaitingStart) build.awaitingStart = false;
       build.threadIds.add(started.thread.id);
@@ -1663,7 +1672,7 @@ export class CrossProviderForks {
     if (!message.params || typeof message.params !== "object") return false;
     const params = message.params as Record<string, unknown>;
     const nestedThread = params.thread && typeof params.thread === "object"
-      ? params.thread as { id?: unknown; forkedFromId?: unknown }
+      ? params.thread as { id?: unknown; forkedFromId?: unknown; threadSource?: unknown }
       : undefined;
     const threadId = typeof params.threadId === "string"
       ? params.threadId
@@ -1673,9 +1682,19 @@ export class CrossProviderForks {
     if (message.method === "thread/started" && this.lineage.findEpoch("stock", threadId)) return true;
     const direct = this.stockTargetBuilds.get(connectionId);
     if (direct && message.method === "thread/started" && direct.awaitingStart
-      && (direct.expectedForkedFromId === undefined || nestedThread?.forkedFromId === direct.expectedForkedFromId)) {
+      && (direct.expectedForkedFromId === undefined || nestedThread?.forkedFromId === direct.expectedForkedFromId)
+      && (direct.expectedThreadSource === undefined || nestedThread?.threadSource === direct.expectedThreadSource)) {
       direct.awaitingStart = false;
       direct.threadIds.add(threadId);
+    }
+    const tagged = message.method === "thread/started" && typeof nestedThread?.threadSource === "string"
+      ? [...this.stockTargetBuilds.values()].find(
+          (candidate) => candidate.expectedThreadSource === nestedThread.threadSource,
+        )
+      : undefined;
+    if (tagged) {
+      tagged.awaitingStart = false;
+      tagged.threadIds.add(threadId);
     }
     const pendingFork = message.method === "thread/started"
       ? [...this.stockTargetBuilds.values()].find((candidate) => candidate.awaitingStart
@@ -1688,7 +1707,7 @@ export class CrossProviderForks {
     }
     const build = direct?.threadIds.has(threadId)
       ? direct
-      : pendingFork ?? [...this.stockTargetBuilds.values()].find((candidate) => candidate.threadIds.has(threadId));
+      : tagged ?? pendingFork ?? [...this.stockTargetBuilds.values()].find((candidate) => candidate.threadIds.has(threadId));
     if (!build) return false;
     if (!build.threadIds.has(threadId)) return false;
     if (message.method !== "thread/started" && message.method !== "thread/settings/updated") {
@@ -2221,6 +2240,11 @@ export class CrossProviderForks {
     if (!firstSourceTurn || !lastSourceTurn) {
       throw new Error("Provider switch source has no provider-backed lineage boundary.");
     }
+    const migrationCompact = sourceTurns.at(-1);
+    if (migrationCompact?.kind !== "migrationCompact"
+      || migrationCompact.publicTurnId !== job.compactionTurn.id) {
+      throw new Error("Provider switch source is missing its current migration-compaction boundary.");
+    }
     const lineageCommitted = this.lineage.commitEpoch(
       job.publicThreadId,
       job.expectedEpochId,
@@ -2231,10 +2255,7 @@ export class CrossProviderForks {
         provider: job.targetProvider,
         backendThreadId: target.id,
       },
-      sourceTurns.filter((turn) => turn.kind === "migrationCompact").map((turn) => ({
-        publicTurnId: turn.publicTurnId,
-        turn: turn.turn,
-      })),
+      [{ publicTurnId: migrationCompact.publicTurnId, turn: migrationCompact.turn }],
     );
     if (!lineageCommitted) throw new Error("Provider switch lost its lineage CAS during commit.");
     if (this.legacyMirror) {

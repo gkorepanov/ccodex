@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Thread } from "../../src/codex/generated/v2/Thread.js";
 import type { Turn } from "../../src/codex/generated/v2/Turn.js";
-import { ProviderEpochs } from "../../src/handoff/providerEpochs.js";
+import { ProviderEpochs, stockSwitchThreadSource } from "../../src/handoff/providerEpochs.js";
 import { LineageStore } from "../../src/handoff/lineageStore.js";
 import { HandoffStore } from "../../src/handoff/store.js";
 
@@ -52,5 +52,26 @@ describe("ProviderEpochs", () => {
       id: "public", name: "Source", turns: [{ id: "current" }],
     });
     expect(epochs.hiddenBackendIds("stock")).toEqual(new Set(["public"]));
+  });
+
+  it("removes the internal stock-switch marker from the public thread source", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "ccodex-epochs-")), "handoffs.sqlite");
+    const store = new HandoffStore(path);
+    stores.push(store);
+    const lineage = new LineageStore(path);
+    lineage.finalizeLegacyMigration(new Set());
+    lineages.push(lineage);
+    const epochs = new ProviderEpochs(lineage, store);
+    epochs.seed(thread("public", []), "stock", "gpt-5.6-sol", {});
+
+    const tagged = {
+      ...thread("physical", []),
+      threadSource: stockSwitchThreadSource("job", "subAgent"),
+    };
+    expect(epochs.projectThread("public", tagged, false).threadSource).toBe("subAgent");
+    expect(epochs.projectThread("public", {
+      ...tagged,
+      threadSource: stockSwitchThreadSource("job", null),
+    }, false).threadSource).toBeNull();
   });
 });

@@ -443,6 +443,51 @@ describe("provider switch service", () => {
     service.close();
   });
 
+  it("unarchives a migrated stock backend before attempting to hydrate it", async () => {
+    const backend = thread("stock-backend", "openai", [turn("stock-turn", "answer")]);
+    const publicThread = { ...backend, id: "public-thread", sessionId: "public-thread" };
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    store.createLogicalThread({
+      thread: publicThread,
+      epoch: {
+        id: "stock-epoch",
+        provider: "stock",
+        backendThreadId: backend.id,
+        model: "gpt-5.4-mini",
+        settings: {},
+      },
+    });
+    let archived = false;
+    const calls: string[] = [];
+    const stock = {
+      request: vi.fn(async (method: string) => {
+        calls.push(method);
+        if ((method === "thread/read" || method === "thread/resume") && archived) {
+          throw new Error(`session ${backend.id} is archived`);
+        }
+        if (method === "thread/read") return { thread: backend };
+        if (method === "thread/resume") return { thread: backend, model: "gpt-5.4-mini" };
+        if (method === "thread/archive") { archived = true; return {}; }
+        if (method === "thread/unarchive") { archived = false; return {}; }
+        return {};
+      }),
+    };
+    const service = new CrossProviderForks(store, {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: () => false,
+    } as never);
+
+    await service.requestLogical("thread/archive", { threadId: publicThread.id }, stock as never);
+    const beforeUnarchive = calls.length;
+    await expect(service.requestLogical("thread/unarchive", {
+      threadId: publicThread.id,
+    }, stock as never)).resolves.toMatchObject({ provider: "stock", result: {} });
+
+    expect(calls.slice(beforeUnarchive)).toEqual(["thread/unarchive"]);
+    expect(archived).toBe(false);
+    service.close();
+  });
+
   it("rolls back an established logical Claude thread with ordinary App edit semantics", async () => {
     const first = turn("claude-turn-1", "first answer");
     const second = turn("claude-turn-2", "answer being edited");
@@ -508,6 +553,9 @@ describe("provider switch service", () => {
   });
 
   it("atomically switches Claude to stock, keeps the public id, and persists the epoch boundary", async () => {
+    const historicalStockTurn = turn("historical-stock-turn", "historical stock answer");
+    const historicalStock = thread("historical-stock", "openai", [historicalStockTurn]);
+    const historicalCompact = turn("historical-compact", "");
     const sourceTurn = turn("claude-turn", "source answer");
     const source = thread("public-thread", "claude", [sourceTurn]);
     const hidden = thread("hidden-compact", "claude", [sourceTurn]);
@@ -554,11 +602,12 @@ describe("provider switch service", () => {
       request: vi.fn(async (method: string, params: any) => {
         requests.push({ method, params });
         if (method === "thread/start") {
-          service.suppressStockTargetMessage("client", {
-            method: "thread/started", params: { thread: target },
-          });
+          const startedTarget = { ...target, threadSource: params.threadSource };
+          const message = { method: "thread/started", params: { thread: startedTarget } };
+          expect(service.suppressStockTargetMessage("remote-client", message)).toBe(true);
+          expect(service.suppressStockTargetMessage("client", message)).toBe(true);
           return {
-            thread: target, model: "gpt-5.6-sol", modelProvider: "openai", serviceTier: "default",
+            thread: startedTarget, model: "gpt-5.6-sol", modelProvider: "openai", serviceTier: "default",
           };
         }
         if (method === "turn/start") {
@@ -582,6 +631,9 @@ describe("provider switch service", () => {
         }
         if (method === "thread/read" && params.threadId === target.id) {
           return { thread: { ...target, turns: [targetTurn] } };
+        }
+        if (method === "thread/read" && params.threadId === historicalStock.id) {
+          return { thread: historicalStock };
         }
         if (method === "thread/read" && params.threadId === stockFork.id) {
           return { thread: stockFork };
@@ -619,6 +671,24 @@ describe("provider switch service", () => {
     const store = new HandoffStore(providerLineagePath);
     const lineage = new LineageStore(providerLineagePath);
     lineage.finalizeLegacyMigration(new Set());
+    lineage.createTask({
+      publicThreadId: source.id,
+      currentEpochId: "historical-stock-epoch",
+      sessionId: source.sessionId,
+      createdAt: source.createdAt,
+    }, {
+      epochId: "historical-stock-epoch",
+      provider: "stock",
+      backendThreadId: historicalStock.id,
+    });
+    expect(lineage.commitEpoch(
+      source.id,
+      "historical-stock-epoch",
+      1,
+      { startTurnId: historicalStockTurn.id, endTurnId: historicalStockTurn.id },
+      { epochId: "claude-source-epoch", provider: "claude", backendThreadId: source.id },
+      [{ publicTurnId: historicalCompact.id, turn: historicalCompact }],
+    )).toBeDefined();
     service = new CrossProviderForks(store, claude as never, undefined, lineage);
     const subscriptions = new SubscriptionHub();
     const projected: Array<{ method: string; params: unknown }> = [];
@@ -651,10 +721,17 @@ describe("provider switch service", () => {
       method: "turn/start",
       params: expect.objectContaining({ threadId: target.id, input }),
     });
+    expect(requests.find(({ method }) => method === "thread/start")?.params.threadSource)
+      .toMatch(/^ccodexProviderSwitch:/u);
     expect(service.logical(source.id)?.epoch).toMatchObject({
       provider: "stock", backendThreadId: target.id,
     });
     expect(lineage.listSegments(source.id)).toMatchObject([
+      {
+        kind: "provider", epochId: "historical-stock-epoch",
+        startTurnId: historicalStockTurn.id, endTurnId: historicalStockTurn.id,
+      },
+      { kind: "synthetic", publicTurnId: historicalCompact.id },
       { kind: "provider", epochId: expect.any(String), startTurnId: sourceTurn.id, endTurnId: sourceTurn.id },
       { kind: "synthetic", publicTurnId: compact.id },
     ]);
@@ -676,14 +753,14 @@ describe("provider switch service", () => {
     }, stock as never) as { result: { thread: Thread } };
     expect(read.result.thread.id).toBe(source.id);
     expect(read.result.thread.turns.map((value) => value.id))
-      .toEqual([sourceTurn.id, compact.id, targetTurn.id]);
+      .toEqual([historicalStockTurn.id, historicalCompact.id, sourceTurn.id, compact.id, targetTurn.id]);
     const resumed = await service.requestLogical("thread/resume", {
       threadId: source.id,
       excludeTurns: true,
       initialTurnsPage: { limit: 5, sortDirection: "desc", itemsView: "full" },
     }, stock as never) as { result: { initialTurnsPage: { data: Turn[] } } };
     expect(resumed.result.initialTurnsPage.data.map((value) => value.id))
-      .toEqual([targetTurn.id, compact.id, sourceTurn.id]);
+      .toEqual([targetTurn.id, compact.id, sourceTurn.id, historicalCompact.id, historicalStockTurn.id]);
     expect(service.projectThreadCatalog([target], [source])).toMatchObject([{
       id: source.id,
       modelProvider: "openai",
@@ -691,7 +768,7 @@ describe("provider switch service", () => {
 
     const forked = await service.forkLogical({ threadId: source.id }, stock as never);
     expect(forked.thread.turns.map((value) => value.id))
-      .toEqual([sourceTurn.id, compact.id, targetTurn.id]);
+      .toEqual([historicalStockTurn.id, historicalCompact.id, sourceTurn.id, compact.id, targetTurn.id]);
     expect(service.projectThreadCatalog([], [], {
       ancestorThreadId: forked.thread.id,
       sourceKinds: ["subAgentThreadSpawn"],
@@ -701,7 +778,7 @@ describe("provider switch service", () => {
       includeTurns: true,
     }, stock as never) as { result: { thread: Thread } };
     expect(forkRead.result.thread.turns.map((value) => value.id))
-      .toEqual([sourceTurn.id, compact.id, targetTurn.id]);
+      .toEqual([historicalStockTurn.id, historicalCompact.id, sourceTurn.id, compact.id, targetTurn.id]);
     expect(requests.some((request) => String(request.params?.threadId).startsWith("ccodex-provisional:")))
       .toBe(false);
     const rolledBack = await service.rollbackLogicalThread({
@@ -716,7 +793,8 @@ describe("provider switch service", () => {
     expect(service.logical(forked.thread.id)?.epoch).toMatchObject({
       provider: "claude", backendThreadId: oldEpochFork.id,
     });
-    expect(rolledBack.thread.turns.map((value) => value.id)).toEqual([sourceTurn.id]);
+    expect(rolledBack.thread.turns.map((value) => value.id))
+      .toEqual([historicalStockTurn.id, historicalCompact.id, sourceTurn.id]);
     service.close();
 
     const database = new DatabaseSync(providerLineagePath);
@@ -733,7 +811,7 @@ describe("provider switch service", () => {
       includeTurns: true,
     }, stock as never) as { result: { thread: Thread } };
     expect(afterRestart.result.thread.turns.map((value) => value.id))
-      .toEqual([sourceTurn.id, compact.id, targetTurn.id]);
+      .toEqual([historicalStockTurn.id, historicalCompact.id, sourceTurn.id, compact.id, targetTurn.id]);
     reopened.close();
   });
 

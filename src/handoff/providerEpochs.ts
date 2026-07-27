@@ -25,6 +25,19 @@ export interface LegacyProviderSnapshots {
   readonly epochs: ReadonlyMap<string, ProviderEpoch>;
 }
 
+const STOCK_SWITCH_SOURCE_PREFIX = "ccodexProviderSwitch:";
+
+export function stockSwitchThreadSource(jobId: string, source: string | null): string {
+  return `${STOCK_SWITCH_SOURCE_PREFIX}${jobId}|${encodeURIComponent(source ?? "")}`;
+}
+
+function publicThreadSource(source: string | null): string | null {
+  if (!source?.startsWith(STOCK_SWITCH_SOURCE_PREFIX)) return source;
+  const separator = source.indexOf("|", STOCK_SWITCH_SOURCE_PREFIX.length);
+  if (separator < 0) return source;
+  return decodeURIComponent(source.slice(separator + 1)) || null;
+}
+
 export class ProviderEpochs {
   public constructor(
     private readonly lineage: LineageStore,
@@ -143,6 +156,7 @@ export class ProviderEpochs {
       forkedFromId: base.forkedFromId,
       parentThreadId: base.parentThreadId,
       createdAt: base.createdAt,
+      threadSource: publicThreadSource(backend.threadSource),
       turns: includeTurns ? [...historicalTurns, ...backend.turns] : [],
     };
   }
