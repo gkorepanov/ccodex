@@ -515,15 +515,17 @@ export class SqliteHybridStore implements HybridStore {
 
   public hasProcessedProviderEvent(threadId: string, providerEventId: string): boolean {
     return this.database.prepare(`
-      SELECT 1 FROM events
-      WHERE thread_id = ? AND provider_event_id = ? AND method = 'hybrid/providerMessage/processed'
+      SELECT 1 FROM processed_provider_events
+      WHERE thread_id = ? AND provider_event_id = ?
     `).get(threadId, providerEventId) !== undefined;
   }
 
   public markProviderEventProcessed(threadId: string, providerEventType: string, providerEventId: string): void {
-    this.appendEvent(threadId, null, "hybrid/providerMessage/processed", {}, {
-      providerEventType, providerEventId, dedupKey: `provider:${providerEventId}`,
-    });
+    this.database.prepare(`
+      INSERT OR IGNORE INTO processed_provider_events(
+        thread_id, provider_event_id, provider_event_type, processed_at
+      ) VALUES (?, ?, ?, ?)
+    `).run(threadId, providerEventId, providerEventType, Date.now());
   }
 
   public appendProviderEvent(event: AppendProviderEvent): { record: ProviderEventRecord; inserted: boolean } {
@@ -800,6 +802,11 @@ export class SqliteHybridStore implements HybridStore {
       uuidv7(), threadId, turnId, method, json(params), persistence?.providerEventType ?? null,
       persistence?.providerEventId ?? null, persistence?.dedupKey ?? null, Date.now(),
     );
+    this.database.prepare(`
+      DELETE FROM events WHERE thread_id = ? AND sequence < COALESCE((
+        SELECT sequence FROM events WHERE thread_id = ? ORDER BY sequence DESC LIMIT 1 OFFSET 4095
+      ), 0)
+    `).run(threadId, threadId);
     return Number(result.lastInsertRowid);
   }
 
@@ -815,7 +822,6 @@ export class SqliteHybridStore implements HybridStore {
   private writeTurn(threadId: string, turn: Turn): void {
     this.database.prepare("UPDATE turns SET status = ?, turn_json = ? WHERE id = ? AND thread_id = ?")
       .run(turn.status, json(turn), turn.id, threadId);
-    this.syncItems(threadId, turn);
   }
 
   private insertTurn(threadId: string, turn: Turn): void {
@@ -823,23 +829,6 @@ export class SqliteHybridStore implements HybridStore {
       .get(threadId) as unknown as { ordinal: number };
     this.database.prepare("INSERT INTO turns (id, thread_id, ordinal, status, turn_json) VALUES (?, ?, ?, ?, ?)")
       .run(turn.id, threadId, ordinalRow.ordinal, turn.status, json(turn));
-    this.syncItems(threadId, turn);
-  }
-
-  private syncItems(threadId: string, turn: Turn): void {
-    this.database.prepare("DELETE FROM items WHERE turn_id = ? AND thread_id = ?").run(turn.id, threadId);
-    const insert = this.database.prepare(`
-      INSERT INTO items (
-        id, thread_id, turn_id, ordinal, type, status, payload_json,
-        provider_item_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const timestamp = Date.now();
-    turn.items.forEach((item, ordinal) => insert.run(
-      item.id, threadId, turn.id, ordinal, item.type,
-      "status" in item && typeof item.status === "string" ? item.status : null,
-      json(item), null, timestamp, timestamp,
-    ));
   }
 
   private backup(): void {
@@ -970,6 +959,13 @@ export class SqliteHybridStore implements HybridStore {
         cwd TEXT NOT NULL,
         kind TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS processed_provider_events (
+        thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        provider_event_id TEXT NOT NULL,
+        provider_event_type TEXT NOT NULL,
+        processed_at INTEGER NOT NULL,
+        PRIMARY KEY(thread_id, provider_event_id)
+      );
       INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
     `);
       this.ensureColumn("threads", "resolved_model", "TEXT");
@@ -1001,6 +997,20 @@ export class SqliteHybridStore implements HybridStore {
       this.database.exec("INSERT OR IGNORE INTO schema_migrations(version) VALUES (4)");
       this.database.exec("INSERT OR IGNORE INTO schema_migrations(version) VALUES (5)");
       this.database.exec("INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)");
+      const compactProjection = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 7").get();
+      if (!compactProjection) {
+        this.database.exec(`
+          INSERT OR IGNORE INTO processed_provider_events(
+            thread_id, provider_event_id, provider_event_type, processed_at
+          )
+          SELECT thread_id, provider_event_id, COALESCE(provider_event_type, 'unknown'), created_at
+          FROM events
+          WHERE method = 'hybrid/providerMessage/processed' AND provider_event_id IS NOT NULL;
+          DROP TABLE IF EXISTS items;
+          INSERT INTO schema_migrations(version) VALUES (7);
+        `);
+      }
+      this.database.exec("DROP TABLE IF EXISTS items");
     });
   }
 

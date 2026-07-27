@@ -9,6 +9,17 @@ interface Subscription {
   readonly requestSink?: ServerRequestSink;
 }
 
+interface BufferedNotification {
+  readonly method: string;
+  readonly params: unknown;
+  readonly alreadyPublic: boolean;
+}
+
+export interface LifecycleBuffer {
+  flush(): void;
+  discard(): void;
+}
+
 export class SubscriptionHub {
   private readonly subscriptions = new Map<string, Map<string, Subscription>>();
   private readonly connections = new Map<string, Subscription>();
@@ -17,6 +28,10 @@ export class SubscriptionHub {
   private readonly requestRecipients = new Map<string, Set<string>>();
   private readonly threadAliases = new Map<string, string>();
   private readonly hiddenUserMessageTurns = new Map<string, Set<string>>();
+  private readonly lifecycleBuffers = new Map<string, {
+    readonly methods: ReadonlySet<string>;
+    readonly events: BufferedNotification[];
+  }>();
 
   private static readonly globalThreadNotifications = new Set([
     "thread/started",
@@ -77,7 +92,29 @@ export class SubscriptionHub {
     this.emitVisible(publicThreadId, method, params, true);
   }
 
+  public bufferLifecycle(threadId: string, methods: readonly string[]): LifecycleBuffer {
+    if (this.lifecycleBuffers.has(threadId)) throw new Error(`Lifecycle mutation already active for '${threadId}'.`);
+    const buffer = { methods: new Set(methods), events: [] as BufferedNotification[] };
+    this.lifecycleBuffers.set(threadId, buffer);
+    const take = () => {
+      if (this.lifecycleBuffers.get(threadId) !== buffer) return [];
+      this.lifecycleBuffers.delete(threadId);
+      return buffer.events;
+    };
+    return {
+      flush: () => {
+        for (const event of take()) this.emitVisible(threadId, event.method, event.params, event.alreadyPublic);
+      },
+      discard: () => { take(); },
+    };
+  }
+
   private emitVisible(threadId: string, method: string, params: unknown, alreadyPublic: boolean): void {
+    const buffer = this.lifecycleBuffers.get(threadId);
+    if (buffer?.methods.has(method)) {
+      buffer.events.push({ method, params, alreadyPublic });
+      return;
+    }
     const visibleParams = this.withoutHiddenUserMessage(threadId, method, params);
     if (visibleParams === undefined) return;
     const publicThreadId = alreadyPublic ? threadId : this.publicThreadId(threadId);

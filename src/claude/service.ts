@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { statSync } from "node:fs";
 import {
-  deleteSession, renameSession, type SDKUserMessage,
+  deleteSession, listSessions, renameSession, type SDKSessionInfo, type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { v7 as uuidv7 } from "uuid";
 import type { Thread } from "../codex/generated/v2/Thread.js";
@@ -283,6 +283,9 @@ export class ClaudeService {
   private closing = false;
   private closePromise: Promise<void> | undefined;
   private standaloneStatusRead: Promise<ClaudeRateLimitStatus> | undefined;
+  private nativeMetadata = new Map<string, SDKSessionInfo>();
+  private nativeMetadataRead: Promise<void> | undefined;
+  private nativeMetadataReadAt = 0;
 
   public constructor(
     private readonly config: HybridConfig,
@@ -451,7 +454,7 @@ export class ClaudeService {
     if (lastTurnId && through < 0) throw invalidParams(`Unknown Claude turn '${lastTurnId}'.`);
     const turns = snapshot.record.thread.turns.slice(0, through + 1);
     return {
-      thread: { ...snapshot.record.thread, turns },
+      thread: { ...this.withNativeMetadata(snapshot.record), turns },
       turns,
       settings: threadSettings(snapshot.record),
     };
@@ -468,10 +471,11 @@ export class ClaudeService {
   ): ThreadForkResponse {
     const record = this.requireRecord(sourceThreadId, false);
     const response = threadResponse(record, false);
+    const source = this.withNativeMetadata(record);
     return {
       ...response,
       thread: {
-        ...record.thread,
+        ...source,
         id: targetThreadId,
         forkedFromId: visibleForkedFromId,
         ephemeral: true,
@@ -616,7 +620,7 @@ export class ClaudeService {
     this.assertThreadAvailable(threadId);
     const record = this.store.getThreadRecord(threadId, includeTurns);
     if (!record) throw invalidParams(`Unknown Claude thread '${threadId}'.`);
-    return { thread: record.thread };
+    return { thread: this.withNativeMetadata(record) };
   }
 
   public async prepareTurn(
@@ -984,7 +988,28 @@ export class ClaudeService {
 
   public listThreads(params: Parameters<HybridStore["listThreads"]>[0]): Thread[] {
     return this.store.listThreads(params)
+      .map((thread) => {
+        const record = this.store.getThreadRecord(thread.id, false);
+        return record ? this.withNativeMetadata({ ...record, thread }) : thread;
+      })
       .filter((thread) => !this.pendingThreadRemoval(thread.id) && !this.hub.isSuppressed(thread.id));
+  }
+
+  public refreshNativeMetadata(): Promise<void> {
+    if (Date.now() - this.nativeMetadataReadAt < 30_000) return Promise.resolve();
+    if (this.nativeMetadataRead) return this.nativeMetadataRead;
+    const read = listSessions().then((sessions) => {
+      this.nativeMetadata = new Map(sessions.map((session) => [session.sessionId, session]));
+      this.nativeMetadataReadAt = Date.now();
+    }).catch((error: unknown) => {
+      this.logger.warn("claude.catalog.native-metadata-failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }).finally(() => {
+      if (this.nativeMetadataRead === read) this.nativeMetadataRead = undefined;
+    });
+    this.nativeMetadataRead = read;
+    return read;
   }
 
   public async setThreadName(params: ThreadSetNameParams): Promise<Record<string, never>> {
@@ -1005,6 +1030,13 @@ export class ClaudeService {
         );
       }
     }, params.name);
+    const native = this.nativeMetadata.get(record.claudeSessionId);
+    if (native) this.nativeMetadata.set(record.claudeSessionId, {
+      ...native,
+      customTitle: params.name,
+      summary: params.name,
+      lastModified: Date.now(),
+    });
     return {};
   }
 
@@ -1637,6 +1669,24 @@ export class ClaudeService {
     const record = this.store.getThreadRecord(threadId, includeTurns);
     if (!record) throw invalidParams(`Unknown Claude thread '${threadId}'.`);
     return record;
+  }
+
+  private withNativeMetadata(record: ClaudeThreadRecord): Thread {
+    const native = this.nativeMetadata.get(record.claudeSessionId);
+    if (!native) return record.thread;
+    const createdAt = native.createdAt === undefined
+      ? record.thread.createdAt
+      : Math.floor(native.createdAt / 1_000);
+    const updatedAt = Math.floor(native.lastModified / 1_000);
+    return {
+      ...record.thread,
+      name: (native.customTitle ?? native.summary) || record.thread.name,
+      preview: native.firstPrompt ?? record.thread.preview,
+      cwd: native.cwd ?? record.thread.cwd,
+      createdAt,
+      updatedAt,
+      recencyAt: updatedAt,
+    };
   }
 
   private requireIndependentThread(threadId: string, operation: string): void {

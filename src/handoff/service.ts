@@ -632,11 +632,17 @@ export class CrossProviderForks {
       };
     }
     if (method === "thread/name/set") {
-      const result = await this.withAdminLock(
-        publicThreadId,
-        () => this.claude.setThreadName(params as unknown as ThreadSetNameParams),
-      );
-      return { provider: "claude", result };
+      const buffer = this.subscriptions?.bufferLifecycle(threadId, ["thread/name/updated"]);
+      try {
+        const result = await this.withAdminLock(
+          publicThreadId,
+          () => this.claude.setThreadName(params as unknown as ThreadSetNameParams),
+        );
+        return { provider: "claude", result, after: () => buffer?.flush() };
+      } catch (error) {
+        buffer?.discard();
+        throw error;
+      }
     }
     if (method === "thread/metadata/update") {
       return {
@@ -645,10 +651,24 @@ export class CrossProviderForks {
       };
     }
     if (method === "thread/archive") {
-      return { provider: "claude", result: await this.claude.archiveThread(threadId) };
+      const buffer = this.subscriptions?.bufferLifecycle(threadId, ["thread/archived"]);
+      try {
+        const result = await this.claude.archiveThread(threadId);
+        return { provider: "claude", result, after: () => buffer?.flush() };
+      } catch (error) {
+        buffer?.discard();
+        throw error;
+      }
     }
     if (method === "thread/unarchive") {
-      return { provider: "claude", result: await this.claude.unarchiveThread(threadId) };
+      const buffer = this.subscriptions?.bufferLifecycle(threadId, ["thread/unarchived"]);
+      try {
+        const result = await this.claude.unarchiveThread(threadId);
+        return { provider: "claude", result, after: () => buffer?.flush() };
+      } catch (error) {
+        buffer?.discard();
+        throw error;
+      }
     }
     if (method === "thread/compact/start") {
       return { provider: "claude", result: await this.claude.compactThread(threadId) };

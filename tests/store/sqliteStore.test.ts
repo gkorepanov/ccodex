@@ -188,7 +188,7 @@ describe("SqliteHybridStore", () => {
     store.close();
   });
 
-  it("stores preserved fork turn and item ids under their owning thread", () => {
+  it("stores preserved fork turns once without a duplicate item table", () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-store-fork-"));
     directories.push(directory);
     const path = join(directory, "state.sqlite");
@@ -218,9 +218,9 @@ describe("SqliteHybridStore", () => {
 
     const database = new DatabaseSync(path, { readOnly: true });
     const turnPk = database.prepare("PRAGMA table_info(turns)").all() as Array<{ name: string; pk: number }>;
-    const itemPk = database.prepare("PRAGMA table_info(items)").all() as Array<{ name: string; pk: number }>;
     expect(turnPk.filter((column) => column.pk > 0).map((column) => column.name)).toEqual(["id", "thread_id"]);
-    expect(itemPk.filter((column) => column.pk > 0).map((column) => column.name)).toEqual(["id", "thread_id"]);
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items'").get())
+      .toBeUndefined();
     database.close();
   });
 
@@ -420,9 +420,11 @@ describe("SqliteHybridStore", () => {
     migrated.close();
     const database = new DatabaseSync(path, { readOnly: true });
     expect((database.prepare("SELECT COUNT(*) AS count FROM turns").get() as { count: number }).count).toBe(1);
-    expect((database.prepare("SELECT COUNT(*) AS count FROM items").get() as { count: number }).count).toBe(1);
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items'").get())
+      .toBeUndefined();
     expect(database.prepare("SELECT version FROM schema_migrations WHERE version = 3").get()).toEqual({ version: 3 });
     expect(database.prepare("SELECT version FROM schema_migrations WHERE version = 5").get()).toEqual({ version: 5 });
+    expect(database.prepare("SELECT version FROM schema_migrations WHERE version = 7").get()).toEqual({ version: 7 });
     expect((database.prepare("PRAGMA table_info(threads)").all() as Array<{ name: string }>)
       .some((column) => column.name === "deletion_pending")).toBe(true);
     expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
@@ -472,7 +474,8 @@ describe("SqliteHybridStore", () => {
     store.close();
 
     const database = new DatabaseSync(path, { readOnly: true });
-    expect((database.prepare("SELECT COUNT(*) AS count FROM items").get() as { count: number }).count).toBe(1);
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items'").get())
+      .toBeUndefined();
     expect((database.prepare("SELECT COUNT(*) AS count FROM events").get() as { count: number }).count).toBe(3);
     database.close();
   });
