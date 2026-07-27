@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Thread } from "../codex/generated/v2/Thread.js";
@@ -27,6 +27,11 @@ export interface EpochBoundary {
   readonly endTurnId?: string;
   readonly archivePending: boolean;
   readonly deleteDone: boolean;
+}
+
+export interface LegacyBackendRef {
+  readonly provider: ProviderKind;
+  readonly backendThreadId: string;
 }
 
 export interface ProviderSegment {
@@ -157,7 +162,7 @@ interface JournalRow {
 export class LineageStore {
   private readonly database: DatabaseSync;
 
-  public constructor(path: string) {
+  public constructor(private readonly path: string) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.database = new DatabaseSync(path);
     this.database.exec(`
@@ -166,8 +171,10 @@ export class LineageStore {
       PRAGMA busy_timeout=5000;
       PRAGMA foreign_keys=ON;
     `);
-    this.migrate();
     chmodSync(path, 0o600);
+    if (this.needsLegacyMigration()) return;
+    this.createSchema();
+    if (this.userVersion() < SCHEMA_VERSION) this.database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
   public close(): void { this.database.close(); }
@@ -202,6 +209,25 @@ export class LineageStore {
     return row ? this.taskFromRow(row) : undefined;
   }
 
+  public listTasks(): PublicTaskIdentity[] {
+    return (this.database.prepare(`
+      SELECT * FROM lineage_tasks ORDER BY public_thread_id ASC
+    `).all() as unknown as TaskRow[]).map((row) => this.taskFromRow(row));
+  }
+
+  public getEpoch(epochId: string): EpochBoundary | undefined {
+    const row = this.database.prepare(`
+      SELECT * FROM lineage_epochs WHERE epoch_id = ?
+    `).get(epochId) as unknown as EpochRow | undefined;
+    return row ? this.epochFromRow(row) : undefined;
+  }
+
+  public listMappings(): EpochBoundary[] {
+    return (this.database.prepare(`
+      SELECT * FROM lineage_epochs ORDER BY public_thread_id ASC, ordinal ASC
+    `).all() as unknown as EpochRow[]).map((row) => this.epochFromRow(row));
+  }
+
   public listEpochs(publicThreadId: string): EpochBoundary[] {
     return (this.database.prepare(`
       SELECT * FROM lineage_epochs WHERE public_thread_id = ? ORDER BY ordinal ASC
@@ -213,6 +239,97 @@ export class LineageStore {
       SELECT * FROM lineage_epochs WHERE provider = ? AND backend_thread_id = ?
     `).get(provider, backendThreadId) as unknown as EpochRow | undefined;
     return row ? this.epochFromRow(row) : undefined;
+  }
+
+  public pendingStockArchives(): EpochBoundary[] {
+    return this.listMappings().filter((epoch) => epoch.provider === "stock" && epoch.archivePending);
+  }
+
+  public markStockArchived(epochId: string): boolean {
+    return Number(this.database.prepare(`
+      UPDATE lineage_epochs SET archive_pending = 0 WHERE epoch_id = ? AND provider = 'stock'
+    `).run(epochId).changes) === 1;
+  }
+
+  public markEpochDeleted(epochId: string): boolean {
+    return Number(this.database.prepare(`
+      UPDATE lineage_epochs SET delete_done = 1 WHERE epoch_id = ?
+    `).run(epochId).changes) === 1;
+  }
+
+  public epochBelongsToLineage(publicThreadId: string, epochId: string): boolean {
+    return this.database.prepare(`
+      SELECT 1 FROM lineage_epochs WHERE epoch_id = ? AND public_thread_id = ?
+      UNION ALL
+      SELECT 1 FROM lineage_segments WHERE public_thread_id = ? AND epoch_id = ?
+      LIMIT 1
+    `).get(epochId, publicThreadId, publicThreadId, epochId) !== undefined;
+  }
+
+  public epochReferenceCount(epochId: string): number {
+    const current = (this.database.prepare(`
+      SELECT COUNT(*) AS count FROM lineage_tasks WHERE current_epoch_id = ?
+    `).get(epochId) as unknown as { count: number }).count;
+    const segments = (this.database.prepare(`
+      SELECT COUNT(DISTINCT public_thread_id) AS count FROM lineage_segments WHERE epoch_id = ?
+    `).get(epochId) as unknown as { count: number }).count;
+    return current + segments;
+  }
+
+  public taskEpochs(publicThreadId: string): EpochBoundary[] {
+    return (this.database.prepare(`
+      SELECT DISTINCT epoch.* FROM lineage_epochs epoch
+      LEFT JOIN lineage_segments segment ON segment.epoch_id = epoch.epoch_id
+      WHERE epoch.public_thread_id = ? OR segment.public_thread_id = ?
+      ORDER BY epoch.public_thread_id ASC, epoch.ordinal ASC
+    `).all(publicThreadId, publicThreadId) as unknown as EpochRow[])
+      .map((row) => this.epochFromRow(row));
+  }
+
+  public deleteTask(publicThreadId: string): boolean {
+    return this.transaction(() => {
+      const deleted = Number(this.database.prepare(`
+        DELETE FROM lineage_tasks WHERE public_thread_id = ?
+      `).run(publicThreadId).changes) === 1;
+      if (!deleted) return false;
+      this.database.prepare(`
+        DELETE FROM lineage_epochs
+        WHERE delete_done = 1
+          AND epoch_id NOT IN (SELECT current_epoch_id FROM lineage_tasks)
+          AND epoch_id NOT IN (SELECT epoch_id FROM lineage_segments WHERE epoch_id IS NOT NULL)
+      `).run();
+      return true;
+    });
+  }
+
+  public createForkTask(
+    identity: Omit<PublicTaskIdentity, "revision">,
+    epoch: NewEpochBoundary,
+    inheritedSegments: readonly NewTranscriptSegment[],
+  ): PublicTaskIdentity {
+    return this.transaction(() => {
+      this.database.prepare(`
+        INSERT INTO lineage_tasks (
+          public_thread_id, current_epoch_id, revision, session_id, forked_from_id, parent_thread_id
+        ) VALUES (?, ?, 1, ?, ?, ?)
+      `).run(
+        identity.publicThreadId, identity.currentEpochId, identity.sessionId,
+        identity.forkedFromId ?? null, identity.parentThreadId ?? null,
+      );
+      this.database.prepare(`
+        INSERT INTO lineage_epochs (
+          epoch_id, public_thread_id, ordinal, provider, backend_thread_id, state,
+          archive_pending, delete_done
+        ) VALUES (?, ?, 0, ?, ?, ?, 0, 0)
+      `).run(
+        epoch.epochId, identity.publicThreadId, epoch.provider, epoch.backendThreadId,
+        epoch.state ?? "current",
+      );
+      inheritedSegments.forEach((segment, position) => this.insertSegment(
+        identity.publicThreadId, position, segment,
+      ));
+      return this.getTask(identity.publicThreadId)!;
+    });
   }
 
   public listSegments(publicThreadId: string): TranscriptSegment[] {
@@ -340,15 +457,44 @@ export class LineageStore {
     } : undefined;
   }
 
-  private migrate(): void {
-    this.createSchema();
-    if (this.userVersion() >= SCHEMA_VERSION) return;
+  public needsLegacyMigration(): boolean {
+    return this.userVersion() < SCHEMA_VERSION && this.hasTable("logical_threads");
+  }
+
+  public legacyBackendRefs(): LegacyBackendRef[] {
+    if (!this.needsLegacyMigration() || !this.hasTable("provider_epochs")) return [];
+    return (this.database.prepare(`
+      SELECT DISTINCT provider, backend_thread_id FROM provider_epochs ORDER BY provider, backend_thread_id
+    `).all() as unknown as Array<{ provider: ProviderKind; backend_thread_id: string }>).map((row) => ({
+      provider: row.provider,
+      backendThreadId: row.backend_thread_id,
+    }));
+  }
+
+  public finalizeLegacyMigration(
+    validated: ReadonlySet<string>,
+    backupPath = `${this.path}.pre-lineage-v2.bak`,
+  ): void {
+    if (!this.needsLegacyMigration()) return;
+    const missing = this.legacyBackendRefs().filter(
+      (ref) => !validated.has(`${ref.provider}:${ref.backendThreadId}`),
+    );
+    if (missing.length > 0) {
+      throw new Error(`Lineage migration requires validated provider backends: ${missing.map(
+        (ref) => `${ref.provider}:${ref.backendThreadId}`,
+      ).join(", ")}`);
+    }
+    this.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    if (!existsSync(backupPath)) copyFileSync(this.path, backupPath, 0);
     this.transaction(() => {
+      this.createSchema();
       if (this.hasTable("logical_threads")) this.importLegacyLineage();
       if (this.hasTable("provider_switch_jobs")) this.importLegacySwitchJobs();
       this.scrubLegacySnapshots();
       this.database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     });
+    chmodSync(this.path, 0o600);
+    chmodSync(backupPath, 0o600);
   }
 
   private createSchema(): void {
@@ -363,7 +509,7 @@ export class LineageStore {
       );
       CREATE TABLE IF NOT EXISTS lineage_epochs (
         epoch_id TEXT PRIMARY KEY,
-        public_thread_id TEXT NOT NULL REFERENCES lineage_tasks(public_thread_id) ON DELETE CASCADE,
+        public_thread_id TEXT NOT NULL,
         ordinal INTEGER NOT NULL,
         provider TEXT NOT NULL CHECK(provider IN ('claude', 'stock')),
         backend_thread_id TEXT NOT NULL,

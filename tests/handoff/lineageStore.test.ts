@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -180,6 +180,14 @@ describe("LineageStore", () => {
     database.close();
 
     let store = new LineageStore(path);
+    expect(store.needsLegacyMigration()).toBe(true);
+    expect(() => store.finalizeLegacyMigration(new Set())).toThrow("validated provider backends");
+    expect(store.needsLegacyMigration()).toBe(true);
+    store.finalizeLegacyMigration(new Set([
+      "stock:stock-backend",
+      "claude:claude-backend",
+    ]));
+    expect(existsSync(`${path}.pre-lineage-v2.bak`)).toBe(true);
     expect(store.getTask("public")).toEqual({
       publicThreadId: "public",
       currentEpochId: "claude-epoch",
@@ -252,6 +260,52 @@ describe("LineageStore", () => {
       status: "committed",
       updatedAt: 30,
     });
+    store.close();
+  });
+
+  it("keeps shared provider boundaries until the last fork stops referencing them", () => {
+    const store = new LineageStore(databasePath());
+    store.createTask({
+      publicThreadId: "source",
+      currentEpochId: "source-current",
+      sessionId: "source",
+    }, {
+      epochId: "source-current",
+      provider: "stock",
+      backendThreadId: "stock-source",
+    });
+    store.commitEpoch(
+      "source",
+      "source-current",
+      1,
+      { startTurnId: "turn-1", endTurnId: "turn-2" },
+      { epochId: "source-claude", provider: "claude", backendThreadId: "claude-source" },
+    );
+    store.createForkTask({
+      publicThreadId: "fork",
+      currentEpochId: "fork-current",
+      sessionId: "fork",
+      forkedFromId: "source",
+    }, {
+      epochId: "fork-current",
+      provider: "claude",
+      backendThreadId: "claude-fork",
+    }, [{
+      kind: "provider",
+      epochId: "source-current",
+      startTurnId: "turn-1",
+      endTurnId: "turn-2",
+    }]);
+
+    expect(store.epochBelongsToLineage("fork", "source-current")).toBe(true);
+    expect(store.deleteTask("source")).toBe(true);
+    expect(store.getEpoch("source-current")).toBeDefined();
+    expect(store.listSegments("fork")).toHaveLength(1);
+    expect(store.taskEpochs("fork").map((epoch) => epoch.epochId)).toContain("source-current");
+    store.markEpochDeleted("source-current");
+    store.markEpochDeleted("fork-current");
+    expect(store.deleteTask("fork")).toBe(true);
+    expect(store.getEpoch("source-current")).toBeUndefined();
     store.close();
   });
 });
