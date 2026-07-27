@@ -1248,7 +1248,7 @@ describe("provider-aware rate-limit gateway routing", () => {
       });
       await settle();
 
-      expect(claude.startThread).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(claude.startThread).toHaveBeenCalledOnce());
       expect(compactionItemIds(harness, "public-stock")).toHaveLength(1);
       expect(JSON.stringify(messages(harness, "turn/completed"))).toContain("injected Claude target failure");
       expect(JSON.stringify(harness.client.sent)).toContain(
