@@ -513,7 +513,9 @@ export class LineageStore {
   public legacyBackendRefs(): LegacyBackendRef[] {
     if (!this.needsLegacyMigration() || !this.hasTable("provider_epochs")) return [];
     return (this.database.prepare(`
-      SELECT DISTINCT provider, backend_thread_id FROM provider_epochs ORDER BY provider, backend_thread_id
+      SELECT DISTINCT provider, backend_thread_id FROM provider_epochs
+      WHERE delete_done = 0 AND backend_thread_id NOT LIKE 'ccodex-provisional:%'
+      ORDER BY provider, backend_thread_id
     `).all() as unknown as Array<{ provider: ProviderKind; backend_thread_id: string }>).map((row) => ({
       provider: row.provider,
       backendThreadId: row.backend_thread_id,
