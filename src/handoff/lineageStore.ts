@@ -640,11 +640,16 @@ export class LineageStore {
     const turns = this.database.prepare("SELECT * FROM logical_turns ORDER BY public_thread_id, position")
       .all() as unknown as LegacyTurnRow[];
     for (const publicThreadId of new Set(turns.map((row) => row.public_thread_id))) {
-      this.importLegacyTurns(publicThreadId, turns.filter((row) => row.public_thread_id === publicThreadId));
+      const currentEpochId = this.getTask(publicThreadId)!.currentEpochId;
+      this.importLegacyTurns(
+        publicThreadId,
+        currentEpochId,
+        turns.filter((row) => row.public_thread_id === publicThreadId),
+      );
     }
   }
 
-  private importLegacyTurns(publicThreadId: string, turns: LegacyTurnRow[]): void {
+  private importLegacyTurns(publicThreadId: string, currentEpochId: string, turns: LegacyTurnRow[]): void {
     let position = 0;
     let providerRun: { epochId: string; startTurnId: string; endTurnId: string } | undefined;
     const flush = (): void => {
@@ -664,6 +669,10 @@ export class LineageStore {
     };
     for (const row of turns) {
       if (row.kind === "provider" && row.epoch_id && row.provider_turn_id) {
+        if (row.epoch_id === currentEpochId) {
+          flush();
+          continue;
+        }
         if (providerRun?.epochId === row.epoch_id) providerRun.endTurnId = row.provider_turn_id;
         else {
           flush();

@@ -200,7 +200,6 @@ describe("LineageStore", () => {
     expect(store.listSegments("public")).toMatchObject([
       { kind: "provider", epochId: "stock-epoch", startTurnId: "stock-1", endTurnId: "stock-2" },
       { kind: "synthetic", publicTurnId: "compact", turn: { id: "compact" } },
-      { kind: "provider", epochId: "claude-epoch", startTurnId: "claude-1", endTurnId: "claude-1" },
     ]);
     expect(store.getSwitchJournal("active-job")).toMatchObject({
       status: "targetCreated",
@@ -210,7 +209,7 @@ describe("LineageStore", () => {
     store.close();
 
     store = new LineageStore(path);
-    expect(store.listSegments("public")).toHaveLength(3);
+    expect(store.listSegments("public")).toHaveLength(2);
     expect(store.listEpochs("public")).toHaveLength(2);
     store.close();
 
