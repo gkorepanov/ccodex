@@ -63,6 +63,29 @@ function record(): ClaudeThreadRecord {
 }
 
 describe("MemoryHybridStore thread-state commits", () => {
+  it("persists user-created side roots while keeping internal ephemeral work process-local", () => {
+    const durable = new MemoryHybridStore();
+    const store = new LayeredHybridStore(durable);
+    const base = record();
+    const side = {
+      ...base,
+      claudeSessionId: "side-provider",
+      thread: { ...base.thread, id: "side", ephemeral: true, threadSource: "user" as const },
+    };
+    const internal = {
+      ...base,
+      claudeSessionId: "internal-provider",
+      thread: { ...base.thread, id: "internal", ephemeral: true, threadSource: "system" as const },
+    };
+
+    store.createThread(side);
+    store.createThread(internal);
+
+    expect(durable.hasThread("side")).toBe(true);
+    expect(durable.hasThread("internal")).toBe(false);
+    expect(store.hasThread("internal")).toBe(true);
+  });
+
   it("keeps an ephemeral root deletion atomic inside the process-local layer", () => {
     const durable = new MemoryHybridStore();
     const store = new LayeredHybridStore(durable);

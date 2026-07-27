@@ -417,9 +417,16 @@ export class LayeredHybridStore implements HybridStore {
 
   public constructor(private readonly durable: HybridStore) {}
 
+  private persistent(record: ClaudeThreadRecord): boolean {
+    return !record.thread.ephemeral
+      || (record.thread.threadSource === "user" && record.thread.parentThreadId === null);
+  }
+
   private owner(threadId: string): HybridStore { return this.ephemeral.hasThread(threadId) ? this.ephemeral : this.durable; }
 
-  public createThread(record: ClaudeThreadRecord): void { (record.thread.ephemeral ? this.ephemeral : this.durable).createThread(record); }
+  public createThread(record: ClaudeThreadRecord): void {
+    (this.persistent(record) ? this.durable : this.ephemeral).createThread(record);
+  }
   public hasThread(threadId: string): boolean { return this.ephemeral.hasThread(threadId) || this.durable.hasThread(threadId); }
   public getThreadRecord(threadId: string, includeTurns = false) { return this.owner(threadId).getThreadRecord(threadId, includeTurns); }
   public allThreadRecords(): ClaudeThreadRecord[] { return [...this.durable.allThreadRecords(), ...this.ephemeral.allThreadRecords()]; }
@@ -466,7 +473,7 @@ export class LayeredHybridStore implements HybridStore {
   }
   public truncateTurns(threadId: string, keepCount: number): void { this.owner(threadId).truncateTurns(threadId, keepCount); }
   public commitForkedThread(record: ClaudeThreadRecord, turns: readonly Turn[], boundaries: readonly TurnProviderBoundary[]): void {
-    (record.thread.ephemeral ? this.ephemeral : this.durable).commitForkedThread(record, turns, boundaries);
+    (this.persistent(record) ? this.durable : this.ephemeral).commitForkedThread(record, turns, boundaries);
   }
   public commitThreadRollback(
     record: ClaudeThreadRecord,

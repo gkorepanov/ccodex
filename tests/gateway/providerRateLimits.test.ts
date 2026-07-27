@@ -1362,7 +1362,7 @@ describe("provider-aware rate-limit gateway routing", () => {
     ]]);
   });
 
-  it("leases an ephemeral side task for reconnect instead of deleting it on a transient disconnect", async () => {
+  it("keeps an ephemeral side task independent of transient transport disconnects", async () => {
     const claude = fakeClaude();
     claude.threads.add("claude-ephemeral");
     const harness = await makeHarness(claude);
@@ -1370,11 +1370,20 @@ describe("provider-aware rate-limit gateway routing", () => {
     await settle();
     expect(claude.cancelEphemeralRelease).toHaveBeenCalledWith("claude-ephemeral");
 
+    harness.client.request("unsubscribe-side", "thread/unsubscribe", { threadId: "claude-ephemeral" });
+    await settle();
+    expect(messages(harness, "unsubscribe-side")[0]).toEqual({
+      id: "unsubscribe-side", result: { status: "unsubscribed" },
+    });
+    expect(claude.releaseEphemeralThread).not.toHaveBeenCalled();
+
+    harness.client.request("resume-again", "thread/resume", { threadId: "claude-ephemeral" });
+    await settle();
+
     harness.client.emit("close", 1001, Buffer.from("shutdown"));
     harness.client.emit("close", 1001, Buffer.from("duplicate"));
     await harness.connection.closed;
-    expect(claude.scheduleEphemeralRelease).toHaveBeenCalledTimes(1);
-    expect(claude.scheduleEphemeralRelease).toHaveBeenCalledWith("claude-ephemeral");
+    expect(claude.scheduleEphemeralRelease).not.toHaveBeenCalled();
     expect(claude.releaseEphemeralThread).not.toHaveBeenCalled();
   });
 

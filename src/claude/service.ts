@@ -273,6 +273,7 @@ export class ClaudeService {
     { readonly kind: ThreadRemovalKind; readonly promise: Promise<void> }
   >();
   private readonly terminalAdmins = new Map<string, number>();
+  private readonly settingsUpdates = new Map<string, Promise<void>>();
   private readonly idleTimer: NodeJS.Timeout;
   private readonly store: HybridStore;
   private readonly sessionOutput: ClaudeOutputAdapter;
@@ -379,14 +380,7 @@ export class ClaudeService {
       }
     }
     this.restartRecovery = this.resumeThreadRemovals(pendingRemovals.map((removal) => removal.rootThreadId))
-      .then(() => this.reconcileAfterRestart(orphanProjectionIds, restartRecoveryRootIds))
-      .then(() => {
-        for (const record of this.store.allThreadRecords()) {
-          if (record.thread.ephemeral && !record.thread.parentThreadId) {
-            this.scheduleEphemeralRelease(record.thread.id);
-          }
-        }
-      });
+      .then(() => this.reconcileAfterRestart(orphanProjectionIds, restartRecoveryRootIds));
     for (const record of this.store.allThreadRecords()) {
       if (orphanProjectionIds.has(record.thread.id)) continue;
       for (const request of this.store.listPendingRequests(record.thread.id)) {
@@ -1284,7 +1278,7 @@ export class ClaudeService {
         throw error;
       }
     }
-    if (sidePromotion) this.scheduleEphemeralRelease(params.threadId);
+    if (sidePromotion) await this.releaseEphemeralThread(params.threadId);
     return threadResponse(responseRecord, !params.excludeTurns) as ThreadForkResponse;
   }
 
@@ -1821,6 +1815,20 @@ export class ClaudeService {
   }
 
   private async applySettings(
+    params: ThreadSettingsUpdateParams,
+    outputSchema?: unknown,
+  ): Promise<void> {
+    const previous = this.settingsUpdates.get(params.threadId) ?? Promise.resolve();
+    const update = previous.catch(() => undefined).then(() => this.applySettingsNow(params, outputSchema));
+    this.settingsUpdates.set(params.threadId, update);
+    try {
+      await update;
+    } finally {
+      if (this.settingsUpdates.get(params.threadId) === update) this.settingsUpdates.delete(params.threadId);
+    }
+  }
+
+  private async applySettingsNow(
     params: ThreadSettingsUpdateParams,
     outputSchema?: unknown,
   ): Promise<void> {

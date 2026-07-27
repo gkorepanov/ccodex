@@ -1314,7 +1314,6 @@ export function attachClientConnection(
             subscribedClaudeThreads.delete(params.threadId);
             sendResult(message.id, { status: "unsubscribed" });
             clearForeground(params.threadId);
-            if (!subscriptions.hasSubscribers(params.threadId)) await claude.releaseEphemeralThread(params.threadId);
             return;
           }
           if (message.method === "thread/name/set") {
@@ -1667,13 +1666,9 @@ export function attachClientConnection(
     connectionAlive = false;
     void (async () => {
       metrics.connectionClosed();
-      const releasedThreads = [...subscribedClaudeThreads];
       subscribedClaudeThreads.clear();
       subscriptions.detach(connectionId);
       claude.unsubscribeRateLimits(connectionId);
-      const releases = await Promise.allSettled(releasedThreads.map(async (threadId) => {
-        if (!subscriptions.hasSubscribers(threadId)) claude.scheduleEphemeralRelease(threadId);
-      }));
       remoteControl?.detach(connectionId);
       let detach: unknown;
       try {
@@ -1691,7 +1686,6 @@ export function attachClientConnection(
       logger.info("connection.closed", { connectionId });
       recorder.connection("closed", connectionId, { code, reason: reason.toString("utf8") });
       const errors = [
-        ...releases.flatMap((result) => result.status === "rejected" ? [result.reason] : []),
         ...(detach === undefined ? [] : [detach]),
       ];
       if (errors.length > 0) throw new AggregateError(errors, "Client connection cleanup failed.");

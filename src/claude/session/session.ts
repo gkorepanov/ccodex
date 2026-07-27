@@ -898,7 +898,12 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     const owner = await this.currentRuntimeOwner();
     if (!owner) return "absent";
     if (!await this.runtimeIdleFor(owner, milliseconds)) return "busy";
-    if (owner.ephemeral) return "ephemeral";
+    const record = this.requireRecord(false);
+    const persistentUserSide = owner.ephemeral
+      && this.runtimeDependencies!.persistUserSideSessions
+      && record.thread.parentThreadId === null
+      && record.thread.threadSource === "user";
+    if (owner.ephemeral && !persistentUserSide) return "ephemeral";
     if (!await this.retireRuntimeOwner(owner, "stop", undefined, true, true)) return "busy";
     if (!await this.submitLineage<boolean>({
       type: "runtimeLineage",

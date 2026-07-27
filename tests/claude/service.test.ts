@@ -1807,10 +1807,8 @@ describe("ClaudeService", () => {
     });
     expect(promoted.thread.turns).toHaveLength(2);
     expect(promoted.thread.turns.map((turn) => turn.status)).toEqual(["completed", "completed"]);
-    expect(service.readThread(side.thread.id, true).thread.turns).toHaveLength(2);
     expect(forkCalls).toHaveLength(1);
-    expect((service as unknown as { ephemeralReleaseTimers: Map<string, NodeJS.Timeout> })
-      .ephemeralReleaseTimers.has(side.thread.id)).toBe(true);
+    expect(service.ownsThread(side.thread.id)).toBe(false);
     await service.close();
 
     const resumed = new ClaudeService(
@@ -2699,7 +2697,7 @@ describe("ClaudeService", () => {
     await service.close();
   });
 
-  it("does not persist ephemeral threads across a service restart", async () => {
+  it("persists a user-created side thread across a service restart", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-ephemeral-restart-"));
     directories.push(directory);
     const database = join(directory, "state.sqlite");
@@ -2707,10 +2705,12 @@ describe("ClaudeService", () => {
       config(directory), new SubscriptionHub(), new Logger("error"),
       new SqliteHybridStore(database), new FakeClaudeQuery().factory,
     );
-    const started = await first.startThread({ model: "claude:haiku", cwd: directory, ephemeral: true });
+    const started = await first.startThread({
+      model: "claude:haiku", cwd: directory, ephemeral: true, threadSource: "user",
+    });
     expect(first.ownsThread(started.thread.id)).toBe(true);
     const durable = new SqliteHybridStore(database);
-    expect(durable.hasThread(started.thread.id)).toBe(false);
+    expect(durable.hasThread(started.thread.id)).toBe(true);
     durable.close();
     await first.close();
 
@@ -2718,8 +2718,65 @@ describe("ClaudeService", () => {
       config(directory), new SubscriptionHub(), new Logger("error"),
       new SqliteHybridStore(database), new FakeClaudeQuery().factory,
     );
-    expect(second.ownsThread(started.thread.id)).toBe(false);
+    expect(second.readThread(started.thread.id, false).thread).toMatchObject({
+      id: started.thread.id,
+      ephemeral: true,
+      threadSource: "user",
+    });
     await second.close();
+  });
+
+  it("keeps internal ephemeral threads process-local", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-internal-ephemeral-restart-"));
+    directories.push(directory);
+    const database = join(directory, "state.sqlite");
+    const first = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(database), new FakeClaudeQuery().factory,
+    );
+    const started = await first.startThread({
+      model: "claude:haiku", cwd: directory, ephemeral: true, threadSource: "system",
+    });
+    const durable = new SqliteHybridStore(database);
+    expect(durable.hasThread(started.thread.id)).toBe(false);
+    durable.close();
+    await first.close();
+  });
+
+  it("unloads an idle user side runtime without deleting the conversation", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-side-idle-resume-"));
+    directories.push(directory);
+    const fake = new FakeClaudeQuery();
+    const service = new ClaudeService(
+      { ...config(directory), idleTimeoutSeconds: 0 },
+      new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory,
+    );
+    const started = await service.startThread({
+      model: "claude:haiku", cwd: directory, ephemeral: true, threadSource: "user",
+    });
+    const run = async (text: string) => {
+      const prepared = await service.prepareTurn({
+        threadId: started.thread.id,
+        input: [{ type: "text", text, text_elements: [] }],
+      });
+      prepared.announce();
+      prepared.start();
+      await waitFor(
+        () => service.readThread(started.thread.id, true).thread.turns.at(-1)?.status === "completed",
+        `${text} completion`,
+      );
+    };
+
+    await run("before idle");
+    await (service as unknown as { unloadIdleRuntimes(): Promise<void> }).unloadIdleRuntimes();
+    expect(service.readThread(started.thread.id, true).thread.turns).toHaveLength(1);
+
+    await run("after idle");
+    expect(service.readThread(started.thread.id, true).thread.turns).toHaveLength(2);
+    expect(fake.inputs).toHaveLength(2);
+    expect(fake.inputs[1]?.options.resume).toBe(fake.inputs[0]?.options.sessionId);
+    await service.close();
   });
 
   it("projects an inline review as entered/result/exited lifecycle items under read-only policy", async () => {
