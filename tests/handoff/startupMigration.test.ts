@@ -66,6 +66,16 @@ function legacyDatabase(databasePath: string): void {
     },
   });
   store.close();
+  const database = new DatabaseSync(databasePath);
+  database.prepare("UPDATE logical_threads SET thread_json = ? WHERE public_thread_id = ?")
+    .run(JSON.stringify(thread("stock-public")), "stock-public");
+  database.prepare("UPDATE logical_threads SET thread_json = ? WHERE public_thread_id = ?")
+    .run(JSON.stringify(thread("claude-public")), "claude-public");
+  database.prepare("UPDATE provider_epochs SET model = ?, settings_json = ? WHERE epoch_id = ?")
+    .run("gpt-5.6-sol", JSON.stringify({ privateStock: true }), "stock-epoch");
+  database.prepare("UPDATE provider_epochs SET model = ?, settings_json = ? WHERE epoch_id = ?")
+    .run("claude:sonnet", JSON.stringify({ privateClaude: true }), "claude-epoch");
+  database.close();
 }
 
 afterEach(() => {

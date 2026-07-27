@@ -93,7 +93,7 @@ describe("HandoffStore provider epochs", () => {
     const reopened = new HandoffStore(database);
     expect(reopened.getLogicalThread("public")).toMatchObject({
       publicThreadId: "public", currentEpochId: "epoch-stock", revision: 2,
-      thread: { id: "public", turns: [] },
+      thread: { id: "public" },
     });
     expect(reopened.findEpochByBackend("stock", "backend-public")).toMatchObject({
       id: "epoch-stock", publicThreadId: "public", ordinal: 0, state: "current",
@@ -136,10 +136,12 @@ describe("HandoffStore provider epochs", () => {
     }]);
     expect(store.hiddenProviderSwitchTargetIds()).toEqual(["claude-backend"]);
     const logical = store.getLogicalThread("public")!;
-    expect(store.updateLogicalThread("public", logical.revision, {
+    const metadataUpdate = store.updateLogicalThread("public", logical.revision, {
       ...logical.thread,
       name: "Renamed while compacting",
-    })).toMatchObject({ revision: logical.revision, thread: { name: "Renamed while compacting" } });
+    });
+    expect(metadataUpdate).toMatchObject({ revision: logical.revision, thread: { id: "public" } });
+    expect(metadataUpdate?.thread).not.toHaveProperty("name");
 
     const committed = store.commitProviderSwitch({
       jobId: "switch-1",

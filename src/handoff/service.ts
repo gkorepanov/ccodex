@@ -48,7 +48,12 @@ import {
   type ProviderKind,
   type StockHistoryOverlay,
 } from "./store.js";
-import { ProviderEpochs, type ResolvedProviderEpoch } from "./providerEpochs.js";
+import {
+  ProviderEpochs,
+  type LegacyProviderSnapshots,
+  type ResolvedProviderEpoch,
+} from "./providerEpochs.js";
+import { LineageStore } from "./lineageStore.js";
 import { normalizedTitlePayload, rewrittenTitlePrompt, titlePrompt, type TitleTurn } from "./titleGeneration.js";
 
 export const HANDOFF_DAEMON_CONNECTION_ID = "ccodex-handoff-daemon";
@@ -57,6 +62,28 @@ export interface LogicalRequestResult {
   readonly provider: ProviderKind;
   readonly result: unknown;
   readonly after?: () => Promise<void> | void;
+}
+
+function testLineage(store: HandoffStore): { lineage: LineageStore; snapshots: LegacyProviderSnapshots } {
+  const mappings = store.listBackendMappings();
+  const snapshots: LegacyProviderSnapshots = {
+    threads: new Map(mappings.flatMap((mapping) => {
+      const thread = store.getLogicalThread(mapping.publicThreadId)?.thread;
+      return thread ? [[mapping.publicThreadId, thread] as const] : [];
+    })),
+    epochs: new Map(mappings.flatMap((mapping) => {
+      const epoch = store.getEpoch(mapping.epochId);
+      return epoch ? [[mapping.epochId, epoch] as const] : [];
+    })),
+  };
+  const lineage = new LineageStore(store.path);
+  if (lineage.needsLegacyMigration()) {
+    const refs = lineage.legacyBackendRefs();
+    // Tests which omit an explicit LineageStore use an isolated temporary DB.
+    // Production always supplies the provider-validated store from startupMigration.
+    lineage.finalizeLegacyMigration(new Set(refs.map((ref) => `${ref.provider}:${ref.backendThreadId}`)));
+  }
+  return { lineage, snapshots };
 }
 
 const SUMMARY_INSTRUCTIONS = `Create a compact, portable handoff for another coding agent/provider.
@@ -333,6 +360,8 @@ export class CrossProviderForks {
   private readonly stockServerRequestAliases = new Map<string, string>();
   private readonly recentDurableProviders = new Map<string, ProviderKind>();
   private readonly adminTails = new Map<string, Promise<void>>();
+  private readonly lineage: LineageStore;
+  private readonly legacyMirror: boolean;
   private daemonStock?: StockRpc;
   private subscriptions?: SubscriptionHub;
   private jobTail: Promise<void> = Promise.resolve();
@@ -341,8 +370,17 @@ export class CrossProviderForks {
     private readonly store: HandoffStore,
     private readonly claude: ClaudeService,
     private readonly renamePrompt: string | null = DEFAULT_RENAME_PROMPT,
+    lineage?: LineageStore,
   ) {
-    this.epochs = new ProviderEpochs(store);
+    const fallback = lineage ? undefined : testLineage(store);
+    const providerLineage = lineage ?? fallback!.lineage;
+    this.lineage = providerLineage;
+    this.legacyMirror = lineage === undefined;
+    this.epochs = new ProviderEpochs(
+      providerLineage,
+      this.legacyMirror ? store : undefined,
+      fallback?.snapshots,
+    );
   }
 
   public pending(threadId: string): PendingProviderSwitch | undefined { return this.store.getPending(threadId); }
@@ -350,8 +388,12 @@ export class CrossProviderForks {
   public hiddenBackendIds(provider?: ProviderKind): Set<string> { return this.epochs.hiddenBackendIds(provider); }
   public catalogTombstones(): string[] { return this.store.remoteCatalogTombstones(); }
 
-  public sideSnapshot(params: ThreadForkParams, targetThreadId: string): ThreadForkResponse | undefined {
-    const source = this.epochs.resolve(params.threadId);
+  public async sideSnapshot(
+    params: ThreadForkParams,
+    targetThreadId: string,
+  ): Promise<ThreadForkResponse | undefined> {
+    const unresolved = this.epochs.resolve(params.threadId);
+    const source = unresolved && await this.hydrate(unresolved, this.daemonStock);
     if (!source) return undefined;
     const settings = source.epoch.settings;
     const cwd = params.cwd ?? source.logical.thread.cwd;
@@ -391,7 +433,7 @@ export class CrossProviderForks {
     params: ThreadListParams = {},
   ): Thread[] {
     const physical = new Map([...stockThreads, ...claudeThreads].map((thread) => [thread.id, thread]));
-    const mappings = this.store.listBackendMappings();
+    const mappings = this.epochs.mappings();
     const hidden = new Set([
       ...mappings.map((mapping) => mapping.backendThreadId),
       ...this.store.hiddenProviderSwitchTargetIds(),
@@ -414,7 +456,7 @@ export class CrossProviderForks {
 
   public projectLoadedThreadIds(stockIds: string[], claudeIds: string[]): string[] {
     const loaded = new Set([...stockIds, ...claudeIds]);
-    const mappings = this.store.listBackendMappings();
+    const mappings = this.epochs.mappings();
     const hidden = new Set([
       ...mappings.map((mapping) => mapping.backendThreadId),
       ...this.store.hiddenProviderSwitchTargetIds(),
@@ -430,7 +472,7 @@ export class CrossProviderForks {
     if (!message.method) return false;
     const backendThreadId = messageThreadId({ params: message.params });
     if (!backendThreadId) return false;
-    const epoch = this.store.findEpochByBackend("stock", backendThreadId);
+    const epoch = this.lineage.findEpoch("stock", backendThreadId);
     if (!epoch || epoch.state !== "current" || !this.subscriptions) return false;
     if (message.method === "serverRequest/resolved" && message.params && typeof message.params === "object") {
       const params = message.params as Record<string, unknown>;
@@ -462,7 +504,7 @@ export class CrossProviderForks {
 
   public ownsStockBackendMessage(message: { params?: unknown }): boolean {
     const backendThreadId = messageThreadId(message);
-    return backendThreadId !== undefined && this.store.findEpochByBackend("stock", backendThreadId) !== undefined;
+    return backendThreadId !== undefined && this.lineage.findEpoch("stock", backendThreadId) !== undefined;
   }
 
   public async resolveStockServerRequest(requestId: string, result: unknown): Promise<boolean> {
@@ -480,8 +522,9 @@ export class CrossProviderForks {
   ): Promise<LogicalRequestResult> {
     const publicThreadId = publicParams.threadId;
     if (typeof publicThreadId !== "string") throw invalidParams("Logical thread request has no threadId.");
-    const resolved = this.epochs.resolve(publicThreadId);
-    if (!resolved) throw invalidParams(`Unknown logical thread '${publicThreadId}'.`);
+    const unresolved = this.epochs.resolve(publicThreadId);
+    if (!unresolved) throw invalidParams(`Unknown logical thread '${publicThreadId}'.`);
+    const resolved = await this.hydrate(unresolved, this.daemonStock ?? clientStock);
     const owner = { publicThreadId, backendThreadId: resolved.epoch.backendThreadId };
     let params = projectRpcToBackendThread({ params: publicParams }, owner).params as Record<string, unknown>;
     if (method === "thread/settings/update" || method === "turn/start") {
@@ -527,7 +570,7 @@ export class CrossProviderForks {
             }) as ThreadReadResponse).thread.turns
           : result.thread.turns;
         const initialTurnsPage = resume?.initialTurnsPage
-          ? pageTurns(this.epochs.visibleTurns(publicThreadId, backendTurns), {
+          ? pageTurns(await this.visibleTurns(publicThreadId, backendTurns, stock), {
               threadId: publicThreadId,
               ...resume.initialTurnsPage,
             })
@@ -536,7 +579,12 @@ export class CrossProviderForks {
           provider: "stock",
           result: {
             ...result,
-            thread: this.epochs.projectThread(publicThreadId, result.thread, includeTurns),
+            thread: this.epochs.projectThread(
+              publicThreadId,
+              result.thread,
+              includeTurns,
+              includeTurns ? (await this.historicalTurns(publicThreadId, stock)).map((entry) => entry.turn) : [],
+            ),
             ...(resume ? { initialTurnsPage } : {}),
           },
         };
@@ -546,7 +594,7 @@ export class CrossProviderForks {
           threadId: resolved.epoch.backendThreadId,
           includeTurns: true,
         }) as ThreadReadResponse;
-        const turns = this.epochs.visibleTurns(publicThreadId, read.thread.turns);
+        const turns = await this.visibleTurns(publicThreadId, read.thread.turns, stock);
         return {
           provider: "stock",
           result: method === "thread/turns/list"
@@ -571,6 +619,9 @@ export class CrossProviderForks {
         publicThreadId,
         this.claude.readThread(threadId, includeTurns).thread,
         includeTurns,
+        includeTurns
+          ? (await this.historicalTurns(publicThreadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn)
+          : [],
       );
       return { provider: "claude", result: { thread } };
     }
@@ -582,6 +633,9 @@ export class CrossProviderForks {
         publicThreadId,
         response.thread,
         !resume.excludeTurns,
+        !resume.excludeTurns
+          ? (await this.historicalTurns(publicThreadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn)
+          : [],
       );
       const backendTurns = resume.initialTurnsPage && resume.excludeTurns
         ? this.claude.readThread(threadId, true).thread.turns
@@ -592,7 +646,9 @@ export class CrossProviderForks {
           ...response,
           thread,
           ...(resume.initialTurnsPage ? {
-            initialTurnsPage: pageTurns(this.epochs.visibleTurns(publicThreadId, backendTurns), {
+            initialTurnsPage: pageTurns(await this.visibleTurns(
+              publicThreadId, backendTurns, this.daemonStock ?? clientStock,
+            ), {
               threadId: publicThreadId,
               ...resume.initialTurnsPage,
             }),
@@ -608,7 +664,7 @@ export class CrossProviderForks {
       return {
         provider: "claude",
         result: pageTurns(
-          this.epochs.visibleTurns(publicThreadId, read.turns),
+          await this.visibleTurns(publicThreadId, read.turns, this.daemonStock ?? clientStock),
           publicParams as unknown as ThreadTurnsListParams,
         ),
       };
@@ -618,7 +674,7 @@ export class CrossProviderForks {
       return {
         provider: "claude",
         result: pageItems(
-          this.epochs.visibleTurns(publicThreadId, read.turns),
+          await this.visibleTurns(publicThreadId, read.turns, this.daemonStock ?? clientStock),
           publicParams as unknown as ThreadItemsListParams,
         ),
       };
@@ -796,23 +852,27 @@ export class CrossProviderForks {
     clientStock: StockRpc,
     connectionId?: string,
   ): Promise<ThreadForkResponse> {
-    const source = this.epochs.resolve(params.threadId);
-    if (!source) throw invalidParams(`Unknown logical thread '${params.threadId}'.`);
+    const unresolvedSource = this.epochs.resolve(params.threadId);
+    if (!unresolvedSource) throw invalidParams(`Unknown logical thread '${params.threadId}'.`);
+    const source = await this.hydrate(unresolvedSource, this.daemonStock ?? clientStock);
     if (params.model && providerForModel(this.claude, params.model) !== source.epoch.provider) {
       throw invalidParams("Fork is same-provider only. Change the model and send a message to switch provider.");
     }
     const currentTurns = await this.currentBackendTurns(source, this.daemonStock ?? clientStock);
-    const visible = this.epochs.snapshotTurns(params.threadId, currentTurns);
+    const visible = await this.snapshotTurns(
+      params.threadId, currentTurns, this.daemonStock ?? clientStock,
+    );
     const boundaryIndex = visible.findLastIndex((turn) =>
       turn.turn.status === "completed" && turn.epochId && turn.providerTurnId);
     const boundary = visible[boundaryIndex];
     if (!boundary?.epochId || !boundary.providerTurnId) {
       throw invalidParams("Cannot fork before the task has a completed provider turn.");
     }
-    const selectedEpoch = this.store.getEpoch(boundary.epochId);
-    if (!selectedEpoch || !this.store.epochBelongsToLineage(params.threadId, selectedEpoch.id)) {
+    const selectedBoundary = this.lineage.getEpoch(boundary.epochId);
+    if (!selectedBoundary || !this.lineage.epochBelongsToLineage(params.threadId, selectedBoundary.epochId)) {
       throw invalidParams("Fork boundary is outside the task's provider lineage.");
     }
+    const selectedEpoch = await this.hydrateEpoch(selectedBoundary.epochId, this.daemonStock ?? clientStock);
 
     const targetId = uuidv7();
     let forked: ThreadForkResponse | undefined;
@@ -863,20 +923,20 @@ export class CrossProviderForks {
       turns: [],
     };
     try {
-      const target = this.store.createLogicalThread({
+      const sourceSegments = this.lineage.listSegments(params.threadId);
+      const selectedSegment = sourceSegments.findIndex(
+        (segment) => segment.kind === "provider" && segment.epochId === selectedEpoch.id,
+      );
+      const inheritedSegments = (selectedSegment < 0 ? sourceSegments : sourceSegments.slice(0, selectedSegment))
+        .map(({ position: _position, ...segment }) => segment);
+      this.epochs.createFork(
         thread,
-        epoch: {
-          id: uuidv7(),
-          provider: selectedEpoch.provider,
-          backendThreadId: forked.thread.id,
-          model: selectedEpoch.model,
-          settings: selectedEpoch.settings,
-        },
-      });
-      const inherited = visible.slice(0, boundaryIndex + 1).filter((turn) => turn.epochId !== selectedEpoch.id);
-      if (inherited.length > 0 && !this.store.replaceLogicalTurns(targetId, target.revision, inherited)) {
-        throw new Error("Failed to persist logical fork history.");
-      }
+        forked.thread.id,
+        selectedEpoch.provider,
+        selectedEpoch.model,
+        selectedEpoch.settings,
+        inheritedSegments,
+      );
       this.subscriptions?.aliasThread(forked.thread.id, targetId);
       if (stockBuildOwner) this.stockTargetBuilds.delete(stockBuildOwner);
       if (selectedEpoch.provider === "claude") {
@@ -889,14 +949,22 @@ export class CrossProviderForks {
       const settings = selectedEpoch.settings;
       return {
         ...forked,
-        thread: this.epochs.projectThread(targetId, forked.thread, !params.excludeTurns),
+        thread: this.epochs.projectThread(
+          targetId,
+          forked.thread,
+          !params.excludeTurns,
+          !params.excludeTurns
+            ? (await this.historicalTurns(targetId, this.daemonStock ?? clientStock)).map((entry) => entry.turn)
+            : [],
+        ),
         model: selectedEpoch.model,
         modelProvider: selectedEpoch.provider === "claude" ? "claude" : "openai",
         serviceTier: typeof settings.serviceTier === "string" ? settings.serviceTier : null,
       };
     } catch (error) {
       if (stockBuildOwner) this.stockTargetBuilds.delete(stockBuildOwner);
-      this.store.deleteLogicalThread(targetId);
+      this.lineage.deleteTask(targetId);
+      if (this.legacyMirror) this.store.deleteLogicalThread(targetId);
       if (!forked?.thread.id) throw error;
       if (selectedEpoch.provider === "claude") {
         await this.claude.deleteThread(forked.thread.id).catch(() => undefined);
@@ -913,14 +981,17 @@ export class CrossProviderForks {
     connectionId?: string,
   ): Promise<ThreadRollbackResponse> {
     const selection = this.store.getForkSelection(params.threadId);
-    const target = this.epochs.resolve(params.threadId);
-    if (!target) throw invalidParams(`Unknown logical thread '${params.threadId}'.`);
+    const unresolvedTarget = this.epochs.resolve(params.threadId);
+    if (!unresolvedTarget) throw invalidParams(`Unknown logical thread '${params.threadId}'.`);
+    const target = await this.hydrate(unresolvedTarget, this.daemonStock ?? clientStock);
     if (!Number.isInteger(params.numTurns) || params.numTurns < 0) {
       throw invalidParams("numTurns must be a non-negative integer.");
     }
     const pendingFork = selection?.status === "pending" ? selection : undefined;
     const currentTurns = await this.currentBackendTurns(target, this.daemonStock ?? clientStock);
-    const turns = this.epochs.snapshotTurns(params.threadId, currentTurns);
+    const turns = await this.snapshotTurns(
+      params.threadId, currentTurns, this.daemonStock ?? clientStock,
+    );
     const keep = turns.length - params.numTurns;
     if (keep <= 0) throw invalidParams("Rollback removed every provider turn.");
     const retained = turns.slice(0, keep);
@@ -928,11 +999,12 @@ export class CrossProviderForks {
     if (!boundary?.epochId || !boundary.providerTurnId) {
       throw invalidParams("Rollback has no provider-backed turn boundary.");
     }
-    const selectedEpoch = this.store.getEpoch(boundary.epochId);
+    const selectedBoundary = this.lineage.getEpoch(boundary.epochId);
     const selectedLineage = pendingFork?.sourcePublicThreadId ?? params.threadId;
-    if (!selectedEpoch || !this.store.epochBelongsToLineage(selectedLineage, selectedEpoch.id)) {
+    if (!selectedBoundary || !this.lineage.epochBelongsToLineage(selectedLineage, selectedBoundary.epochId)) {
       throw invalidParams("Rollback points outside the thread's provider lineage.");
     }
+    const selectedEpoch = await this.hydrateEpoch(selectedBoundary.epochId, this.daemonStock ?? clientStock);
     if (!pendingFork && selectedEpoch.id === target.epoch.id) {
       if (params.numTurns === 0) {
         const backend = target.epoch.provider === "claude"
@@ -941,7 +1013,12 @@ export class CrossProviderForks {
             threadId: target.epoch.backendThreadId,
             includeTurns: true,
           }) as ThreadReadResponse).thread;
-        return { thread: this.epochs.projectThread(params.threadId, backend, true) };
+        return { thread: this.epochs.projectThread(
+          params.threadId,
+          backend,
+          true,
+          (await this.historicalTurns(params.threadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn),
+        ) };
       }
       const rolled = target.epoch.provider === "claude"
         ? await this.claude.rollbackThread({
@@ -952,7 +1029,12 @@ export class CrossProviderForks {
           threadId: target.epoch.backendThreadId,
           numTurns: params.numTurns,
         }) as ThreadRollbackResponse;
-      return { thread: this.epochs.projectThread(params.threadId, rolled.thread, true) };
+      return { thread: this.epochs.projectThread(
+        params.threadId,
+        rolled.thread,
+        true,
+        (await this.historicalTurns(params.threadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn),
+      ) };
     }
     let forked: ThreadForkResponse;
     let stockBuildOwner: string | undefined;
@@ -996,13 +1078,32 @@ export class CrossProviderForks {
       name: target.logical.thread.name,
       turns: [],
     };
-    const committed = this.store.commitLogicalRollback({
+    const targetEpochId = uuidv7();
+    const sourceSegments = this.lineage.listSegments(selectedLineage);
+    const selectedSegment = sourceSegments.findIndex(
+      (segment) => segment.kind === "provider" && segment.epochId === selectedEpoch.id,
+    );
+    const retainedSegments = (selectedSegment < 0 ? sourceSegments : sourceSegments.slice(0, selectedSegment))
+      .map(({ position: _position, ...segment }) => segment);
+    const lineageCommitted = this.lineage.commitRollback(
+      params.threadId,
+      target.epoch.id,
+      target.logical.revision,
+      {
+        epochId: targetEpochId,
+        provider: selectedEpoch.provider,
+        backendThreadId: forked.thread.id,
+      },
+      retainedSegments,
+    );
+    if (!lineageCommitted) throw new Error("Logical rollback lost its lineage CAS boundary.");
+    const committed = !this.legacyMirror || this.store.commitLogicalRollback({
       targetPublicThreadId: params.threadId,
       expectedCurrentEpochId: target.epoch.id,
       expectedThreadRevision: target.logical.revision,
       selectedEpochId: selectedEpoch.id,
       targetEpoch: {
-        id: uuidv7(),
+        id: targetEpochId,
         provider: selectedEpoch.provider,
         backendThreadId: forked.thread.id,
         model: selectedEpoch.model,
@@ -1027,7 +1128,12 @@ export class CrossProviderForks {
     if (pendingFork) {
       if (selectedEpoch.provider === "claude") await this.claude.announceThread(forked.thread);
       else this.subscriptions?.emitPublic(params.threadId, "thread/started", {
-        thread: this.epochs.projectThread(params.threadId, forked.thread, true),
+        thread: this.epochs.projectThread(
+          params.threadId,
+          forked.thread,
+          true,
+          (await this.historicalTurns(params.threadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn),
+        ),
       });
     }
     this.subscriptions?.emitPublic(params.threadId, "thread/settings/updated", {
@@ -1038,7 +1144,12 @@ export class CrossProviderForks {
         modelProvider: selectedEpoch.provider === "claude" ? "claude" : "openai",
       },
     });
-    return { thread: this.epochs.projectThread(params.threadId, forked.thread, true) };
+    return { thread: this.epochs.projectThread(
+      params.threadId,
+      forked.thread,
+      true,
+      (await this.historicalTurns(params.threadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn),
+    ) };
   }
 
   public configureDaemonStock(
@@ -1061,7 +1172,7 @@ export class CrossProviderForks {
 
   public configureSubscriptions(subscriptions: SubscriptionHub): void {
     this.subscriptions = subscriptions;
-    for (const mapping of this.store.listBackendMappings()) {
+    for (const mapping of this.lineage.listMappings()) {
       if (mapping.state === "current") subscriptions.aliasThread(mapping.backendThreadId, mapping.publicThreadId);
       else subscriptions.suppress(mapping.backendThreadId);
     }
@@ -1092,6 +1203,7 @@ export class CrossProviderForks {
       publicThreadId: params.threadId,
       expectedEpochId: seeded.epoch.id,
       pendingRevision: pending.revision,
+      expectedThreadRevision: seeded.logical.revision,
       targetProvider: pending.targetProvider,
       targetModel: pending.targetModel,
       settings: pending.settings,
@@ -1200,6 +1312,10 @@ export class CrossProviderForks {
       this.flushStockTargetBuild(workerConnectionId);
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
+      const current = this.lineage.getTask(job.publicThreadId);
+      const currentEpoch = current && this.lineage.getEpoch(current.currentEpochId);
+      if (target && currentEpoch?.backendThreadId === target.threadId
+        && currentEpoch.provider === target.provider) committed = true;
       if (committed) return;
       this.store.failProviderSwitch(job.id, failure.message);
       if (target?.provider === "claude") {
@@ -1217,6 +1333,20 @@ export class CrossProviderForks {
   }
 
   private async recoverProviderSwitch(job: ProviderSwitchJob, stock: StockRpc): Promise<void> {
+    const currentTask = this.lineage.getTask(job.publicThreadId);
+    const currentEpoch = currentTask && this.lineage.getEpoch(currentTask.currentEpochId);
+    if (job.targetBackendThreadId && currentEpoch?.backendThreadId === job.targetBackendThreadId
+      && currentEpoch.provider === job.targetProvider) {
+      this.store.completeProviderSwitch(job.id);
+      const source = this.lineage.getEpoch(job.expectedEpochId);
+      if (source?.provider === "stock" && source.archivePending) {
+        await stock.request("thread/archive", { threadId: source.backendThreadId }).then(() => {
+          this.lineage.markStockArchived(source.epochId);
+          if (this.legacyMirror) this.store.markStockArchived(source.epochId);
+        }, () => undefined);
+      }
+      return;
+    }
     if (job.targetProvider === "claude" && job.targetBackendThreadId) {
       this.subscriptions?.suppress(job.targetBackendThreadId);
     }
@@ -1540,7 +1670,7 @@ export class CrossProviderForks {
       : typeof nestedThread?.id === "string" ? nestedThread.id : undefined;
     if (!threadId) return false;
     if (message.method === "thread/started" && this.systemEphemeralThreads.get(connectionId)?.has(threadId)) return true;
-    if (message.method === "thread/started" && this.store.findEpochByBackend("stock", threadId)) return true;
+    if (message.method === "thread/started" && this.lineage.findEpoch("stock", threadId)) return true;
     const direct = this.stockTargetBuilds.get(connectionId);
     if (direct && message.method === "thread/started" && direct.awaitingStart
       && (direct.expectedForkedFromId === undefined || nestedThread?.forkedFromId === direct.expectedForkedFromId)) {
@@ -1662,7 +1792,10 @@ export class CrossProviderForks {
     this.store.clearOverlay(threadId);
   }
 
-  public close(): void { this.store.close(); }
+  public close(): void {
+    this.lineage.close();
+    this.store.close();
+  }
 
   private async seedProviderSwitch(threadId: string, stock: StockRpc): Promise<ResolvedProviderEpoch> {
     let resolved = this.epochs.resolve(threadId);
@@ -1693,11 +1826,7 @@ export class CrossProviderForks {
     if (resolved.epoch.provider !== pending.sourceProvider) {
       throw new Error("Provider switch source changed before it could be staged.");
     }
-    const staged = this.store.stageProviderSwitch({
-      pending: { ...pending, expectedEpochId: resolved.epoch.id },
-      expectedEpochId: resolved.epoch.id,
-    });
-    if (!staged) throw new Error("Provider switch lost its current provider epoch.");
+    this.store.setPending({ ...pending, expectedEpochId: resolved.epoch.id });
     return this.epochs.resolve(threadId)!;
   }
 
@@ -1713,7 +1842,149 @@ export class CrossProviderForks {
     return read.thread.turns;
   }
 
+  private async hydrate(
+    resolved: ResolvedProviderEpoch,
+    stock?: StockRpc,
+  ): Promise<ResolvedProviderEpoch> {
+    if (resolved.epoch.backendThreadId.startsWith("ccodex-provisional:")) return resolved;
+    if (resolved.epoch.provider === "claude") {
+      if (this.legacyMirror && (
+        typeof (this.claude as unknown as { readThread?: unknown }).readThread !== "function"
+        || typeof (this.claude as unknown as { currentThreadSettings?: unknown }).currentThreadSettings !== "function"
+      )) return resolved;
+      const thread = this.claude.readThread(resolved.epoch.backendThreadId, false).thread;
+      const settings = this.claude.currentThreadSettings(resolved.epoch.backendThreadId);
+      return {
+        logical: {
+          ...resolved.logical,
+          thread: this.epochs.projectThread(resolved.logical.publicThreadId, thread, false),
+        },
+        epoch: {
+          ...resolved.epoch,
+          model: settings.model,
+          settings: settings as unknown as Record<string, unknown>,
+        },
+      };
+    }
+    if (!stock) throw new Error("Stock provider metadata requires the daemon stock connection.");
+    const [read, resume] = await Promise.all([
+      stock.request("thread/read", {
+        threadId: resolved.epoch.backendThreadId,
+        includeTurns: false,
+      }) as Promise<ThreadReadResponse>,
+      stock.request("thread/resume", {
+        threadId: resolved.epoch.backendThreadId,
+        excludeTurns: true,
+      }) as Promise<ThreadResumeResponse>,
+    ]);
+    return {
+      logical: {
+        ...resolved.logical,
+        thread: this.epochs.projectThread(resolved.logical.publicThreadId, read.thread, false),
+      },
+      epoch: {
+        ...resolved.epoch,
+        model: resume.model,
+        settings: resume as unknown as Record<string, unknown>,
+      },
+    };
+  }
+
+  private async hydrateEpoch(epochId: string, stock: StockRpc): Promise<ProviderEpoch> {
+    const configured = this.epochs.configuredEpoch(epochId);
+    const boundary = this.lineage.getEpoch(epochId);
+    if (!boundary) throw new Error(`Unknown provider epoch '${epochId}'.`);
+    const settings = boundary.provider === "claude"
+      ? typeof (this.claude as unknown as { currentThreadSettings?: unknown }).currentThreadSettings === "function"
+        ? this.claude.currentThreadSettings(boundary.backendThreadId) as unknown as Record<string, unknown>
+        : configured?.settings ?? {}
+      : await stock.request("thread/resume", {
+        threadId: boundary.backendThreadId,
+        excludeTurns: true,
+      }) as Record<string, unknown>;
+    return {
+      id: boundary.epochId,
+      publicThreadId: boundary.publicThreadId,
+      ordinal: boundary.ordinal,
+      provider: boundary.provider,
+      backendThreadId: boundary.backendThreadId,
+      model: typeof settings.model === "string" ? settings.model : "",
+      settings,
+      state: boundary.state,
+      createdAt: 0,
+      archivePending: boundary.archivePending,
+      deleteDone: boundary.deleteDone,
+    };
+  }
+
+  private async historicalTurns(publicThreadId: string, stock: StockRpc): Promise<NewLogicalTurn[]> {
+    const loaded = new Map<string, Turn[]>();
+    const result: NewLogicalTurn[] = [];
+    for (const segment of this.lineage.listSegments(publicThreadId)) {
+      if (segment.kind === "synthetic") {
+        result.push({ publicTurnId: segment.publicTurnId, turn: segment.turn, kind: "migrationCompact" });
+        continue;
+      }
+      const epoch = this.lineage.getEpoch(segment.epochId);
+      if (!epoch) throw new Error(`Provider epoch '${segment.epochId}' is missing from lineage.`);
+      let turns = loaded.get(epoch.epochId);
+      if (!turns) {
+        turns = epoch.provider === "claude"
+          ? this.claude.readThread(epoch.backendThreadId, true).thread.turns
+          : (await stock.request("thread/read", {
+            threadId: epoch.backendThreadId,
+            includeTurns: true,
+          }) as ThreadReadResponse).thread.turns;
+        loaded.set(epoch.epochId, turns);
+      }
+      const start = turns.findIndex((turn) => turn.id === segment.startTurnId);
+      const end = turns.findIndex((turn) => turn.id === segment.endTurnId);
+      if (start < 0 || end < start) {
+        throw new Error(`Provider transcript no longer contains lineage boundary '${segment.startTurnId}'..'${segment.endTurnId}'.`);
+      }
+      result.push(...turns.slice(start, end + 1).map((turn) => ({
+        publicTurnId: turn.id,
+        epochId: epoch.epochId,
+        providerTurnId: turn.id,
+        turn,
+        kind: "provider" as const,
+      })));
+    }
+    return result;
+  }
+
+  private async visibleTurns(
+    publicThreadId: string,
+    currentBackendTurns: readonly Turn[],
+    stock: StockRpc,
+  ): Promise<Turn[]> {
+    return [
+      ...(await this.historicalTurns(publicThreadId, stock)).map((entry) => entry.turn),
+      ...currentBackendTurns,
+    ];
+  }
+
+  private async snapshotTurns(
+    publicThreadId: string,
+    currentBackendTurns: readonly Turn[],
+    stock: StockRpc,
+  ): Promise<NewLogicalTurn[]> {
+    const resolved = this.epochs.resolve(publicThreadId);
+    if (!resolved) throw new Error(`Unknown logical thread '${publicThreadId}'.`);
+    return [
+      ...await this.historicalTurns(publicThreadId, stock),
+      ...currentBackendTurns.map((turn) => ({
+        publicTurnId: turn.id,
+        epochId: resolved.epoch.id,
+        providerTurnId: turn.id,
+        turn,
+        kind: "provider" as const,
+      })),
+    ];
+  }
+
   private patchLogicalThread(publicThreadId: string, patch: Partial<Thread>): void {
+    if (!this.legacyMirror) return;
     const logical = this.store.getLogicalThread(publicThreadId);
     if (!logical || !this.store.updateLogicalThread(
       publicThreadId,
@@ -1726,38 +1997,31 @@ export class CrossProviderForks {
     resolved: ResolvedProviderEpoch,
     params: Record<string, unknown>,
   ): void {
-    const settings = canonicalSettings(
-      resolved.epoch.settings,
-      params as ThreadSettingsUpdateParams,
-      params as TurnStartParams,
-      typeof params.cwd === "string" ? params.cwd : resolved.logical.thread.cwd,
-    );
-    delete settings.threadId;
-    delete settings.input;
-    delete settings.clientUserMessageId;
-    const model = typeof params.model === "string" ? params.model : undefined;
-    if (!this.store.updateCurrentEpoch(resolved.logical.publicThreadId, resolved.epoch.id, {
-      ...(model ? { model } : {}),
-      settings,
-    })) throw new Error("Current provider epoch changed while settings were being applied.");
+    // The provider request above has already updated the native provider store.
+    // Lineage deliberately does not cache provider-owned settings.
+    void resolved;
+    void params;
   }
 
   private async deleteLogicalThread(publicThreadId: string, clientStock: StockRpc): Promise<void> {
     const stock = this.daemonStock ?? clientStock;
     this.store.cancelProviderSwitches(publicThreadId, "Task deleted.");
-    const epochs = this.store.listEpochs(publicThreadId)
-      .filter((epoch) => !epoch.backendThreadId.startsWith("ccodex-provisional:"));
+    const epochs = this.lineage.taskEpochs(publicThreadId)
+      .filter((epoch) => !epoch.backendThreadId.startsWith("ccodex-provisional:")
+        && this.lineage.epochReferenceCount(epoch.epochId) <= 1);
     for (const epoch of epochs) this.subscriptions?.suppress(epoch.backendThreadId);
     for (const epoch of epochs) {
       if (epoch.deleteDone) continue;
       if (epoch.provider === "claude") await this.claude.deleteThread(epoch.backendThreadId);
       else await stock.request("thread/delete", { threadId: epoch.backendThreadId });
-      this.store.markEpochDeleted(epoch.id);
+      this.lineage.markEpochDeleted(epoch.epochId);
+      if (this.legacyMirror) this.store.markEpochDeleted(epoch.epochId);
     }
     this.store.addRemoteCatalogTombstone(publicThreadId);
-    if (!this.store.deleteLogicalThread(publicThreadId)) {
+    if (!this.lineage.deleteTask(publicThreadId)) {
       throw new Error(`Logical task '${publicThreadId}' disappeared during deletion.`);
     }
+    if (this.legacyMirror) this.store.deleteLogicalThread(publicThreadId);
     for (const epoch of epochs) this.subscriptions?.unaliasThread(epoch.backendThreadId);
     this.subscriptions?.publicThreadDeleted(publicThreadId);
   }
@@ -1782,7 +2046,7 @@ export class CrossProviderForks {
       return {
         thread: source.thread,
         backendTurns: source.turns,
-        turns: this.epochs.visibleTurns(job.publicThreadId, source.turns),
+        turns: await this.visibleTurns(job.publicThreadId, source.turns, stock),
         settings: source.settings as unknown as Record<string, unknown>,
       };
     }
@@ -1799,7 +2063,7 @@ export class CrossProviderForks {
     return {
       thread: read.thread,
       backendTurns: read.thread.turns,
-      turns: this.epochs.visibleTurns(job.publicThreadId, read.thread.turns),
+      turns: await this.visibleTurns(job.publicThreadId, read.thread.turns, stock),
       settings: resume as unknown as Record<string, unknown>,
     };
   }
@@ -1834,7 +2098,7 @@ export class CrossProviderForks {
       source,
       summary,
       sourceTurns: [
-        ...this.epochs.snapshotTurns(job.publicThreadId, source.backendTurns),
+        ...await this.snapshotTurns(job.publicThreadId, source.backendTurns, stock),
         { publicTurnId: compactTurn.id, turn: compactTurn, kind: "migrationCompact" },
       ],
       developerInstructions: handoffInstructions(source.developerInstructions, summary),
@@ -1853,8 +2117,9 @@ export class CrossProviderForks {
     stock: StockRpc,
     connectionId: string,
   ): Promise<string> {
-    const resolved = this.epochs.resolve(job.publicThreadId);
-    if (!resolved) throw new Error(`Unknown logical thread '${job.publicThreadId}'.`);
+    const unresolved = this.epochs.resolve(job.publicThreadId);
+    if (!unresolved) throw new Error(`Unknown logical thread '${job.publicThreadId}'.`);
+    const resolved = await this.hydrate(unresolved, stock);
     if (resolved.epoch.provider === "claude") {
       const hidden = await this.claude.forkThread({
         threadId: resolved.epoch.backendThreadId,
@@ -1947,32 +2212,63 @@ export class CrossProviderForks {
     settings: Record<string, unknown>,
     sourceTurns: NewLogicalTurn[],
   ): ProviderEpoch {
-    const logical = this.store.getLogicalThread(job.publicThreadId);
-    if (!logical) throw new Error(`Unknown logical thread '${job.publicThreadId}'.`);
-    const publicThread: Thread = {
-      ...target,
-      id: job.publicThreadId,
-      sessionId: logical.thread.sessionId,
-      forkedFromId: logical.thread.forkedFromId,
-      parentThreadId: logical.thread.parentThreadId,
-      createdAt: logical.thread.createdAt,
-      name: target.name,
-      turns: [],
-    };
-    const committed = this.store.commitProviderSwitch({
-      jobId: job.id,
-      targetEpoch: {
-        id: uuidv7(),
+    const targetEpochId = uuidv7();
+    const sourceProviderTurns = sourceTurns.filter(
+      (turn) => turn.kind === "provider" && turn.epochId === job.expectedEpochId && turn.providerTurnId,
+    );
+    const firstSourceTurn = sourceProviderTurns[0]?.providerTurnId;
+    const lastSourceTurn = sourceProviderTurns.at(-1)?.providerTurnId;
+    if (!firstSourceTurn || !lastSourceTurn) {
+      throw new Error("Provider switch source has no provider-backed lineage boundary.");
+    }
+    const lineageCommitted = this.lineage.commitEpoch(
+      job.publicThreadId,
+      job.expectedEpochId,
+      job.expectedThreadRevision,
+      { startTurnId: firstSourceTurn, endTurnId: lastSourceTurn },
+      {
+        epochId: targetEpochId,
         provider: job.targetProvider,
         backendThreadId: target.id,
-        model: job.targetModel,
-        settings,
       },
-      sourceTurns,
-      thread: publicThread,
-    });
-    if (!committed) throw new Error("Provider switch lost its atomic commit boundary.");
-    const source = this.store.getEpoch(job.expectedEpochId)!;
+      sourceTurns.filter((turn) => turn.kind === "migrationCompact").map((turn) => ({
+        publicTurnId: turn.publicTurnId,
+        turn: turn.turn,
+      })),
+    );
+    if (!lineageCommitted) throw new Error("Provider switch lost its lineage CAS during commit.");
+    if (this.legacyMirror) {
+      const task = this.lineage.getTask(job.publicThreadId)!;
+      const identity = this.epochs.resolve(job.publicThreadId)!.logical.thread;
+      if (!this.store.commitProviderSwitch({
+        jobId: job.id,
+        targetEpoch: {
+          id: targetEpochId,
+          provider: job.targetProvider,
+          backendThreadId: target.id,
+          model: job.targetModel,
+          settings,
+        },
+        sourceTurns,
+        thread: { ...target, ...identity, id: task.publicThreadId, name: target.name, turns: [] },
+      })) throw new Error("Legacy provider-switch mirror failed to settle.");
+    } else if (!this.store.completeProviderSwitch(job.id)) {
+      throw new Error("Provider switch committed lineage but failed to settle its operation journal.");
+    }
+    const sourceBoundary = this.lineage.getEpoch(job.expectedEpochId)!;
+    const source: ProviderEpoch = {
+      id: sourceBoundary.epochId,
+      publicThreadId: sourceBoundary.publicThreadId,
+      ordinal: sourceBoundary.ordinal,
+      provider: sourceBoundary.provider,
+      backendThreadId: sourceBoundary.backendThreadId,
+      model: "",
+      settings: {},
+      state: sourceBoundary.state,
+      createdAt: 0,
+      archivePending: sourceBoundary.archivePending,
+      deleteDone: sourceBoundary.deleteDone,
+    };
     this.subscriptions?.suppress(source.backendThreadId);
     this.subscriptions?.revealAs(target.id, job.publicThreadId);
     this.subscriptions?.emitPublic(job.publicThreadId, "thread/started", {
@@ -1992,12 +2288,25 @@ export class CrossProviderForks {
   private async archiveSealedStockEpoch(epoch: ProviderEpoch, stock: StockRpc): Promise<void> {
     if (epoch.provider !== "stock" || !epoch.archivePending) return;
     await stock.request("thread/archive", { threadId: epoch.backendThreadId });
-    this.store.markStockArchived(epoch.id);
+    this.lineage.markStockArchived(epoch.id);
+    if (this.legacyMirror) this.store.markStockArchived(epoch.id);
   }
 
   private async settlePendingStockArchives(stock: StockRpc): Promise<void> {
-    for (const epoch of this.store.pendingStockArchives()) {
-      await this.archiveSealedStockEpoch(epoch, stock).catch(() => undefined);
+    for (const boundary of this.lineage.pendingStockArchives()) {
+      await this.archiveSealedStockEpoch({
+        id: boundary.epochId,
+        publicThreadId: boundary.publicThreadId,
+        ordinal: boundary.ordinal,
+        provider: boundary.provider,
+        backendThreadId: boundary.backendThreadId,
+        model: "",
+        settings: {},
+        state: boundary.state,
+        createdAt: 0,
+        archivePending: boundary.archivePending,
+        deleteDone: boundary.deleteDone,
+      }, stock).catch(() => undefined);
     }
   }
 

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Thread } from "../../src/codex/generated/v2/Thread.js";
 import type { Turn } from "../../src/codex/generated/v2/Turn.js";
 import { ProviderEpochs } from "../../src/handoff/providerEpochs.js";
+import { LineageStore } from "../../src/handoff/lineageStore.js";
 import { HandoffStore } from "../../src/handoff/store.js";
 
 function turn(id: string): Turn {
@@ -26,12 +27,20 @@ function thread(id: string, turns: Turn[]): Thread {
 
 describe("ProviderEpochs", () => {
   const stores: HandoffStore[] = [];
-  afterEach(() => stores.splice(0).forEach((store) => store.close()));
+  const lineages: LineageStore[] = [];
+  afterEach(() => {
+    lineages.splice(0).forEach((store) => store.close());
+    stores.splice(0).forEach((store) => store.close());
+  });
 
   it("seeds one physical thread and composes sealed history with current backend turns", () => {
-    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-epochs-")), "handoffs.sqlite"));
+    const path = join(mkdtempSync(join(tmpdir(), "ccodex-epochs-")), "handoffs.sqlite");
+    const store = new HandoffStore(path);
     stores.push(store);
-    const epochs = new ProviderEpochs(store);
+    const lineage = new LineageStore(path);
+    lineage.finalizeLegacyMigration(new Set());
+    lineages.push(lineage);
+    const epochs = new ProviderEpochs(lineage, store);
     epochs.seed(thread("public", [turn("old")]), "stock", "gpt-5.6-sol", {});
 
     expect(epochs.resolve("public")?.epoch).toMatchObject({

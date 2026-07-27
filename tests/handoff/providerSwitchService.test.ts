@@ -1,11 +1,13 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
 import type { Thread } from "../../src/codex/generated/v2/Thread.js";
 import type { Turn } from "../../src/codex/generated/v2/Turn.js";
 import { SubscriptionHub } from "../../src/gateway/subscriptions.js";
 import { CrossProviderForks } from "../../src/handoff/service.js";
+import { LineageStore } from "../../src/handoff/lineageStore.js";
 import { HandoffStore } from "../../src/handoff/store.js";
 
 function turn(id: string, text: string): Turn {
@@ -37,7 +39,8 @@ describe("provider switch service", () => {
     const target = { ...thread("rename-claude-target", "claude"), name: null };
     const targetTurn = turn("rename-target-turn", "target");
     const order: string[] = [];
-    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    const databasePath = join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite");
+    const store = new HandoffStore(databasePath);
     const hub = new SubscriptionHub();
     const appEvents: Array<{ method: string; params: unknown }> = [];
     hub.attach("app", (method, params) => {
@@ -82,7 +85,6 @@ describe("provider switch service", () => {
     expect(claude.setThreadName).toHaveBeenCalledWith({ threadId: target.id, name: source.name });
     expect(order.indexOf("native-rename")).toBeLessThan(order.indexOf("reveal"));
     expect(service.logical(source.id)).toMatchObject({
-      logical: { thread: { name: source.name } },
       epoch: { provider: "claude", backendThreadId: target.id },
     });
     expect(appEvents).toContainEqual({
@@ -90,6 +92,7 @@ describe("provider switch service", () => {
       params: { threadId: source.id, threadName: source.name },
     });
     service.close();
+
   });
 
   it("keeps the source projection unchanged when native target rename fails", async () => {
@@ -137,7 +140,6 @@ describe("provider switch service", () => {
       .rejects.toThrow("native rename unavailable");
 
     expect(service.logical(source.id)).toMatchObject({
-      logical: { thread: { name: source.name } },
       epoch: { provider: "stock", backendThreadId: source.id },
     });
     expect(claude.deleteThread).toHaveBeenCalledWith(target.id);
@@ -315,6 +317,7 @@ describe("provider switch service", () => {
       ownsModel: (model: string) => model.startsWith("claude:"),
       ownsThread: (id: string) => id === source.id || id === nativeFork.id,
       readThread: vi.fn((id: string) => ({ thread: id === source.id ? source : nativeFork })),
+      currentThreadSettings: vi.fn(() => ({ model: "claude:sonnet", effort: "high" })),
       forkThread: vi.fn(async () => ({ thread: nativeFork })),
       announceThread: vi.fn(async () => undefined),
       deleteThread: vi.fn(async () => ({})),
@@ -612,8 +615,11 @@ describe("provider switch service", () => {
         return {};
       }),
     };
-    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
-    service = new CrossProviderForks(store, claude as never);
+    const providerLineagePath = join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite");
+    const store = new HandoffStore(providerLineagePath);
+    const lineage = new LineageStore(providerLineagePath);
+    lineage.finalizeLegacyMigration(new Set());
+    service = new CrossProviderForks(store, claude as never, undefined, lineage);
     const subscriptions = new SubscriptionHub();
     const projected: Array<{ method: string; params: unknown }> = [];
     subscriptions.subscribe(source.id, "app", (method, params) => projected.push({ method, params }));
@@ -646,10 +652,13 @@ describe("provider switch service", () => {
       params: expect.objectContaining({ threadId: target.id, input }),
     });
     expect(service.logical(source.id)?.epoch).toMatchObject({
-      provider: "stock", backendThreadId: target.id, model: "gpt-5.6-sol",
+      provider: "stock", backendThreadId: target.id,
     });
-    expect(store.listLogicalTurns(source.id).map((value) => [value.publicTurnId, value.kind]))
-      .toEqual([[sourceTurn.id, "provider"], [compact.id, "migrationCompact"]]);
+    expect(lineage.listSegments(source.id)).toMatchObject([
+      { kind: "provider", epochId: expect.any(String), startTurnId: sourceTurn.id, endTurnId: sourceTurn.id },
+      { kind: "synthetic", publicTurnId: compact.id },
+    ]);
+    expect(store.listLogicalTurns(source.id)).toEqual([]);
     expect(service.pending(source.id)).toBeUndefined();
     expect(projected).toContainEqual({
       method: "turn/started",
@@ -709,6 +718,23 @@ describe("provider switch service", () => {
     });
     expect(rolledBack.thread.turns.map((value) => value.id)).toEqual([sourceTurn.id]);
     service.close();
+
+    const database = new DatabaseSync(providerLineagePath);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM logical_threads").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM provider_epochs").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM provider_switch_jobs_v2").get()).toEqual({ count: 0 });
+    database.close();
+
+    const reopenedStore = new HandoffStore(providerLineagePath);
+    const reopenedLineage = new LineageStore(providerLineagePath);
+    const reopened = new CrossProviderForks(reopenedStore, claude as never, undefined, reopenedLineage);
+    const afterRestart = await reopened.requestLogical("thread/read", {
+      threadId: source.id,
+      includeTurns: true,
+    }, stock as never) as { result: { thread: Thread } };
+    expect(afterRestart.result.thread.turns.map((value) => value.id))
+      .toEqual([sourceTurn.id, compact.id, targetTurn.id]);
+    reopened.close();
   });
 
   it("switches stock to Claude and commits only after starting the untouched input", async () => {
@@ -810,7 +836,7 @@ describe("provider switch service", () => {
       id: source.id,
     }]);
     expect(service.logical(source.id)?.epoch).toMatchObject({
-      provider: "claude", backendThreadId: target.id, model: "claude:sonnet",
+      provider: "claude", backendThreadId: target.id,
     });
     expect(store.listLogicalTurns(source.id).map((value) => value.publicTurnId))
       .toEqual([sourceTurn.id, compact.id]);
@@ -844,6 +870,14 @@ describe("provider switch service", () => {
     const claude = {
       ownsModel: (model: string) => model.startsWith("claude:"),
       ownsThread: (id: string) => id === backend.id,
+      readThread: vi.fn(() => ({ thread: backend })),
+      currentThreadSettings: vi.fn(() => ({
+        model: "claude:sonnet",
+        approvalPolicy: "never",
+        approvalsReviewer: "user",
+        permissions: ":danger-full-access",
+        sandboxPolicy: { type: "dangerFullAccess" },
+      })),
       prepareTurn: vi.fn(async (_params: unknown) => prepared),
     };
     const service = new CrossProviderForks(store, claude as never);
@@ -860,13 +894,6 @@ describe("provider switch service", () => {
       permissions: ":danger-full-access",
     }));
     expect(claude.prepareTurn.mock.calls[0]?.[0]).not.toHaveProperty("sandboxPolicy");
-    expect(service.logical(publicThread.id)?.epoch.settings).toMatchObject({
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      permissions: ":danger-full-access",
-      activePermissionProfile: { id: ":danger-full-access" },
-      sandboxPolicy: { type: "dangerFullAccess" },
-    });
     service.close();
   });
 

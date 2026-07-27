@@ -118,6 +118,7 @@ export interface NewProviderSwitchJob {
   readonly publicThreadId: string;
   readonly expectedEpochId: string;
   readonly pendingRevision: number;
+  readonly expectedThreadRevision?: number;
   readonly targetProvider: ProviderKind;
   readonly targetModel: string;
   readonly settings: ThreadSettingsUpdateParams;
@@ -267,7 +268,7 @@ interface ForkSelectionRow {
 export class HandoffStore {
   private readonly database: DatabaseSync;
 
-  public constructor(path: string) {
+  public constructor(public readonly path: string) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.database = new DatabaseSync(path);
     this.database.exec(`
@@ -377,6 +378,30 @@ export class HandoffStore {
         WHERE status IN ('queued', 'running', 'targetCreated');
       CREATE INDEX IF NOT EXISTS provider_switch_jobs_recovery
         ON provider_switch_jobs(status, created_at);
+      CREATE TABLE IF NOT EXISTS provider_switch_jobs_v2 (
+        job_id TEXT PRIMARY KEY,
+        public_thread_id TEXT NOT NULL,
+        expected_epoch_id TEXT NOT NULL,
+        expected_thread_revision INTEGER NOT NULL,
+        pending_revision INTEGER NOT NULL,
+        target_provider TEXT NOT NULL CHECK(target_provider IN ('claude', 'stock')),
+        target_model TEXT NOT NULL,
+        settings_json TEXT NOT NULL,
+        turn_params_json TEXT NOT NULL,
+        compaction_turn_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'targetCreated', 'committed', 'failed')),
+        summary TEXT,
+        target_backend_thread_id TEXT,
+        target_provider_turn_id TEXT,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS provider_switch_jobs_v2_active
+        ON provider_switch_jobs_v2(public_thread_id)
+        WHERE status IN ('queued', 'running', 'targetCreated');
+      CREATE INDEX IF NOT EXISTS provider_switch_jobs_v2_recovery
+        ON provider_switch_jobs_v2(status, created_at);
       CREATE TABLE IF NOT EXISTS fork_selections (
         target_public_thread_id TEXT PRIMARY KEY REFERENCES logical_threads(public_thread_id) ON DELETE CASCADE,
         source_public_thread_id TEXT NOT NULL REFERENCES logical_threads(public_thread_id) ON DELETE CASCADE,
@@ -410,6 +435,18 @@ export class HandoffStore {
     if (!switchColumns.some((column) => column.name === "compaction_turn_json")) {
       this.database.exec("ALTER TABLE provider_switch_jobs ADD COLUMN compaction_turn_json TEXT");
     }
+    this.database.exec(`
+      INSERT OR IGNORE INTO provider_switch_jobs_v2 (
+        job_id, public_thread_id, expected_epoch_id, expected_thread_revision, pending_revision,
+        target_provider, target_model, settings_json, turn_params_json, compaction_turn_json,
+        status, summary, target_backend_thread_id, target_provider_turn_id, error, created_at, updated_at
+      )
+      SELECT job_id, public_thread_id, expected_epoch_id, expected_thread_revision, pending_revision,
+        target_provider, target_model, settings_json, turn_params_json,
+        COALESCE(compaction_turn_json, '{}'), status, summary, target_backend_thread_id,
+        target_provider_turn_id, error, created_at, updated_at
+      FROM provider_switch_jobs
+    `);
     const epochColumns = this.database.prepare("PRAGMA table_info(provider_epochs)")
       .all() as unknown as Array<{ name: string }>;
     if (!epochColumns.some((column) => column.name === "archive_pending")) {
@@ -467,7 +504,7 @@ export class HandoffStore {
   public cancelProviderSwitches(threadId: string, reason: string): void {
     this.transaction(() => {
       this.database.prepare(`
-        UPDATE provider_switch_jobs SET status = 'failed', error = ?, updated_at = ?
+        UPDATE provider_switch_jobs_v2 SET status = 'failed', error = ?, updated_at = ?
         WHERE public_thread_id = ? AND status IN ('queued', 'running', 'targetCreated')
       `).run(reason, Date.now(), threadId);
       this.database.prepare("DELETE FROM pending_provider_switches WHERE thread_id = ?").run(threadId);
@@ -481,7 +518,7 @@ export class HandoffStore {
         INSERT INTO logical_threads (
           public_thread_id, current_epoch_id, thread_json, revision, created_at, updated_at
         ) VALUES (?, ?, ?, 1, ?, ?)
-      `).run(input.thread.id, input.epoch.id, JSON.stringify({ ...input.thread, turns: [] }), now, now);
+      `).run(input.thread.id, input.epoch.id, JSON.stringify(threadIdentity(input.thread)), now, now);
       this.insertEpoch(input.thread.id, 0, input.epoch, "current", now);
       return this.getLogicalThread(input.thread.id)!;
     });
@@ -501,7 +538,7 @@ export class HandoffStore {
     const result = this.database.prepare(`
       UPDATE logical_threads SET thread_json = ?, updated_at = ?
       WHERE public_thread_id = ? AND revision = ?
-    `).run(JSON.stringify({ ...thread, id: publicThreadId, turns: [] }), Date.now(), publicThreadId, expectedRevision);
+    `).run(JSON.stringify(threadIdentity({ ...thread, id: publicThreadId })), Date.now(), publicThreadId, expectedRevision);
     return Number(result.changes) === 1 ? this.getLogicalThread(publicThreadId) : undefined;
   }
 
@@ -570,16 +607,10 @@ export class HandoffStore {
       const logical = this.getLogicalThread(publicThreadId);
       const epoch = logical && this.getEpoch(expectedEpochId);
       if (!logical || logical.currentEpochId !== expectedEpochId || epoch?.state !== "current") return undefined;
-      const result = this.database.prepare(`
-        UPDATE provider_epochs SET model = ?, settings_json = ?
-        WHERE epoch_id = ? AND public_thread_id = ? AND state = 'current'
-      `).run(
-        patch.model ?? epoch.model,
-        JSON.stringify({ ...epoch.settings, ...(patch.settings ?? {}) }),
-        expectedEpochId,
-        publicThreadId,
-      );
-      return Number(result.changes) === 1 ? this.getEpoch(expectedEpochId) : undefined;
+      // Provider settings belong to the native provider stores. This legacy
+      // row only guards operational transactions; a copy here becomes stale.
+      void patch;
+      return epoch;
     });
   }
 
@@ -656,24 +687,23 @@ export class HandoffStore {
     return this.transaction(() => {
       const logical = this.getLogicalThread(input.publicThreadId);
       const pending = this.getPending(input.publicThreadId);
-      const epoch = logical && this.getEpoch(logical.currentEpochId);
       const active = this.database.prepare(`
-        SELECT 1 AS found FROM provider_switch_jobs
+        SELECT 1 AS found FROM provider_switch_jobs_v2
         WHERE public_thread_id = ? AND status IN ('queued', 'running', 'targetCreated')
       `).get(input.publicThreadId);
-      if (!logical || logical.currentEpochId !== input.expectedEpochId || active
-        || epoch?.provider !== pending?.sourceProvider
+      const expectedThreadRevision = input.expectedThreadRevision ?? logical?.revision;
+      if (expectedThreadRevision === undefined || active
         || pending?.revision !== input.pendingRevision || pending.expectedEpochId !== input.expectedEpochId
         || pending.targetProvider !== input.targetProvider || pending.targetModel !== input.targetModel) return undefined;
       const now = input.createdAt ?? Date.now();
       this.database.prepare(`
-        INSERT INTO provider_switch_jobs (
+        INSERT INTO provider_switch_jobs_v2 (
           job_id, public_thread_id, expected_epoch_id, expected_thread_revision, pending_revision,
           target_provider, target_model, settings_json, turn_params_json, status, created_at, updated_at
           , compaction_turn_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
       `).run(
-        input.id, input.publicThreadId, input.expectedEpochId, logical.revision, input.pendingRevision,
+        input.id, input.publicThreadId, input.expectedEpochId, expectedThreadRevision, input.pendingRevision,
         input.targetProvider, input.targetModel, JSON.stringify(input.settings), JSON.stringify(input.turnParams),
         now, now, JSON.stringify(input.compactionTurn),
       );
@@ -681,29 +711,43 @@ export class HandoffStore {
     });
   }
 
+  public completeProviderSwitch(jobId: string): boolean {
+    return this.transaction(() => {
+      const job = this.getProviderSwitchJob(jobId);
+      if (!job || job.status !== "targetCreated") return job?.status === "committed";
+      this.database.prepare(`
+        DELETE FROM pending_provider_switches
+        WHERE thread_id = ? AND revision = ? AND expected_epoch_id = ?
+      `).run(job.publicThreadId, job.pendingRevision, job.expectedEpochId);
+      return Number(this.database.prepare(`
+        DELETE FROM provider_switch_jobs_v2 WHERE job_id = ? AND status = 'targetCreated'
+      `).run(jobId).changes) === 1;
+    });
+  }
+
   public getProviderSwitchJob(jobId: string): ProviderSwitchJob | undefined {
-    const row = this.database.prepare("SELECT * FROM provider_switch_jobs WHERE job_id = ?")
+    const row = this.database.prepare("SELECT * FROM provider_switch_jobs_v2 WHERE job_id = ?")
       .get(jobId) as unknown as ProviderSwitchJobRow | undefined;
     return row ? this.providerSwitchJobFromRow(row) : undefined;
   }
 
   public recoverableProviderSwitchJobs(): ProviderSwitchJob[] {
     return (this.database.prepare(`
-      SELECT * FROM provider_switch_jobs
+      SELECT * FROM provider_switch_jobs_v2
       WHERE status IN ('queued', 'running', 'targetCreated') ORDER BY created_at ASC
     `).all() as unknown as ProviderSwitchJobRow[]).map((row) => this.providerSwitchJobFromRow(row));
   }
 
   public hiddenProviderSwitchTargetIds(): string[] {
     return (this.database.prepare(`
-      SELECT DISTINCT target_backend_thread_id AS thread_id FROM provider_switch_jobs
+      SELECT DISTINCT target_backend_thread_id AS thread_id FROM provider_switch_jobs_v2
       WHERE target_backend_thread_id IS NOT NULL AND status != 'committed'
     `).all() as unknown as Array<{ thread_id: string }>).map((row) => row.thread_id);
   }
 
   public claimProviderSwitchJob(jobId: string): ProviderSwitchJob | undefined {
     const result = this.database.prepare(`
-      UPDATE provider_switch_jobs SET status = 'running', updated_at = ?
+      UPDATE provider_switch_jobs_v2 SET status = 'running', updated_at = ?
       WHERE job_id = ? AND status = 'queued'
     `).run(Date.now(), jobId);
     return Number(result.changes) === 1 ? this.getProviderSwitchJob(jobId) : undefined;
@@ -711,7 +755,7 @@ export class HandoffStore {
 
   public requeueProviderSwitchJob(jobId: string): ProviderSwitchJob | undefined {
     const result = this.database.prepare(`
-      UPDATE provider_switch_jobs SET
+      UPDATE provider_switch_jobs_v2 SET
         status = 'queued', summary = NULL, target_backend_thread_id = NULL,
         target_provider_turn_id = NULL, error = NULL, updated_at = ?
       WHERE job_id = ? AND status IN ('running', 'targetCreated')
@@ -725,7 +769,7 @@ export class HandoffStore {
       if (!job || !["running", "targetCreated"].includes(job.status)
         || (job.targetBackendThreadId && job.targetBackendThreadId !== checkpoint.backendThreadId)) return false;
       const result = this.database.prepare(`
-        UPDATE provider_switch_jobs SET
+        UPDATE provider_switch_jobs_v2 SET
           status = 'targetCreated', target_backend_thread_id = ?,
           summary = COALESCE(?, summary), target_provider_turn_id = COALESCE(?, target_provider_turn_id),
           updated_at = ?
@@ -763,7 +807,7 @@ export class HandoffStore {
         UPDATE logical_threads SET current_epoch_id = ?, thread_json = ?, revision = revision + 1, updated_at = ?
         WHERE public_thread_id = ? AND current_epoch_id = ? AND revision = ?
       `).run(
-        input.targetEpoch.id, JSON.stringify({ ...input.thread, turns: [] }), committedAt,
+        input.targetEpoch.id, JSON.stringify(threadIdentity(input.thread)), committedAt,
         job.publicThreadId, job.expectedEpochId, job.expectedThreadRevision,
       );
       if (Number(update.changes) !== 1) throw new Error("Provider switch lost its logical-thread CAS during commit.");
@@ -771,7 +815,7 @@ export class HandoffStore {
         DELETE FROM pending_provider_switches WHERE thread_id = ? AND revision = ? AND expected_epoch_id = ?
       `).run(job.publicThreadId, job.pendingRevision, job.expectedEpochId);
       this.database.prepare(`
-        UPDATE provider_switch_jobs SET status = 'committed', error = NULL, updated_at = ?
+        UPDATE provider_switch_jobs_v2 SET status = 'committed', error = NULL, updated_at = ?
         WHERE job_id = ? AND status = 'targetCreated'
       `).run(committedAt, job.id);
       return this.getLogicalThread(job.publicThreadId)!;
@@ -783,7 +827,9 @@ export class HandoffStore {
       const job = this.getProviderSwitchJob(jobId);
       if (!job || !["queued", "running", "targetCreated"].includes(job.status)) return false;
       const result = this.database.prepare(`
-        UPDATE provider_switch_jobs SET status = 'failed', error = ?, updated_at = ?
+        UPDATE provider_switch_jobs_v2 SET status = 'failed', error = ?,
+          settings_json = '{}', turn_params_json = '{}', compaction_turn_json = '{}',
+          summary = NULL, target_provider_turn_id = NULL, updated_at = ?
         WHERE job_id = ? AND status IN ('queued', 'running', 'targetCreated')
       `).run(error, Date.now(), jobId);
       if (Number(result.changes) !== 1) return false;
@@ -899,7 +945,7 @@ export class HandoffStore {
         UPDATE logical_threads SET current_epoch_id = ?, thread_json = ?, revision = revision + 1, updated_at = ?
         WHERE public_thread_id = ? AND current_epoch_id = ? AND revision = ?
       `).run(
-        input.targetEpoch.id, JSON.stringify({ ...input.thread, turns: [] }), committedAt,
+        input.targetEpoch.id, JSON.stringify(threadIdentity(input.thread)), committedAt,
         target.publicThreadId, current.id, input.expectedThreadRevision,
       );
       if (Number(updated.changes) !== 1) throw new Error("Rollback lost its logical-thread CAS during commit.");
@@ -1051,7 +1097,7 @@ export class HandoffStore {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
     `).run(
       epoch.id, publicThreadId, ordinal, epoch.provider, epoch.backendThreadId,
-      epoch.model, JSON.stringify(epoch.settings), state, epoch.createdAt ?? defaultCreatedAt,
+      "", "{}", state, epoch.createdAt ?? defaultCreatedAt,
     );
   }
 
@@ -1068,7 +1114,8 @@ export class HandoffStore {
       }
       insert.run(
         publicThreadId, position, turn.publicTurnId, turn.epochId ?? null,
-        turn.providerTurnId ?? null, JSON.stringify(turn.turn), turn.kind,
+        turn.providerTurnId ?? null,
+        JSON.stringify(turn.kind === "provider" ? { id: turn.publicTurnId } : turn.turn), turn.kind,
       );
     });
   }
@@ -1164,4 +1211,14 @@ export class HandoffStore {
       throw error;
     }
   }
+}
+
+function threadIdentity(thread: Thread): Partial<Thread> {
+  return {
+    id: thread.id,
+    sessionId: thread.sessionId,
+    forkedFromId: thread.forkedFromId,
+    parentThreadId: thread.parentThreadId,
+    createdAt: thread.createdAt,
+  };
 }

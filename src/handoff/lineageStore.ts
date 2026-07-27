@@ -632,11 +632,7 @@ export class LineageStore {
       this.database.prepare("UPDATE logical_turns SET turn_json = '{}' WHERE kind = 'provider'").run();
     }
     if (this.hasTable("provider_switch_jobs")) {
-      this.database.prepare(`
-        UPDATE provider_switch_jobs
-        SET settings_json = '{}', turn_params_json = '{}', compaction_turn_json = '{}'
-        WHERE status IN ('committed', 'failed')
-      `).run();
+      this.database.prepare("DELETE FROM provider_switch_jobs").run();
     }
   }
 

@@ -1059,7 +1059,7 @@ export function attachClientConnection(
           const logicalSource = handoffs.logical?.(forkParams.threadId);
           if (logicalSource && isUserSideFork(forkParams)) {
             const targetThreadId = uuidv7();
-            const snapshot = handoffs.sideSnapshot(forkParams, targetThreadId);
+            const snapshot = await handoffs.sideSnapshot(forkParams, targetThreadId);
             if (snapshot && optimisticSideThreads) {
               openOptimisticSide(
                 message.id,

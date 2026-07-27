@@ -20,7 +20,6 @@ import { RemoteControlHub } from "./remoteControlHub.js";
 import { startRemoteRelay, type RemoteRelay } from "./remoteRelay.js";
 import { remoteControlEnabled } from "./remoteControlMode.js";
 import { CrossProviderForks, HANDOFF_DAEMON_CONNECTION_ID } from "../handoff/service.js";
-import { LineageStore } from "../handoff/lineageStore.js";
 import {
   initializeHandoffPersistence,
   type HandoffPersistence,
@@ -129,15 +128,9 @@ async function startGatewayOwner(
     await abortHandoffStartup();
     throw error;
   }
-  const LineageAwareForks = CrossProviderForks as unknown as new (
-    store: typeof persistence.operational,
-    claude: ClaudeService,
-    renamePrompt: string | null,
-    lineage: LineageStore,
-  ) => CrossProviderForks;
   let handoffs: CrossProviderForks;
   try {
-    handoffs = new LineageAwareForks(
+    handoffs = new CrossProviderForks(
       persistence.operational,
       claude,
       config.renamePrompt ?? null,
