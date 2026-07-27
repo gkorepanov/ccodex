@@ -19,8 +19,12 @@ import { RpcRecorder } from "../observability/rpcRecorder.js";
 import { RemoteControlHub } from "./remoteControlHub.js";
 import { startRemoteRelay, type RemoteRelay } from "./remoteRelay.js";
 import { remoteControlEnabled } from "./remoteControlMode.js";
-import { HandoffStore } from "../handoff/store.js";
 import { CrossProviderForks, HANDOFF_DAEMON_CONNECTION_ID } from "../handoff/service.js";
+import { LineageStore } from "../handoff/lineageStore.js";
+import {
+  initializeHandoffPersistence,
+  type HandoffPersistence,
+} from "../handoff/startupMigration.js";
 import {
   ProviderAvailabilityService,
 } from "../runtime/providerAvailability.js";
@@ -82,12 +86,6 @@ async function startGatewayOwner(
       : undefined,
   );
   await claude.ready();
-  const handoffs = new CrossProviderForks(
-    new HandoffStore(join(config.dataDir, "handoffs.sqlite")),
-    claude,
-    config.renamePrompt ?? null,
-  );
-  handoffs.configureSubscriptions(subscriptions);
   const handoffStock = connectStock(stock.socketPath);
   const handoffStockRpc = new StockRpc(handoffStock);
   const stockSideThreads = new StockSideThreads(
@@ -95,13 +93,14 @@ async function startGatewayOwner(
     handoffStockRpc,
     logger,
   );
+  let activeHandoffs: CrossProviderForks | undefined;
   handoffStock.on("message", (data, isBinary) => {
     const message = isBinary ? undefined : parseRpcMessage(data);
     if (!message || handoffStockRpc.handle(message) || !("method" in message)) return;
-    const internal = handoffs.captureInternalStockMessage(HANDOFF_DAEMON_CONNECTION_ID, message);
+    const internal = activeHandoffs?.captureInternalStockMessage(HANDOFF_DAEMON_CONNECTION_ID, message) ?? false;
     const target = !internal
-      && handoffs.suppressStockTargetMessage(HANDOFF_DAEMON_CONNECTION_ID, message);
-    const projected = !internal && !target && handoffs.projectStockMessage(message);
+      && (activeHandoffs?.suppressStockTargetMessage(HANDOFF_DAEMON_CONNECTION_ID, message) ?? false);
+    const projected = !internal && !target && (activeHandoffs?.projectStockMessage(message) ?? false);
     const side = !internal && !target && !projected
       && stockSideThreads.captureDaemonMessage(message, subscriptions);
     if ((internal || target || side) && !projected && isRequest(message) && handoffStock.readyState === WebSocket.OPEN) {
@@ -109,7 +108,49 @@ async function startGatewayOwner(
       handoffStock.send(JSON.stringify({ id: message.id, result: { decision: "decline" } }));
     }
   });
-  await handoffStockRpc.initialize();
+  const abortHandoffStartup = async (): Promise<void> => {
+    stockSideThreads.close();
+    handoffStockRpc.close(new Error("Gateway startup failed."));
+    if (handoffStock.readyState === WebSocket.OPEN || handoffStock.readyState === WebSocket.CONNECTING) {
+      handoffStock.close();
+    }
+    await claude.close();
+    await stock.stop();
+    rmSync(socketPath, { force: true });
+  };
+  let persistence: HandoffPersistence;
+  try {
+    persistence = await initializeHandoffPersistence(
+      join(config.dataDir, "handoffs.sqlite"),
+      handoffStockRpc,
+      claude,
+    );
+  } catch (error) {
+    await abortHandoffStartup();
+    throw error;
+  }
+  const LineageAwareForks = CrossProviderForks as unknown as new (
+    store: typeof persistence.operational,
+    claude: ClaudeService,
+    renamePrompt: string | null,
+    lineage: LineageStore,
+  ) => CrossProviderForks;
+  let handoffs: CrossProviderForks;
+  try {
+    handoffs = new LineageAwareForks(
+      persistence.operational,
+      claude,
+      config.renamePrompt ?? null,
+      persistence.lineage,
+    );
+  } catch (error) {
+    persistence.lineage.close();
+    persistence.operational.close();
+    await abortHandoffStartup();
+    throw error;
+  }
+  handoffs.configureSubscriptions(subscriptions);
+  activeHandoffs = handoffs;
   handoffs.configureDaemonStock(handoffStockRpc);
   const optimisticSideThreads = new OptimisticSideThreads();
   await stockSideThreads.recover().catch((error: unknown) => {
