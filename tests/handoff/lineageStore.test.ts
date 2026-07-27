@@ -68,6 +68,7 @@ describe("LineageStore", () => {
       publicThreadId: "public",
       currentEpochId: "stock-epoch",
       sessionId: "public-session",
+      createdAt: 1,
       forkedFromId: "parent-public",
     }, {
       epochId: "stock-epoch",
@@ -193,6 +194,7 @@ describe("LineageStore", () => {
       currentEpochId: "claude-epoch",
       revision: 7,
       sessionId: "public-session",
+      createdAt: 1,
       forkedFromId: "parent-public",
     });
     expect(store.listSegments("public")).toMatchObject([
@@ -269,6 +271,7 @@ describe("LineageStore", () => {
       publicThreadId: "source",
       currentEpochId: "source-current",
       sessionId: "source",
+      createdAt: 1,
     }, {
       epochId: "source-current",
       provider: "stock",
@@ -285,6 +288,7 @@ describe("LineageStore", () => {
       publicThreadId: "fork",
       currentEpochId: "fork-current",
       sessionId: "fork",
+      createdAt: 2,
       forkedFromId: "source",
     }, {
       epochId: "fork-current",

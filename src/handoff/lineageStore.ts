@@ -12,6 +12,7 @@ export interface PublicTaskIdentity {
   readonly currentEpochId: string;
   readonly revision: number;
   readonly sessionId: string;
+  readonly createdAt: number;
   readonly forkedFromId?: string;
   readonly parentThreadId?: string;
 }
@@ -109,6 +110,7 @@ interface TaskRow {
   current_epoch_id: string;
   revision: number;
   session_id: string;
+  created_at: number;
   forked_from_id: string | null;
   parent_thread_id: string | null;
 }
@@ -183,10 +185,11 @@ export class LineageStore {
     return this.transaction(() => {
       this.database.prepare(`
         INSERT INTO lineage_tasks (
-          public_thread_id, current_epoch_id, revision, session_id, forked_from_id, parent_thread_id
-        ) VALUES (?, ?, 1, ?, ?, ?)
+          public_thread_id, current_epoch_id, revision, session_id, created_at, forked_from_id, parent_thread_id
+        ) VALUES (?, ?, 1, ?, ?, ?, ?)
       `).run(
         identity.publicThreadId, identity.currentEpochId, identity.sessionId,
+        identity.createdAt,
         identity.forkedFromId ?? null, identity.parentThreadId ?? null,
       );
       this.database.prepare(`
@@ -310,10 +313,11 @@ export class LineageStore {
     return this.transaction(() => {
       this.database.prepare(`
         INSERT INTO lineage_tasks (
-          public_thread_id, current_epoch_id, revision, session_id, forked_from_id, parent_thread_id
-        ) VALUES (?, ?, 1, ?, ?, ?)
+          public_thread_id, current_epoch_id, revision, session_id, created_at, forked_from_id, parent_thread_id
+        ) VALUES (?, ?, 1, ?, ?, ?, ?)
       `).run(
         identity.publicThreadId, identity.currentEpochId, identity.sessionId,
+        identity.createdAt,
         identity.forkedFromId ?? null, identity.parentThreadId ?? null,
       );
       this.database.prepare(`
@@ -504,6 +508,7 @@ export class LineageStore {
         current_epoch_id TEXT NOT NULL,
         revision INTEGER NOT NULL,
         session_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
         forked_from_id TEXT,
         parent_thread_id TEXT
       );
@@ -564,11 +569,12 @@ export class LineageStore {
       const thread = JSON.parse(row.thread_json) as Thread;
       this.database.prepare(`
         INSERT OR IGNORE INTO lineage_tasks (
-          public_thread_id, current_epoch_id, revision, session_id, forked_from_id, parent_thread_id
-        ) VALUES (?, ?, ?, ?, ?, ?)
+          public_thread_id, current_epoch_id, revision, session_id, created_at, forked_from_id, parent_thread_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(
         row.public_thread_id, row.current_epoch_id, row.revision,
-        thread.sessionId || row.public_thread_id, thread.forkedFromId, thread.parentThreadId,
+        thread.sessionId || row.public_thread_id, thread.createdAt,
+        thread.forkedFromId, thread.parentThreadId,
       );
     }
     if (!this.hasTable("provider_epochs")) return;
@@ -673,6 +679,7 @@ export class LineageStore {
         `).run(JSON.stringify({
           id: task.public_thread_id,
           sessionId: task.session_id,
+          createdAt: task.created_at,
           forkedFromId: task.forked_from_id,
           parentThreadId: task.parent_thread_id,
         }), task.public_thread_id);
@@ -719,6 +726,7 @@ export class LineageStore {
       currentEpochId: row.current_epoch_id,
       revision: row.revision,
       sessionId: row.session_id,
+      createdAt: row.created_at,
       ...(row.forked_from_id ? { forkedFromId: row.forked_from_id } : {}),
       ...(row.parent_thread_id ? { parentThreadId: row.parent_thread_id } : {}),
     };
