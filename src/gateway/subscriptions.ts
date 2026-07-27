@@ -207,6 +207,10 @@ export class SubscriptionHub {
     this.emit(threadId, "thread/deleted", { threadId });
     this.hiddenUserMessageTurns.delete(threadId);
   }
+  public publicThreadDeleted(threadId: string): void {
+    this.emitPublic(threadId, "thread/deleted", { threadId });
+    this.hiddenUserMessageTurns.delete(threadId);
+  }
   public hideUserMessages(threadId: string, turnId: string): void {
     const turns = this.hiddenUserMessageTurns.get(threadId) ?? new Set<string>();
     turns.add(turnId);

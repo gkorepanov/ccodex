@@ -32,6 +32,267 @@ function thread(id: string, provider: string, turns: Turn[] = []): Thread {
 }
 
 describe("provider switch service", () => {
+  it("renames the native target before revealing a provider switch", async () => {
+    const source = { ...thread("rename-public", "openai", [turn("rename-source-turn", "source")]), name: "Native title" };
+    const target = { ...thread("rename-claude-target", "claude"), name: null };
+    const targetTurn = turn("rename-target-turn", "target");
+    const order: string[] = [];
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    const hub = new SubscriptionHub();
+    const appEvents: Array<{ method: string; params: unknown }> = [];
+    hub.attach("app", (method, params) => {
+      appEvents.push({ method, params });
+      if (method === "thread/started") order.push("reveal");
+    });
+    const claude = {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: () => false,
+      startHiddenThread: vi.fn(async () => ({ thread: target })),
+      updateThreadSettings: vi.fn(async () => ({})),
+      prepareTurn: vi.fn(async () => ({
+        response: { turn: targetTurn },
+        startAndWait: vi.fn(async () => undefined),
+        announce: vi.fn(async () => undefined),
+      })),
+      setThreadName: vi.fn(async () => { order.push("native-rename"); return {}; }),
+      deleteThread: vi.fn(async () => ({})),
+    };
+    const stock = {
+      request: vi.fn(async (method: string) => {
+        if (method === "thread/read") return { thread: source };
+        if (method === "thread/resume") return {
+          thread: { ...source, turns: [] }, model: "gpt-5.6-sol", modelProvider: "openai",
+          cwd: source.cwd, reasoningEffort: "high",
+        };
+        return {};
+      }),
+    };
+    const service = new CrossProviderForks(store, claude as never);
+    service.configureSubscriptions(hub);
+    (service as unknown as { providerSwitchSummary: () => Promise<string> }).providerSwitchSummary =
+      vi.fn(async () => "portable summary");
+    service.interceptSettings({ threadId: source.id, model: "claude:sonnet" });
+
+    await service.switchProviderTurn({
+      threadId: source.id,
+      model: "claude:sonnet",
+      input: [{ type: "text", text: "continue", text_elements: [] }],
+    }, turn("rename-compact", ""), stock as never, "client", vi.fn());
+
+    expect(claude.setThreadName).toHaveBeenCalledWith({ threadId: target.id, name: source.name });
+    expect(order.indexOf("native-rename")).toBeLessThan(order.indexOf("reveal"));
+    expect(service.logical(source.id)).toMatchObject({
+      logical: { thread: { name: source.name } },
+      epoch: { provider: "claude", backendThreadId: target.id },
+    });
+    expect(appEvents).toContainEqual({
+      method: "thread/name/updated",
+      params: { threadId: source.id, threadName: source.name },
+    });
+    service.close();
+  });
+
+  it("keeps the source projection unchanged when native target rename fails", async () => {
+    const source = { ...thread("rename-failure-public", "openai", [turn("rename-failure-source", "source")]), name: "Source truth" };
+    const target = { ...thread("rename-failure-target", "claude"), name: null };
+    const targetTurn = turn("rename-failure-turn", "target");
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    const hub = new SubscriptionHub();
+    const appEvents: Array<{ method: string; params: unknown }> = [];
+    hub.attach("app", (method, params) => appEvents.push({ method, params }));
+    const claude = {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: () => false,
+      startHiddenThread: vi.fn(async () => ({ thread: target })),
+      updateThreadSettings: vi.fn(async () => ({})),
+      prepareTurn: vi.fn(async () => ({
+        response: { turn: targetTurn },
+        startAndWait: vi.fn(async () => undefined),
+        announce: vi.fn(async () => undefined),
+      })),
+      setThreadName: vi.fn(async () => { throw new Error("native rename unavailable"); }),
+      deleteThread: vi.fn(async () => ({})),
+    };
+    const stock = {
+      request: vi.fn(async (method: string) => {
+        if (method === "thread/read") return { thread: source };
+        if (method === "thread/resume") return {
+          thread: { ...source, turns: [] }, model: "gpt-5.6-sol", modelProvider: "openai",
+          cwd: source.cwd, reasoningEffort: "high",
+        };
+        return {};
+      }),
+    };
+    const service = new CrossProviderForks(store, claude as never);
+    service.configureSubscriptions(hub);
+    (service as unknown as { providerSwitchSummary: () => Promise<string> }).providerSwitchSummary =
+      vi.fn(async () => "portable summary");
+    service.interceptSettings({ threadId: source.id, model: "claude:sonnet" });
+
+    await expect(service.switchProviderTurn({
+      threadId: source.id,
+      model: "claude:sonnet",
+      input: [{ type: "text", text: "must not cut over", text_elements: [] }],
+    }, turn("rename-failure-compact", ""), stock as never, "client", vi.fn()))
+      .rejects.toThrow("native rename unavailable");
+
+    expect(service.logical(source.id)).toMatchObject({
+      logical: { thread: { name: source.name } },
+      epoch: { provider: "stock", backendThreadId: source.id },
+    });
+    expect(claude.deleteThread).toHaveBeenCalledWith(target.id);
+    expect(appEvents.filter(({ method }) => method === "thread/started" || method === "thread/name/updated"))
+      .toEqual([]);
+    expect(store.getProviderSwitchJob("rename-failure-compact")).toMatchObject({ status: "failed" });
+    service.close();
+  });
+
+  it("retries an official sealed-stock archive after restart", async () => {
+    const source = thread("archive-retry-public", "openai", [turn("archive-retry-source", "source")]);
+    const target = thread("archive-retry-target", "claude");
+    const targetTurn = turn("archive-retry-turn", "target");
+    const database = join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite");
+    let store = new HandoffStore(database);
+    const claude = {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: () => false,
+      startHiddenThread: vi.fn(async () => ({ thread: target })),
+      updateThreadSettings: vi.fn(async () => ({})),
+      prepareTurn: vi.fn(async () => ({
+        response: { turn: targetTurn },
+        startAndWait: vi.fn(async () => undefined),
+        announce: vi.fn(async () => undefined),
+      })),
+      deleteThread: vi.fn(async () => ({})),
+    };
+    const firstStock = {
+      request: vi.fn(async (method: string) => {
+        if (method === "thread/read") return { thread: source };
+        if (method === "thread/resume") return {
+          thread: { ...source, turns: [] }, model: "gpt-5.6-sol", modelProvider: "openai",
+          cwd: source.cwd, reasoningEffort: "high",
+        };
+        if (method === "thread/archive") throw new Error("stock archive temporarily unavailable");
+        return {};
+      }),
+    };
+    let service = new CrossProviderForks(store, claude as never);
+    (service as unknown as { providerSwitchSummary: () => Promise<string> }).providerSwitchSummary =
+      vi.fn(async () => "portable summary");
+    service.interceptSettings({ threadId: source.id, model: "claude:sonnet" });
+
+    await service.switchProviderTurn({
+      threadId: source.id,
+      model: "claude:sonnet",
+      input: [{ type: "text", text: "continue", text_elements: [] }],
+    }, turn("archive-retry-compact", ""), firstStock as never, "client", vi.fn());
+
+    expect(firstStock.request).toHaveBeenCalledWith("thread/archive", { threadId: source.id });
+    expect(store.pendingStockArchives()).toMatchObject([{ backendThreadId: source.id, archivePending: true }]);
+    service.close();
+
+    store = new HandoffStore(database);
+    const retryStock = { request: vi.fn(async () => ({})) };
+    service = new CrossProviderForks(store, {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+    } as never);
+    service.configureDaemonStock(retryStock as never);
+    await vi.waitFor(() => expect(store.pendingStockArchives()).toEqual([]));
+
+    expect(retryStock.request).toHaveBeenCalledTimes(1);
+    expect(retryStock.request).toHaveBeenCalledWith("thread/archive", { threadId: source.id });
+    expect(service.logical(source.id)?.epoch).toMatchObject({
+      provider: "claude", backendThreadId: target.id,
+    });
+    service.close();
+  });
+
+  it("resumes a partially failed logical delete and publishes exactly one public tombstone", async () => {
+    const publicThread = thread("delete-public", "openai", [turn("delete-source-turn", "source")]);
+    const claudeTarget = thread("delete-claude-target", "claude");
+    const database = join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite");
+    const store = new HandoffStore(database);
+    store.createLogicalThread({
+      thread: publicThread,
+      epoch: {
+        id: "delete-stock-epoch", provider: "stock", backendThreadId: publicThread.id,
+        model: "gpt-5.6-sol", settings: {},
+      },
+    });
+    const pending = store.stageProviderSwitch({
+      pending: {
+        threadId: publicThread.id, sourceProvider: "stock", targetProvider: "claude",
+        targetModel: "claude:sonnet", settings: { threadId: publicThread.id, model: "claude:sonnet" },
+      },
+      expectedEpochId: "delete-stock-epoch",
+    })!;
+    store.createProviderSwitchJob({
+      id: "delete-switch", publicThreadId: publicThread.id, expectedEpochId: "delete-stock-epoch",
+      pendingRevision: pending.revision!, targetProvider: "claude", targetModel: "claude:sonnet",
+      settings: pending.settings,
+      turnParams: { threadId: publicThread.id, input: [] },
+      compactionTurn: turn("delete-compact", ""),
+    });
+    store.claimProviderSwitchJob("delete-switch");
+    store.checkpointProviderSwitchTarget("delete-switch", {
+      backendThreadId: claudeTarget.id, providerTurnId: "delete-target-turn",
+    });
+    expect(store.commitProviderSwitch({
+      jobId: "delete-switch",
+      targetEpoch: {
+        id: "delete-claude-epoch", provider: "claude", backendThreadId: claudeTarget.id,
+        model: "claude:sonnet", settings: {},
+      },
+      sourceTurns: [],
+      thread: { ...claudeTarget, id: publicThread.id, sessionId: publicThread.sessionId },
+    })).toBeDefined();
+    store.markStockArchived("delete-stock-epoch");
+
+    let claudeDeleteAttempt = 0;
+    const claude = {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      deleteThread: vi.fn(async () => {
+        claudeDeleteAttempt += 1;
+        if (claudeDeleteAttempt === 1) throw new Error("Claude delete temporarily unavailable");
+        return {};
+      }),
+    };
+    const stock = { request: vi.fn(async () => ({})) };
+    const service = new CrossProviderForks(store, claude as never);
+    const hub = new SubscriptionHub();
+    const deleted: Array<{ method: string; params: unknown }> = [];
+    hub.attach("app", (method, params) => {
+      if (method === "thread/deleted") deleted.push({ method, params });
+    });
+    service.configureSubscriptions(hub);
+
+    await expect(service.requestLogical("thread/delete", {
+      threadId: publicThread.id,
+    }, stock as never)).rejects.toThrow("Claude delete temporarily unavailable");
+
+    expect(service.logical(publicThread.id)).toBeDefined();
+    expect(store.listBackendMappings()).toHaveLength(2);
+    expect(store.listEpochs(publicThread.id)).toMatchObject([
+      { backendThreadId: publicThread.id, deleteDone: true },
+      { backendThreadId: claudeTarget.id, deleteDone: false },
+    ]);
+    expect(deleted).toEqual([]);
+
+    await expect(service.requestLogical("thread/delete", {
+      threadId: publicThread.id,
+    }, stock as never)).resolves.toMatchObject({ result: {} });
+
+    expect(stock.request).toHaveBeenCalledTimes(1);
+    expect(stock.request).toHaveBeenCalledWith("thread/delete", { threadId: publicThread.id });
+    expect(claude.deleteThread).toHaveBeenCalledTimes(2);
+    expect(service.logical(publicThread.id)).toBeUndefined();
+    expect(store.listBackendMappings()).toEqual([]);
+    expect(deleted).toEqual([{
+      method: "thread/deleted", params: { threadId: publicThread.id },
+    }]);
+    service.close();
+  });
+
   it("creates a real Claude fork immediately when App selects the latest completed turn", async () => {
     const sourceTurn = turn("claude-source-turn", "source answer");
     const source = thread("claude-source", "claude", [sourceTurn]);

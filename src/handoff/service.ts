@@ -1759,7 +1759,7 @@ export class CrossProviderForks {
       throw new Error(`Logical task '${publicThreadId}' disappeared during deletion.`);
     }
     for (const epoch of epochs) this.subscriptions?.unaliasThread(epoch.backendThreadId);
-    this.subscriptions?.threadDeleted(publicThreadId);
+    this.subscriptions?.publicThreadDeleted(publicThreadId);
   }
 
   private async providerSwitchSource(
