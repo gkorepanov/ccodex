@@ -30,6 +30,7 @@ import { StockRpc } from "./stockRpc.js";
 import { isRequest, parseRpcMessage } from "../protocol/envelopes.js";
 import { StockSideThreads } from "./stockSideThreads.js";
 import { OptimisticSideThreads } from "./optimisticSideThreads.js";
+import { ThreadCatalog } from "./threadList.js";
 
 export interface GatewayServer {
   stop(): Promise<void>;
@@ -114,6 +115,13 @@ async function startGatewayOwner(
   await stockSideThreads.recover().catch((error: unknown) => {
     logger.warn("stock.side.recovery-failed", { error: String(error) });
   });
+  const threadCatalog = new ThreadCatalog(
+    handoffStockRpc,
+    claude,
+    cursors,
+    handoffs,
+    stockSideThreads,
+  );
   const webSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 64 * 1024 * 1024 });
   const connectionCleanups = new Set<Promise<void>>();
   const server = createServer((request, response) => {
@@ -152,6 +160,7 @@ async function startGatewayOwner(
         stockSideThreads,
         features.optimisticSideStartup ? optimisticSideThreads : undefined,
         claudeSkills,
+        threadCatalog,
       );
       connectionCleanups.add(connection.closed);
       const untrack = () => connectionCleanups.delete(connection.closed);

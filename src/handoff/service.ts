@@ -43,6 +43,7 @@ import {
   HandoffStore,
   type NewLogicalTurn,
   type PendingProviderSwitch,
+  type ProviderEpoch,
   type ProviderSwitchJob,
   type ProviderKind,
   type StockHistoryOverlay,
@@ -331,6 +332,7 @@ export class CrossProviderForks {
   private readonly stockServerRequests = new Map<string, string | number>();
   private readonly stockServerRequestAliases = new Map<string, string>();
   private readonly recentDurableProviders = new Map<string, ProviderKind>();
+  private readonly adminTails = new Map<string, Promise<void>>();
   private daemonStock?: StockRpc;
   private subscriptions?: SubscriptionHub;
   private jobTail: Promise<void> = Promise.resolve();
@@ -346,6 +348,7 @@ export class CrossProviderForks {
   public pending(threadId: string): PendingProviderSwitch | undefined { return this.store.getPending(threadId); }
   public logical(threadId: string): ResolvedProviderEpoch | undefined { return this.epochs.resolve(threadId); }
   public hiddenBackendIds(provider?: ProviderKind): Set<string> { return this.epochs.hiddenBackendIds(provider); }
+  public catalogTombstones(): string[] { return this.store.remoteCatalogTombstones(); }
 
   public sideSnapshot(params: ThreadForkParams, targetThreadId: string): ThreadForkResponse | undefined {
     const source = this.epochs.resolve(params.threadId);
@@ -507,6 +510,10 @@ export class CrossProviderForks {
     }
     if (resolved.epoch.provider === "stock") {
       const stock = this.daemonStock ?? clientStock;
+      if (method === "thread/name/set") {
+        const result = await this.withAdminLock(publicThreadId, () => stock.request(method, params));
+        return { provider: "stock", result: projectRpcToPublicThread({ result }, owner).result };
+      }
       if (method === "thread/read" || method === "thread/resume") {
         const result = await stock.request(method, params) as ThreadReadResponse | ThreadResumeResponse;
         const resume = method === "thread/resume" ? params as unknown as ThreadResumeParams : undefined;
@@ -550,9 +557,6 @@ export class CrossProviderForks {
       const result = await stock.request(method, params);
       if (method === "thread/settings/update" || method === "turn/start") {
         this.updateLogicalEpochFromParams(resolved, publicParams);
-      }
-      if (method === "thread/name/set" && typeof publicParams.name === "string") {
-        this.patchLogicalThread(publicThreadId, { name: publicParams.name });
       }
       return {
         provider: "stock",
@@ -628,8 +632,10 @@ export class CrossProviderForks {
       };
     }
     if (method === "thread/name/set") {
-      const result = await this.claude.setThreadName(params as unknown as ThreadSetNameParams);
-      if (typeof publicParams.name === "string") this.patchLogicalThread(publicThreadId, { name: publicParams.name });
+      const result = await this.withAdminLock(
+        publicThreadId,
+        () => this.claude.setThreadName(params as unknown as ThreadSetNameParams),
+      );
       return { provider: "claude", result };
     }
     if (method === "thread/metadata/update") {
@@ -1019,6 +1025,7 @@ export class CrossProviderForks {
     stock: StockRpc,
   ): void {
     this.daemonStock = stock;
+    void this.settlePendingStockArchives(stock);
     for (const job of this.store.recoverableJobs()) {
       const targetId = job.target?.thread && typeof job.target.thread === "object"
         ? (job.target.thread as { id?: unknown }).id
@@ -1116,8 +1123,15 @@ export class CrossProviderForks {
           providerTurnId: prepared.response.turn.id,
         })) throw new Error("Provider switch target delivery lost its durable checkpoint.");
         this.subscriptions?.hideUserMessages(started.thread.id, prepared.response.turn.id);
-        this.commitProviderSwitch(job, started.thread, targetSettings, sourceTurns);
+        const sealed = await this.finalizeProviderSwitch(
+          job,
+          started.thread,
+          targetSettings,
+          sourceTurns,
+          stock,
+        );
         committed = true;
+        await this.archiveSealedStockEpoch(sealed, stock).catch(() => undefined);
         compacted();
         await prepared.announce();
         return;
@@ -1153,8 +1167,15 @@ export class CrossProviderForks {
         providerTurnId: delivered.turn.id,
       })) throw new Error("Provider switch target delivery lost its durable checkpoint.");
       this.subscriptions?.hideUserMessages(started.thread.id, delivered.turn.id);
-      this.commitProviderSwitch(job, started.thread, targetSettings, sourceTurns);
+      const sealed = await this.finalizeProviderSwitch(
+        job,
+        started.thread,
+        targetSettings,
+        sourceTurns,
+        stock,
+      );
       committed = true;
+      await this.archiveSealedStockEpoch(sealed, stock).catch(() => undefined);
       compacted();
       this.flushStockTargetBuild(workerConnectionId);
     } catch (error) {
@@ -1192,7 +1213,14 @@ export class CrossProviderForks {
           stock,
           `${HANDOFF_DAEMON_CONNECTION_ID}:recovery:${job.id}`,
         );
-        this.commitProviderSwitch(job, target, material.targetSettings, material.sourceTurns);
+        const sealed = await this.finalizeProviderSwitch(
+          job,
+          target,
+          material.targetSettings,
+          material.sourceTurns,
+          stock,
+        );
+        await this.archiveSealedStockEpoch(sealed, stock).catch(() => undefined);
         return;
       }
     }
@@ -1697,18 +1725,21 @@ export class CrossProviderForks {
   private async deleteLogicalThread(publicThreadId: string, clientStock: StockRpc): Promise<void> {
     const stock = this.daemonStock ?? clientStock;
     this.store.cancelProviderSwitches(publicThreadId, "Task deleted.");
-    const mappings = this.store.listBackendMappings()
-      .filter((mapping) => mapping.publicThreadId === publicThreadId
-        && !mapping.backendThreadId.startsWith("ccodex-provisional:"));
-    for (const mapping of mappings) this.subscriptions?.suppress(mapping.backendThreadId);
-    this.store.deleteLogicalThread(publicThreadId);
-    this.subscriptions?.threadDeleted(publicThreadId);
-    await Promise.allSettled(mappings.map((mapping) => mapping.provider === "claude"
-      ? this.claude.deleteThread(mapping.backendThreadId)
-      : stock.request("thread/delete", { threadId: mapping.backendThreadId })));
-    for (const mapping of mappings) {
-      this.subscriptions?.unaliasThread(mapping.backendThreadId);
+    const epochs = this.store.listEpochs(publicThreadId)
+      .filter((epoch) => !epoch.backendThreadId.startsWith("ccodex-provisional:"));
+    for (const epoch of epochs) this.subscriptions?.suppress(epoch.backendThreadId);
+    for (const epoch of epochs) {
+      if (epoch.deleteDone) continue;
+      if (epoch.provider === "claude") await this.claude.deleteThread(epoch.backendThreadId);
+      else await stock.request("thread/delete", { threadId: epoch.backendThreadId });
+      this.store.markEpochDeleted(epoch.id);
     }
+    this.store.addRemoteCatalogTombstone(publicThreadId);
+    if (!this.store.deleteLogicalThread(publicThreadId)) {
+      throw new Error(`Logical task '${publicThreadId}' disappeared during deletion.`);
+    }
+    for (const epoch of epochs) this.subscriptions?.unaliasThread(epoch.backendThreadId);
+    this.subscriptions?.threadDeleted(publicThreadId);
   }
 
   private async providerSwitchSource(
@@ -1859,12 +1890,43 @@ export class CrossProviderForks {
     };
   }
 
+  private async finalizeProviderSwitch(
+    job: ProviderSwitchJob,
+    target: Thread,
+    settings: Record<string, unknown>,
+    sourceTurns: NewLogicalTurn[],
+    stock: StockRpc,
+  ): Promise<ProviderEpoch> {
+    return this.withAdminLock(job.publicThreadId, async () => {
+      const source = this.epochs.resolve(job.publicThreadId);
+      if (!source || source.epoch.id !== job.expectedEpochId) {
+        throw new Error("Provider switch source changed before final cutover.");
+      }
+      const sourceThread = source.epoch.provider === "claude"
+        ? this.claude.readThread(source.epoch.backendThreadId, false).thread
+        : (await stock.request("thread/read", {
+            threadId: source.epoch.backendThreadId,
+            includeTurns: false,
+          }) as ThreadReadResponse).thread;
+      let confirmed = target;
+      if (sourceThread.name !== null && target.name !== sourceThread.name) {
+        if (job.targetProvider === "claude") {
+          await this.claude.setThreadName({ threadId: target.id, name: sourceThread.name });
+        } else {
+          await stock.request("thread/name/set", { threadId: target.id, name: sourceThread.name });
+        }
+        confirmed = { ...target, name: sourceThread.name };
+      }
+      return this.commitProviderSwitch(job, confirmed, settings, sourceTurns);
+    });
+  }
+
   private commitProviderSwitch(
     job: ProviderSwitchJob,
     target: Thread,
     settings: Record<string, unknown>,
     sourceTurns: NewLogicalTurn[],
-  ): void {
+  ): ProviderEpoch {
     const logical = this.store.getLogicalThread(job.publicThreadId);
     if (!logical) throw new Error(`Unknown logical thread '${job.publicThreadId}'.`);
     const publicThread: Thread = {
@@ -1874,7 +1936,7 @@ export class CrossProviderForks {
       forkedFromId: logical.thread.forkedFromId,
       parentThreadId: logical.thread.parentThreadId,
       createdAt: logical.thread.createdAt,
-      name: logical.thread.name,
+      name: target.name,
       turns: [],
     };
     const committed = this.store.commitProviderSwitch({
@@ -1893,10 +1955,45 @@ export class CrossProviderForks {
     const source = this.store.getEpoch(job.expectedEpochId)!;
     this.subscriptions?.suppress(source.backendThreadId);
     this.subscriptions?.revealAs(target.id, job.publicThreadId);
+    this.subscriptions?.emitPublic(job.publicThreadId, "thread/started", {
+      thread: this.epochs.projectThread(job.publicThreadId, target, false),
+    });
+    this.subscriptions?.emitPublic(job.publicThreadId, "thread/name/updated", {
+      threadId: job.publicThreadId,
+      ...(target.name === null ? {} : { threadName: target.name }),
+    });
     this.subscriptions?.emitPublic(job.publicThreadId, "thread/settings/updated", {
       threadId: job.publicThreadId,
       threadSettings: settings,
     });
+    return source;
+  }
+
+  private async archiveSealedStockEpoch(epoch: ProviderEpoch, stock: StockRpc): Promise<void> {
+    if (epoch.provider !== "stock" || !epoch.archivePending) return;
+    await stock.request("thread/archive", { threadId: epoch.backendThreadId });
+    this.store.markStockArchived(epoch.id);
+  }
+
+  private async settlePendingStockArchives(stock: StockRpc): Promise<void> {
+    for (const epoch of this.store.pendingStockArchives()) {
+      await this.archiveSealedStockEpoch(epoch, stock).catch(() => undefined);
+    }
+  }
+
+  private async withAdminLock<T>(threadId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.adminTails.get(threadId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => gate);
+    this.adminTails.set(threadId, tail);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.adminTails.get(threadId) === tail) this.adminTails.delete(threadId);
+    }
   }
 
   private async summarizeStock(

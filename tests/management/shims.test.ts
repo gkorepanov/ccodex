@@ -92,6 +92,7 @@ describe("managed CCodex launcher", () => {
         ...process.env,
         HOME: root,
         CCODEX_HOME: home,
+        CCODEX_SHIM_ACTIVE: undefined,
         PATH: [join(home, "bin"), tools, process.env.PATH].join(delimiter),
       },
     });

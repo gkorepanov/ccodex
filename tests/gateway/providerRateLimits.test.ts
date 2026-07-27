@@ -1527,7 +1527,7 @@ describe("provider-aware rate-limit gateway routing", () => {
     } } });
   });
 
-  it("replays the authoritative logical title to a newly connected App client", async () => {
+  it("returns the provider-owned title without fabricating a rename event", async () => {
     const renamed = {
       ...stockThread("public-thread"),
       modelProvider: "claude",
@@ -1552,10 +1552,7 @@ describe("provider-aware rate-limit gateway routing", () => {
     expect(messages(harness, "list")[0]).toMatchObject({
       result: { data: [{ id: renamed.id, name: renamed.name }] },
     });
-    expect(messages(harness, "thread/name/updated")).toContainEqual({
-      method: "thread/name/updated",
-      params: { threadId: renamed.id, threadName: renamed.name },
-    });
+    expect(messages(harness, "thread/name/updated")).toEqual([]);
   });
 
   it("opens a logical Claude /side before provider readiness and queues boundary before Send", async () => {

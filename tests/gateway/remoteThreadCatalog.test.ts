@@ -280,9 +280,11 @@ describe("remote provider-owned thread catalog", () => {
       { method: "thread/name/updated", params: { threadId: stockArchived.id, threadName: stockArchived.name } },
       { method: "thread/name/updated", params: { threadId: publicArchived.id, threadName: publicArchived.name } },
     ]));
+    expect(remoteEvents.filter((event) => event.method === "thread/deleted")).toEqual(expect.arrayContaining([
+      { method: "thread/deleted", params: { threadId: physicalCurrent.id } },
+      { method: "thread/deleted", params: { threadId: physicalSealed.id } },
+    ]));
     expect(remoteEvents.filter((event) => event.method === "thread/archived")).toEqual(expect.arrayContaining([
-      { method: "thread/archived", params: { threadId: physicalCurrent.id } },
-      { method: "thread/archived", params: { threadId: physicalSealed.id } },
       { method: "thread/archived", params: { threadId: publicArchived.id } },
     ]));
 
@@ -291,8 +293,8 @@ describe("remote provider-owned thread catalog", () => {
     expect(catalog.get(publicActive.id)).toEqual({ name: publicActive.name, archived: false });
     expect(catalog.get(stockArchived.id)).toEqual({ name: stockArchived.name, archived: true });
     expect(catalog.get(publicArchived.id)).toEqual({ name: publicArchived.name, archived: true });
-    expect(catalog.get(physicalCurrent.id)).toEqual({ name: null, archived: true });
-    expect(catalog.get(physicalSealed.id)).toEqual({ name: null, archived: true });
+    expect(catalog.has(physicalCurrent.id)).toBe(false);
+    expect(catalog.has(physicalSealed.id)).toBe(false);
   });
 
   it("is idempotent on repeated initialize and converges identically after reconnect", async () => {

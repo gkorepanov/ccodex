@@ -42,7 +42,7 @@ import { providerSkillsList } from "./skillList.js";
 import { StockRpc } from "./stockRpc.js";
 import type { SubscriptionHub } from "./subscriptions.js";
 import type { CursorCodec } from "../protocol/cursor.js";
-import { mergedLoadedList, mergedThreadList } from "./threadList.js";
+import { ThreadCatalog } from "./threadList.js";
 import type { MetricsRegistry } from "../observability/metrics.js";
 import type { RpcRecorder } from "../observability/rpcRecorder.js";
 import type { RemoteControlHub } from "./remoteControlHub.js";
@@ -121,6 +121,7 @@ export function attachClientConnection(
   stockSideThreads?: StockSideThreads,
   optimisticSideThreads?: OptimisticSideThreads,
   claudeSkills?: Pick<ClaudeSkillCatalog, "list">,
+  threadCatalog?: ThreadCatalog,
 ): ClientConnectionHandle {
   const connectionId = uuidv7();
   let resolveClosed!: () => void;
@@ -133,6 +134,13 @@ export function attachClientConnection(
   let connectionAlive = true;
   const stock = connectStock(stockSocket);
   const stockRpc = new StockRpc(stock);
+  const catalog = threadCatalog ?? new ThreadCatalog(
+    stockRpc,
+    claude,
+    cursors,
+    handoffs,
+    stockSideThreads,
+  );
   const stockState = sharedStockState ?? new StockStateTracker();
   const queued: Array<{ data: WebSocket.RawData; isBinary: boolean }> = [];
   const requestStarted = new Map<string, number>();
@@ -142,9 +150,9 @@ export function attachClientConnection(
     systemEphemeral?: ThreadStartParams | ThreadForkParams;
     foreground?: ForegroundProvider;
     clearForeground?: boolean;
+    remoteCatalog?: boolean;
   }>();
   const recentSystemErrors = new Map<string, number>();
-  const knownLogicalNames = new Map<string, string | null>();
   const serverRequestIds = new ServerRequestIds();
   const requestKey = (id: string | number) => `${typeof id}:${id}`;
   const completeLatency = (id: string | number, provider: "stock" | "claude") => {
@@ -157,7 +165,12 @@ export function attachClientConnection(
   const trackForwardedRequest = (message: ReturnType<typeof parseRpcMessage>) => {
     if (!message || !isRequest(message)) return;
     const params = message.params && typeof message.params === "object"
-      ? message.params as { threadId?: unknown; ephemeral?: unknown; threadSource?: unknown }
+      ? message.params as {
+          threadId?: unknown;
+          ephemeral?: unknown;
+          threadSource?: unknown;
+          clientInfo?: { name?: unknown };
+        }
       : undefined;
     const systemEphemeral = (message.method === "thread/start" || message.method === "thread/fork")
       && params?.ephemeral === true
@@ -176,6 +189,9 @@ export function attachClientConnection(
         ? { systemEphemeral: message.params as ThreadStartParams | ThreadForkParams }
         : {}),
       ...(foreground ? { foreground } : {}),
+      ...(message.method === "initialize" && params?.clientInfo?.name === "codex-backend"
+        ? { remoteCatalog: true }
+        : {}),
       ...(["thread/delete", "thread/unsubscribe"].includes(message.method) ? { clearForeground: true } : {}),
     });
   };
@@ -190,24 +206,6 @@ export function attachClientConnection(
     recorder.frame(connectionId, "gateway_to_client", data, false);
     client.send(data);
   };
-  const syncLogicalName = (thread: Thread) => {
-    if (!handoffs.logical?.(thread.id)) return;
-    if (knownLogicalNames.has(thread.id) && knownLogicalNames.get(thread.id) === thread.name) return;
-    knownLogicalNames.set(thread.id, thread.name);
-    sendJson({
-      method: "thread/name/updated",
-      params: { threadId: thread.id, ...(thread.name === null ? {} : { threadName: thread.name }) },
-    });
-  };
-  const syncLogicalNameFromResult = (result: unknown) => {
-    const thread = result && typeof result === "object"
-      ? (result as { thread?: unknown }).thread
-      : undefined;
-    if (thread && typeof thread === "object" && typeof (thread as { id?: unknown }).id === "string") {
-      syncLogicalName(thread as Thread);
-    }
-  };
-
   const emitNotice = (notice: TransientNotice) => {
     for (const notification of notice.notifications) sendJson(notification);
   };
@@ -379,13 +377,6 @@ export function attachClientConnection(
       if (typeof value.threadId === "string" && typeof value.turn?.id === "string"
         && activeClaudeTurns.get(value.threadId) === value.turn.id) {
         activeClaudeTurns.delete(value.threadId);
-      }
-    }
-    if (method === "thread/name/updated" && params && typeof params === "object") {
-      const update = params as { threadId?: unknown; threadName?: unknown };
-      if (typeof update.threadId === "string"
-        && (typeof update.threadName === "string" || update.threadName === null)) {
-        knownLogicalNames.set(update.threadId, update.threadName);
       }
     }
     if (method === "error" && params && typeof params === "object") {
@@ -800,27 +791,12 @@ export function attachClientConnection(
         }
         if (message.method === "account/rateLimits/read" && !foreground) diagnoseUnknownStatus("account/rateLimits/read");
         if (message.method === "thread/list") {
-          const result = await mergedThreadList(
-            (message.params ?? {}) as ThreadListParams,
-            stockRpc,
-            claude,
-            cursors,
-            handoffs,
-            stockSideThreads,
-          );
+          const result = await catalog.list((message.params ?? {}) as ThreadListParams);
           sendResult(message.id, result);
-          for (const thread of result.data) syncLogicalName(thread);
           return;
         }
         if (message.method === "thread/loaded/list") {
-          sendResult(message.id, await mergedLoadedList(
-            (message.params ?? {}) as ThreadLoadedListParams,
-            stockRpc,
-            claude,
-            cursors,
-            handoffs,
-            stockSideThreads,
-          ));
+          sendResult(message.id, await catalog.loaded((message.params ?? {}) as ThreadLoadedListParams));
           return;
         }
         if (message.method === "thread/start") {
@@ -1058,7 +1034,6 @@ export function attachClientConnection(
             stockRpc,
           );
           sendResult(message.id, handled.result);
-          syncLogicalNameFromResult(handled.result);
           selectForeground(handled.provider === "claude" ? "claude" : "codex", params.threadId);
           await handled.after?.();
           return;
@@ -1574,6 +1549,7 @@ export function attachClientConnection(
         message = projection.message;
       }
       let foregroundAfterForward: (() => void) | undefined;
+      let reconcileRemoteAfterForward = false;
       if (message && "method" in message && !("id" in message) && message.method === "remoteControl/status/changed" && remoteControl) {
         remoteControl.intercept(connectionId, notificationSink, message.params);
         return;
@@ -1594,6 +1570,7 @@ export function attachClientConnection(
           emitSystemError(forwarded.threadId, message.error.message);
         }
         if (forwarded && "result" in message) {
+          reconcileRemoteAfterForward = forwarded.remoteCatalog === true;
           const result = message.result && typeof message.result === "object"
             ? message.result as { thread?: { id?: unknown } }
             : undefined;
@@ -1651,6 +1628,13 @@ export function attachClientConnection(
         client.send(outbound, { binary: isBinary && message === incoming });
       }
       foregroundAfterForward?.();
+      if (reconcileRemoteAfterForward) {
+        void catalog.reconcileRemote((method, params) => sendJson({ method, params }))
+          .catch((error: unknown) => logger.error("remote.catalog.reconcile-failed", {
+            connectionId,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+      }
     } catch (error) {
       logger.error("connection.stock.message-failed", {
         connectionId,

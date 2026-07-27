@@ -43,6 +43,8 @@ export interface ProviderEpoch {
   readonly state: ProviderEpochState;
   readonly createdAt: number;
   readonly sealedAt?: number;
+  readonly archivePending?: boolean;
+  readonly deleteDone?: boolean;
 }
 
 export interface LogicalTurn {
@@ -217,6 +219,8 @@ interface ProviderEpochRow {
   state: ProviderEpochState;
   created_at: number;
   sealed_at: number | null;
+  archive_pending: number;
+  delete_done: number;
 }
 
 interface LogicalTurnRow {
@@ -324,6 +328,8 @@ export class HandoffStore {
         state TEXT NOT NULL CHECK(state IN ('current', 'sealed', 'provisional')),
         created_at INTEGER NOT NULL,
         sealed_at INTEGER,
+        archive_pending INTEGER NOT NULL DEFAULT 0,
+        delete_done INTEGER NOT NULL DEFAULT 0,
         UNIQUE(public_thread_id, ordinal),
         UNIQUE(provider, backend_thread_id)
       );
@@ -381,6 +387,10 @@ export class HandoffStore {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS remote_catalog_tombstones (
+        thread_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      );
     `);
     const pendingColumns = this.database.prepare("PRAGMA table_info(pending_provider_switches)")
       .all() as unknown as Array<{ name: string }>;
@@ -399,6 +409,14 @@ export class HandoffStore {
       .all() as unknown as Array<{ name: string }>;
     if (!switchColumns.some((column) => column.name === "compaction_turn_json")) {
       this.database.exec("ALTER TABLE provider_switch_jobs ADD COLUMN compaction_turn_json TEXT");
+    }
+    const epochColumns = this.database.prepare("PRAGMA table_info(provider_epochs)")
+      .all() as unknown as Array<{ name: string }>;
+    if (!epochColumns.some((column) => column.name === "archive_pending")) {
+      this.database.exec("ALTER TABLE provider_epochs ADD COLUMN archive_pending INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!epochColumns.some((column) => column.name === "delete_done")) {
+      this.database.exec("ALTER TABLE provider_epochs ADD COLUMN delete_done INTEGER NOT NULL DEFAULT 0");
     }
     chmodSync(path, 0o600);
   }
@@ -502,6 +520,45 @@ export class HandoffStore {
     return (this.database.prepare(`
       SELECT * FROM provider_epochs WHERE public_thread_id = ? ORDER BY ordinal ASC
     `).all(publicThreadId) as unknown as ProviderEpochRow[]).map((row) => this.epochFromRow(row));
+  }
+
+  public pendingStockArchives(): ProviderEpoch[] {
+    return (this.database.prepare(`
+      SELECT * FROM provider_epochs
+      WHERE provider = 'stock' AND state = 'sealed' AND archive_pending = 1
+      ORDER BY sealed_at ASC
+    `).all() as unknown as ProviderEpochRow[]).map((row) => this.epochFromRow(row));
+  }
+
+  public markStockArchived(epochId: string): boolean {
+    return Number(this.database.prepare(`
+      UPDATE provider_epochs SET archive_pending = 0
+      WHERE epoch_id = ? AND provider = 'stock' AND state = 'sealed'
+    `).run(epochId).changes) === 1;
+  }
+
+  public markEpochDeleted(epochId: string): boolean {
+    return Number(this.database.prepare(`
+      UPDATE provider_epochs SET delete_done = 1 WHERE epoch_id = ?
+    `).run(epochId).changes) === 1;
+  }
+
+  public addRemoteCatalogTombstone(threadId: string): void {
+    this.database.prepare(`
+      INSERT INTO remote_catalog_tombstones(thread_id, created_at) VALUES (?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET created_at = excluded.created_at
+    `).run(threadId, Date.now());
+    this.database.prepare(`
+      DELETE FROM remote_catalog_tombstones WHERE thread_id IN (
+        SELECT thread_id FROM remote_catalog_tombstones ORDER BY created_at DESC LIMIT -1 OFFSET 4096
+      )
+    `).run();
+  }
+
+  public remoteCatalogTombstones(): string[] {
+    return (this.database.prepare(`
+      SELECT thread_id FROM remote_catalog_tombstones ORDER BY created_at ASC
+    `).all() as unknown as Array<{ thread_id: string }>).map((row) => row.thread_id);
   }
 
   public updateCurrentEpoch(
@@ -696,7 +753,8 @@ export class HandoffStore {
         SELECT COALESCE(MAX(ordinal), -1) + 1 AS ordinal FROM provider_epochs WHERE public_thread_id = ?
       `).get(job.publicThreadId) as unknown as { ordinal: number }).ordinal;
       this.database.prepare(`
-        UPDATE provider_epochs SET state = 'sealed', sealed_at = ?
+        UPDATE provider_epochs SET state = 'sealed', sealed_at = ?,
+          archive_pending = CASE WHEN provider = 'stock' THEN 1 ELSE 0 END
         WHERE epoch_id = ? AND public_thread_id = ? AND state = 'current'
       `).run(committedAt, job.expectedEpochId, job.publicThreadId);
       this.insertEpoch(job.publicThreadId, ordinal, input.targetEpoch, "current", committedAt);
@@ -831,7 +889,8 @@ export class HandoffStore {
         SELECT COALESCE(MAX(ordinal), -1) + 1 AS ordinal FROM provider_epochs WHERE public_thread_id = ?
       `).get(target.publicThreadId) as unknown as { ordinal: number }).ordinal;
       this.database.prepare(`
-        UPDATE provider_epochs SET state = 'sealed', sealed_at = ?
+        UPDATE provider_epochs SET state = 'sealed', sealed_at = ?,
+          archive_pending = CASE WHEN provider = 'stock' THEN 1 ELSE 0 END
         WHERE epoch_id = ? AND public_thread_id = ? AND state = 'current'
       `).run(committedAt, current.id, target.publicThreadId);
       this.insertEpoch(target.publicThreadId, ordinal, input.targetEpoch, "current", committedAt);
@@ -1037,6 +1096,8 @@ export class HandoffStore {
       state: row.state,
       createdAt: row.created_at,
       ...(row.sealed_at === null ? {} : { sealedAt: row.sealed_at }),
+      archivePending: row.archive_pending === 1,
+      deleteDone: row.delete_done === 1,
     };
   }
 

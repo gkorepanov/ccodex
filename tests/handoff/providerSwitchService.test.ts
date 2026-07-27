@@ -257,6 +257,7 @@ describe("provider switch service", () => {
     const claude = {
       ownsModel: (model: string) => model.startsWith("claude:"),
       ownsThread: (id: string) => id === source.id || id === hidden.id,
+      readThread: vi.fn((id: string) => ({ thread: id === hidden.id ? hidden : source })),
       handoffSource: vi.fn(async (id: string) => ({
         thread: id === hidden.id ? hidden : source,
         turns: id === hidden.id ? hidden.turns : source.turns,
@@ -393,7 +394,10 @@ describe("provider switch service", () => {
       method: "turn/started",
       params: expect.objectContaining({ threadId: source.id }),
     });
-    expect(projected.some((event) => event.method === "thread/started")).toBe(false);
+    expect(projected).toContainEqual({
+      method: "thread/started",
+      params: { thread: expect.objectContaining({ id: source.id, modelProvider: "openai" }) },
+    });
     expect(projected.some((event) => event.method === "item/started"
       && (event.params as { item?: { type?: string } }).item?.type === "userMessage")).toBe(false);
     const read = await service.requestLogical("thread/read", {
@@ -678,6 +682,7 @@ describe("provider switch service", () => {
     const claude = {
       ownsModel: (model: string) => model.startsWith("claude:"),
       ownsThread: (id: string) => id === source.id || id === hidden.id,
+      readThread: vi.fn((id: string) => ({ thread: id === hidden.id ? hidden : source })),
       handoffSource: vi.fn(async () => ({
         thread: source,
         turns: source.turns,
