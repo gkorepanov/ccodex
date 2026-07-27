@@ -93,7 +93,9 @@ export class ProviderEpochs {
     return {
       ...backend,
       id: publicThreadId,
+      sessionId: base.sessionId,
       forkedFromId: base.forkedFromId,
+      parentThreadId: base.parentThreadId,
       createdAt: base.createdAt,
       turns: includeTurns ? this.visibleTurns(publicThreadId, backend.turns) : [],
     };
