@@ -40,6 +40,7 @@ function record(directory: string): ClaudeThreadRecord {
   return {
     thread: {
       id: "rollback-thread", extra: null, sessionId: randomUUID(), forkedFromId: null, parentThreadId: null,
+      canAcceptDirectInput: true,
       preview: "compacted branch", ephemeral: false, historyMode: "legacy", modelProvider: "claude",
       createdAt: 1, updatedAt: 2, recencyAt: 2, status: { type: "idle" }, path: null, cwd: directory,
       cliVersion: "2.1.209", source: "appServer", threadSource: null, agentNickname: null, agentRole: null,
@@ -52,8 +53,8 @@ function record(directory: string): ClaudeThreadRecord {
     lastClaudeMessageUuid: fixture.appTurns[3]!.boundary, lastCompletedTurnId: fixture.appTurns[3]!.id,
     claudeCodeVersion: "2.1.209", reasoningEffort: "high", reasoningSummary: "detailed",
     collaborationMode: null, outputSchema: null,
-    tokenUsageTotal: { totalTokens: 100, inputTokens: 90, cachedInputTokens: 50, outputTokens: 10, reasoningOutputTokens: 0 },
-    tokenUsageLast: { totalTokens: 20, inputTokens: 18, cachedInputTokens: 10, outputTokens: 2, reasoningOutputTokens: 0 },
+    tokenUsageTotal: { totalTokens: 100, inputTokens: 90, cachedInputTokens: 50, cacheWriteInputTokens: 0, outputTokens: 10, reasoningOutputTokens: 0 },
+    tokenUsageLast: { totalTokens: 20, inputTokens: 18, cachedInputTokens: 10, cacheWriteInputTokens: 0, outputTokens: 2, reasoningOutputTokens: 0 },
     modelContextWindow: 200_000, settingsGeneration: 3,
   };
 }

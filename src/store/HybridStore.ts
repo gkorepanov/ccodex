@@ -7,6 +7,7 @@ import type { ApprovalsReviewer } from "../codex/generated/v2/ApprovalsReviewer.
 
 export interface InternalGoal extends ThreadGoal {
   readonly goalId: string;
+  readonly continuationDeferred?: boolean;
 }
 
 export interface GoalPatch {
@@ -15,6 +16,7 @@ export interface GoalPatch {
   readonly tokenBudget?: number | null;
   readonly replace?: boolean;
   readonly now?: number;
+  readonly continuationDeferred?: boolean;
 }
 
 export interface GoalUsageInput {
@@ -210,7 +212,12 @@ export interface HybridStore {
   setTurnClaudeMessageUuid(threadId: string, turnId: string, messageUuid: string): void;
   getTurnClaudeMessageUuid(threadId: string, turnId: string): string | undefined;
   truncateTurns(threadId: string, keepCount: number): void;
-  commitForkedThread(record: ClaudeThreadRecord, turns: readonly Turn[], boundaries: readonly TurnProviderBoundary[]): void;
+  commitForkedThread(
+    record: ClaudeThreadRecord,
+    turns: readonly Turn[],
+    boundaries: readonly TurnProviderBoundary[],
+    inheritedGoal?: InternalGoal,
+  ): void;
   commitThreadRollback(
     record: ClaudeThreadRecord,
     keepCount: number,

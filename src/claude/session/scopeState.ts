@@ -114,6 +114,7 @@ export function newChildScope(
   const thread = {
     ...parent.thread, id: childThreadId, forkedFromId: parentThreadId, parentThreadId,
     preview: text, createdAt, updatedAt: createdAt, recencyAt: createdAt,
+    canAcceptDirectInput: false,
     status: { type: "active" as const, activeFlags: [] }, path: null,
     source: { subAgent: { thread_spawn: {
       parent_thread_id: parentThreadId, depth: depth + 1, agent_path: null,
@@ -126,7 +127,8 @@ export function newChildScope(
     ...parent, ...model, thread, resolvedModel: model ? null : parent.resolvedModel,
     lastClaudeMessageUuid: null, lastCompletedTurnId: null,
     tokenUsageTotal: {
-      totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0,
+      totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0,
+      outputTokens: 0, reasoningOutputTokens: 0,
     },
     tokenUsageLast: null, modelContextWindow: null, providerCostUsdTotal: 0,
   };

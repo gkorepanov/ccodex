@@ -52,7 +52,7 @@ export async function mapUserInput(input: readonly UserInput[], uuid?: string, c
       const url = new URL(item.url);
       if (url.protocol !== "https:" && url.protocol !== "http:") throw invalidParams(`Unsupported Claude image URL scheme '${url.protocol}'.`);
       content.push({ type: "image", source: { type: "url", url: item.url } });
-    } else {
+    } else if (item.type === "localImage") {
       if (!context) throw invalidParams("Local Claude images require a thread path policy.");
       const path = await allowedImagePath(item.path, context);
       const mediaType = mediaTypes[extname(path).toLocaleLowerCase()];
@@ -62,6 +62,8 @@ export async function mapUserInput(input: readonly UserInput[], uuid?: string, c
         type: "image",
         source: { type: "base64", media_type: mediaType, data: bytes.toString("base64") },
       });
+    } else {
+      throw invalidParams("Audio input is not supported by the pinned Claude runtime.");
     }
   }
   return {

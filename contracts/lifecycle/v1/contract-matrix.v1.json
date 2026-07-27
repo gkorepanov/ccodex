@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "contractVersion": "lifecycle-v1",
   "pinnedVersions": {
-    "codexAppServer": "0.144.6",
+    "codexAppServer": "0.145.0",
     "claudeAgentSdk": "0.3.219",
     "claudeCode": "2.1.219"
   },

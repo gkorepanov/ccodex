@@ -6,6 +6,7 @@ function response(id = "public-side"): ThreadForkResponse {
   return {
     thread: {
       id, extra: null, sessionId: "parent", forkedFromId: "parent", parentThreadId: null,
+      canAcceptDirectInput: true,
       preview: "", ephemeral: true, historyMode: "legacy", modelProvider: "claude",
       createdAt: 1, updatedAt: 1, recencyAt: 1, status: { type: "idle" }, path: null,
       cwd: "/repo", cliVersion: "test", source: "appServer", threadSource: "user",

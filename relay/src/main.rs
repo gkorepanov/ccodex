@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use clap::Subcommand;
-use codex_app_server_protocol::{JSONRPCMessage, ServerNotification, ServerRequest};
+use codex_app_server_protocol::{
+    JSONRPCMessage, ServerNotification, ServerNotificationEnvelope, ServerRequest,
+};
 use codex_app_server_transport::{
     CHANNEL_CAPACITY, ConnectionId, OutgoingError, OutgoingMessage, OutgoingResponse,
     QueuedOutgoingMessage, RemoteControlPolicy, RemoteControlStartConfig, RemoteControlStartupMode,
@@ -55,16 +57,21 @@ async fn shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-fn outgoing_message(message: JSONRPCMessage) -> Result<OutgoingMessage> {
+fn outgoing_message(message: JSONRPCMessage, emitted_at_ms: Option<i64>) -> Result<OutgoingMessage> {
     Ok(match message {
         JSONRPCMessage::Request(request) => OutgoingMessage::Request(
             serde_json::from_value::<ServerRequest>(serde_json::to_value(request)?)
                 .context("gateway emitted an unknown server request")?,
         ),
-        JSONRPCMessage::Notification(notification) => OutgoingMessage::AppServerNotification(
-            serde_json::from_value::<ServerNotification>(serde_json::to_value(notification)?)
+        JSONRPCMessage::Notification(notification) => {
+            OutgoingMessage::AppServerNotification(ServerNotificationEnvelope {
+                notification: serde_json::from_value::<ServerNotification>(serde_json::to_value(
+                    notification,
+                )?)
                 .context("gateway emitted an unknown server notification")?,
-        ),
+                emitted_at_ms,
+            })
+        }
         JSONRPCMessage::Response(response) => OutgoingMessage::Response(OutgoingResponse {
             id: response.id,
             result: response.result,
@@ -102,9 +109,12 @@ async fn bridge_client(
                 let Some(outgoing) = outgoing else { break };
                 match outgoing.context("read hybrid gateway RPC")? {
                     Message::Text(text) => {
-                        let rpc: JSONRPCMessage = serde_json::from_str(text.as_str())
+                        let raw: serde_json::Value = serde_json::from_str(text.as_str())
                             .context("decode hybrid gateway RPC")?;
-                        remote_writer.send(QueuedOutgoingMessage::new(outgoing_message(rpc)?)).await
+                        let emitted_at_ms = raw.get("emittedAtMs").and_then(serde_json::Value::as_i64);
+                        let rpc: JSONRPCMessage = serde_json::from_value(raw)
+                            .context("decode hybrid gateway RPC envelope")?;
+                        remote_writer.send(QueuedOutgoingMessage::new(outgoing_message(rpc, emitted_at_ms)?)).await
                             .context("remote-control client closed")?;
                     }
                     Message::Ping(payload) => gateway_writer.send(Message::Pong(payload)).await
@@ -286,7 +296,7 @@ mod tests {
         let response = outgoing_message(JSONRPCMessage::Response(JSONRPCResponse {
             id: RequestId::Integer(7),
             result: serde_json::json!({"ok": true}),
-        }))
+        }), None)
         .unwrap();
         assert_eq!(
             serde_json::to_value(response).unwrap(),
@@ -300,7 +310,7 @@ mod tests {
                 message: "bad".into(),
                 data: None,
             },
-        }))
+        }), None)
         .unwrap();
         assert_eq!(
             serde_json::to_value(error).unwrap(),
@@ -316,10 +326,14 @@ mod tests {
                 serde_json::json!({"threadId":"019f6232-67f2-7db2-993b-b89f56d2dc97","threadName":"mobile"}),
             ),
         });
-        let outgoing = outgoing_message(notification).unwrap();
+        let outgoing = outgoing_message(notification, Some(1_234)).unwrap();
         assert_eq!(
-            serde_json::to_value(outgoing).unwrap()["method"],
+            serde_json::to_value(&outgoing).unwrap()["method"],
             "thread/name/updated"
+        );
+        assert_eq!(
+            serde_json::to_value(&outgoing).unwrap()["emittedAtMs"],
+            1_234
         );
     }
 

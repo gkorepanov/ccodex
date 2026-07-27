@@ -519,6 +519,7 @@ describe("Claude autonomous continuation lifecycle", () => {
     const record: ClaudeThreadRecord = {
       thread: {
         id: threadId, extra: null, sessionId: threadId, forkedFromId: null, parentThreadId: null,
+        canAcceptDirectInput: true,
         preview: "restart fence", ephemeral: false, historyMode: "legacy",
         modelProvider: "claude", createdAt, updatedAt: createdAt, recencyAt: createdAt,
         status: { type: "active", activeFlags: [] }, path: null, cwd: directory, cliVersion: "test",
@@ -530,7 +531,7 @@ describe("Claude autonomous continuation lifecycle", () => {
       baseInstructions: null, developerInstructions: null, personality: null, resolvedModel: "haiku",
       lastClaudeMessageUuid: randomUUID(), lastCompletedTurnId: null, claudeCodeVersion: "test",
       reasoningEffort: null, reasoningSummary: null, collaborationMode: null, outputSchema: null,
-      tokenUsageTotal: { totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+      tokenUsageTotal: { totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
       tokenUsageLast: null, modelContextWindow: 200_000,
     };
     store.createThread(record);

@@ -171,6 +171,7 @@ export function goalEffects(state: GoalState, context: GoalContext): GoalEffect[
   if (
     !goal
     || goal.status !== "active"
+    || goal.continuationDeferred
     || context.planMode
     || !context.eligible
     || state.pendingNotifications
@@ -257,6 +258,10 @@ export function dispatchGoal(state: GoalState, context: GoalContext, command: Go
   }
   const repository = context.repository;
   if (command.kind === "get") return repository.goal(context.threadId);
+  if (command.kind === "snapshotFork") {
+    flush(state, context, "fork-snapshot", false);
+    return repository.goal(context.threadId);
+  }
   if (command.kind === "recoverRestart") {
     const goal = repository.goal(context.threadId);
     if (goal?.status === "active") {
@@ -367,6 +372,10 @@ export function dispatchGoal(state: GoalState, context: GoalContext, command: Go
       : undefined;
   }
   if (command.kind === "reserveTurn") {
+    const goal = repository.goal(context.threadId);
+    if (goal?.continuationDeferred) {
+      repository.setGoal(context.threadId, { continuationDeferred: false });
+    }
     state.pendingTurns += 1;
     delete state.operation;
     return;

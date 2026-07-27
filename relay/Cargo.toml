@@ -16,12 +16,12 @@ tokio-util = "0.7.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 
-# Exact source revision behind npm @openai/codex 0.144.6 / rust-v0.144.6.
-codex-app-server-protocol = { git = "https://github.com/openai/codex.git", rev = "1e66aaa95b5ab39d3ef3057cd50bdecd576a8356" }
-codex-app-server-transport = { git = "https://github.com/openai/codex.git", rev = "1e66aaa95b5ab39d3ef3057cd50bdecd576a8356" }
-codex-core = { git = "https://github.com/openai/codex.git", rev = "1e66aaa95b5ab39d3ef3057cd50bdecd576a8356" }
-codex-login = { git = "https://github.com/openai/codex.git", rev = "1e66aaa95b5ab39d3ef3057cd50bdecd576a8356" }
-codex-shell-command = { git = "https://github.com/openai/codex.git", rev = "1e66aaa95b5ab39d3ef3057cd50bdecd576a8356" }
+# Exact source revision behind npm @openai/codex 0.145.0 / rust-v0.145.0.
+codex-app-server-protocol = { git = "https://github.com/openai/codex.git", rev = "1635de866c61d1b76e50b31928ee6d61482435a8" }
+codex-app-server-transport = { git = "https://github.com/openai/codex.git", rev = "1635de866c61d1b76e50b31928ee6d61482435a8" }
+codex-core = { git = "https://github.com/openai/codex.git", rev = "1635de866c61d1b76e50b31928ee6d61482435a8" }
+codex-login = { git = "https://github.com/openai/codex.git", rev = "1635de866c61d1b76e50b31928ee6d61482435a8" }
+codex-shell-command = { git = "https://github.com/openai/codex.git", rev = "1635de866c61d1b76e50b31928ee6d61482435a8" }
 
 [dev-dependencies]
 tempfile = "3"

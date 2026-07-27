@@ -1271,6 +1271,61 @@ describe("Claude goal lifecycle", () => {
     await service.close();
   });
 
+  it("inherits a deferred goal into a durable fork and lets the first explicit turn run first", async () => {
+    const root = directory();
+    const path = join(root, "state.sqlite");
+    const store = new SqliteHybridStore(path);
+    const first = new ClaudeService(
+      config(root), new SubscriptionHub(), new Logger("error"), store, new FakeClaudeQuery().factory,
+    );
+    const source = await first.startThread({ model: "claude:haiku", cwd: root });
+    const sourceGoal = store.setGoal(source.thread.id, { objective: "continue after explicit retry", tokenBudget: 10 });
+
+    const fork = await first.forkThread({
+      threadId: source.thread.id,
+      deferGoalContinuation: true,
+    });
+    expect(await first.getGoal(fork.thread.id)).toEqual({
+      goal: expect.objectContaining({
+        threadId: fork.thread.id,
+        objective: sourceGoal.objective,
+        tokensUsed: sourceGoal.tokensUsed,
+        timeUsedSeconds: sourceGoal.timeUsedSeconds,
+      }),
+    });
+    expect(store.getGoal(source.thread.id)).toEqual(sourceGoal);
+    expect(store.getGoal(fork.thread.id)).toMatchObject({
+      goalId: sourceGoal.goalId,
+      continuationDeferred: true,
+    });
+    await expect(first.forkThread({
+      threadId: source.thread.id, ephemeral: true, deferGoalContinuation: true,
+    })).rejects.toThrow("cannot be combined");
+    await first.close();
+
+    const fake = new FakeClaudeQuery();
+    const reopenedStore = new SqliteHybridStore(path);
+    const resumed = new ClaudeService(
+      config(root), new SubscriptionHub(), new Logger("error"), reopenedStore, fake.factory,
+    );
+    await resumed.resumeThread(fork.thread.id);
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(fake.prompts).toHaveLength(0);
+
+    const explicit = await resumed.prepareTurn({
+      threadId: fork.thread.id,
+      input: [{ type: "text", text: "explicit retry", text_elements: [] }],
+    });
+    explicit.announce();
+    explicit.start();
+    await waitFor(() => fake.prompts.length >= 2, "deferred goal continuation after explicit turn");
+    expect(JSON.stringify(fake.prompts[0])).toContain("explicit retry");
+    expect(JSON.stringify(fake.prompts[1])).toContain("Continue working toward the active thread goal");
+    expect(reopenedStore.getGoal(fork.thread.id)?.continuationDeferred).toBe(false);
+    expect(reopenedStore.getGoal(source.thread.id)).toEqual(sourceGoal);
+    await resumed.close();
+  });
+
   it("persists goal identity and rejects stale usage after replacement", () => {
     const root = directory();
     const path = join(root, "state.sqlite");
@@ -1279,6 +1334,7 @@ describe("Claude goal lifecycle", () => {
     store.createThread({
       thread: {
         id: "thread", extra: null, sessionId: "session", forkedFromId: null, parentThreadId: null,
+        canAcceptDirectInput: true,
         preview: "", ephemeral: false, historyMode: "legacy", modelProvider: "claude", createdAt: now,
         updatedAt: now, recencyAt: now, status: { type: "idle" }, path: null, cwd: root,
         cliVersion: "test", source: "appServer", threadSource: null, agentNickname: null, agentRole: null,
@@ -1289,7 +1345,7 @@ describe("Claude goal lifecycle", () => {
       sandboxPolicy: { type: "workspaceWrite" }, baseInstructions: null, developerInstructions: null,
       personality: null, resolvedModel: null, lastClaudeMessageUuid: null, lastCompletedTurnId: null,
       claudeCodeVersion: null, reasoningEffort: null, reasoningSummary: null, collaborationMode: null,
-      outputSchema: null, tokenUsageTotal: { totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+      outputSchema: null, tokenUsageTotal: { totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
       tokenUsageLast: null, modelContextWindow: null,
     });
     const original = store.setGoal("thread", { objective: "old", tokenBudget: 100 });

@@ -10,6 +10,7 @@ import {
 function thread(): Thread {
   return {
     id: "thread-1", extra: null, sessionId: "session-1", forkedFromId: null, parentThreadId: null,
+    canAcceptDirectInput: true,
     preview: "hello", ephemeral: false, historyMode: "paginated", modelProvider: "openai",
     createdAt: 1_700_000_000, updatedAt: 1_700_007_200, recencyAt: 1_700_007_200,
     status: { type: "idle" }, path: null, cwd: "/tmp", cliVersion: "0.144.4",
@@ -84,11 +85,11 @@ describe("CCodex state command", () => {
       thread: thread(),
       tokenUsage: {
         total: {
-          totalTokens: 412_000, inputTokens: 312_000, cachedInputTokens: 277_680,
+          totalTokens: 412_000, inputTokens: 312_000, cachedInputTokens: 277_680, cacheWriteInputTokens: 0,
           outputTokens: 100_000, reasoningOutputTokens: 20_000,
         },
         last: {
-          totalTokens: 68_000, inputTokens: 60_000, cachedInputTokens: 50_000,
+          totalTokens: 68_000, inputTokens: 60_000, cachedInputTokens: 50_000, cacheWriteInputTokens: 0,
           outputTokens: 8_000, reasoningOutputTokens: 1_000,
         },
         modelContextWindow: 200_000,

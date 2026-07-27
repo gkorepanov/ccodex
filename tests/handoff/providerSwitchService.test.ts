@@ -25,7 +25,7 @@ function turn(id: string, text: string): Turn {
 
 function thread(id: string, provider: string, turns: Turn[] = []): Thread {
   return {
-    id, extra: null, sessionId: id, forkedFromId: null, parentThreadId: null,
+    id, extra: null, sessionId: id, forkedFromId: null, parentThreadId: null, canAcceptDirectInput: true,
     preview: "hello", ephemeral: false, historyMode: "legacy", modelProvider: provider,
     createdAt: 1, updatedAt: 2, recencyAt: 2, status: { type: "idle" }, path: null,
     cwd: "/tmp/project", cliVersion: "test", source: "cli", threadSource: "user",

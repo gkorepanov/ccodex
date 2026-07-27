@@ -210,6 +210,7 @@ export type PreparedGoalMutation =
 
 export type GoalSessionCommand =
   | { readonly kind: "get" }
+  | { readonly kind: "snapshotFork" }
   | { readonly kind: "prepareSet"; readonly params: ThreadGoalSetParams }
   | { readonly kind: "prepareClear" }
   | { readonly kind: "finalize"; readonly mutation: PreparedGoalMutation }
@@ -367,6 +368,7 @@ export type ClaudeSessionCommand =
     readonly turns: readonly Turn[];
     readonly sourceBoundaries: readonly TurnProviderBoundary[];
     readonly uuidMap: readonly (readonly [string, string])[];
+    readonly inheritedGoal?: InternalGoal;
   }
   | {
     readonly type: "commitRollback";

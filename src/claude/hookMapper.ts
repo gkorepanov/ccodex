@@ -7,6 +7,7 @@ const eventNames = {
   PreCompact: "preCompact",
   PostCompact: "postCompact",
   SessionStart: "sessionStart",
+  SessionEnd: "sessionEnd",
   UserPromptSubmit: "userPromptSubmit",
   SubagentStart: "subagentStart",
   SubagentStop: "subagentStop",

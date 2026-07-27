@@ -5,6 +5,7 @@ export function addUsage(left: TokenUsageBreakdown, right: TokenUsageBreakdown):
     totalTokens: left.totalTokens + right.totalTokens,
     inputTokens: left.inputTokens + right.inputTokens,
     cachedInputTokens: left.cachedInputTokens + right.cachedInputTokens,
+    cacheWriteInputTokens: left.cacheWriteInputTokens + right.cacheWriteInputTokens,
     outputTokens: left.outputTokens + right.outputTokens,
     reasoningOutputTokens: left.reasoningOutputTokens + right.reasoningOutputTokens,
   };

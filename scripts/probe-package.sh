@@ -48,11 +48,11 @@ UPDATE_RESULT="$WORK/update-version.txt"
 UPDATE_WAITER=$!
 "$ROOT/scripts/install-local.sh" "$PREFIX" >/dev/null
 wait "$UPDATE_WAITER"
-grep -q '^codex-cli 0\.144\.6$' "$UPDATE_RESULT"
+grep -q '^codex-cli 0\.145\.0$' "$UPDATE_RESULT"
 
 run_hybrid env \
   CODEX_HYBRID_CLI="$CLI" \
-  CODEX_HYBRID_EXPECT_CODEX_VERSION="0.144.6" \
+  CODEX_HYBRID_EXPECT_CODEX_VERSION="0.145.0" \
   node "$ROOT/scripts/probe-daemon.mjs"
 
 run_hybrid node "$ROOT/scripts/probe-claude-options.mjs"
@@ -61,7 +61,7 @@ run_hybrid "$CLI" app-server daemon bootstrap --remote-control >/dev/null
 run_hybrid env \
   CODEX_HYBRID_PROXY_COMMAND="$CLI app-server proxy" \
   CODEX_HYBRID_PROBE_CWD="$ROOT" \
-  CODEX_HYBRID_TEST_MODEL="claude:claude-fable-5" \
+  CODEX_HYBRID_TEST_MODEL="claude:sonnet" \
   CODEX_HYBRID_TEST_PERMISSIONS=":danger-full-access" \
   CODEX_HYBRID_TEST_EFFORT="xhigh" \
   node "$ROOT/scripts/probe-proxy.mjs"
@@ -82,4 +82,4 @@ INSTALLED=0
 test ! -e "$PREFIX/bin/codex-hybrid"
 test "$(realpath "$PREFIX/bin/codex")" = "$(realpath "$REAL_CODEX")"
 
-printf '%s\n' '{"packageGate":true,"codexVersion":"0.144.6"}'
+printf '%s\n' '{"packageGate":true,"codexVersion":"0.145.0"}'

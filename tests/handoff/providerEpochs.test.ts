@@ -20,7 +20,7 @@ function thread(id: string, turns: Turn[]): Thread {
     id, extra: null, preview: "preview", ephemeral: false, historyMode: "legacy", modelProvider: "openai", createdAt: 1,
     updatedAt: 2, status: { type: "idle" }, cwd: "/tmp", cliVersion: "test",
     source: "cli", agentNickname: null, agentRole: null, name: "Source", turns,
-    recencyAt: 2, forkedFromId: null, parentThreadId: null, threadSource: "user",
+    recencyAt: 2, forkedFromId: null, parentThreadId: null, canAcceptDirectInput: true, threadSource: "user",
     sessionId: id, path: null, gitInfo: null,
   };
 }

@@ -1217,6 +1217,96 @@ describe("ClaudeService", () => {
       nextCursor: null,
       backwardsCursor: "hyb-turn:0",
     });
+    expect(resumed).toMatchObject({ turnsBackwardsCursor: "hyb-turn:0", itemsBackwardsCursor: "hyb-item:0" });
+    expect(service.listItems({ threadId: started.thread.id })).toEqual({
+      data: [
+        { turnId: expect.any(String), item: expect.objectContaining({ type: "userMessage" }) },
+        { turnId: expect.any(String), item: expect.objectContaining({ type: "agentMessage" }) },
+      ],
+      nextCursor: null,
+      backwardsCursor: "hyb-item:0",
+    });
+    await service.close();
+  });
+
+  it("searches visible Claude messages with UTF-16 ranges and deterministic pagination", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-search-"));
+    directories.push(directory);
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), store, new FakeClaudeQuery().factory,
+    );
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const turnId = randomUUID();
+    store.createTurn(started.thread.id, {
+      id: turnId, itemsView: "full", status: "completed", error: null,
+      startedAt: 1, completedAt: 2, durationMs: 1_000,
+      items: [
+        { type: "userMessage", id: "user", clientId: null, content: [{ type: "text", text: "😀 Needle", text_elements: [] }] },
+        { type: "agentMessage", id: "commentary", text: "needle hidden", phase: "commentary", memoryCitation: null },
+        { type: "agentMessage", id: "answer", text: "second NEEDLE", phase: "final_answer", memoryCitation: null },
+      ],
+    });
+
+    const first = service.searchOccurrences({ threadId: started.thread.id, searchTerm: "needle", limit: 1 });
+    expect(first).toEqual({
+      data: [{
+        turnId, itemId: "user", snippet: "😀 Needle",
+        snippetMatchRange: { start: 3, end: 9 }, turnCursor: "hyb-turn:0",
+      }],
+      nextCursor: "hyb-search:1",
+    });
+    expect(service.searchOccurrences({
+      threadId: started.thread.id, searchTerm: "needle", cursor: first.nextCursor, limit: 1,
+    })).toEqual({
+      data: [{
+        turnId, itemId: "answer", snippet: "second NEEDLE",
+        snippetMatchRange: { start: 7, end: 13 }, turnCursor: "hyb-turn:0",
+      }],
+      nextCursor: null,
+    });
+    await service.close();
+  });
+
+  it("forks strictly before a selected active turn without touching the source", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-before-turn-"));
+    directories.push(directory);
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    const transcriptCalls: string[] = [];
+    const transcripts: TranscriptBrancher = {
+      forkWithProvenance: async (_source, boundary, _cwd, expected) => {
+        transcriptCalls.push(boundary);
+        return { sessionId: randomUUID(), uuidMap: new Map(expected.map((uuid) => [uuid, randomUUID()])) };
+      },
+      resolveCompactionBoundary: async (_sessionId, _cwd, boundary) => boundary.uuid,
+      delete: async () => undefined,
+    };
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), store,
+      new FakeClaudeQuery().factory, undefined, undefined, transcripts,
+    );
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const completed: Turn = {
+      id: "turn-a", items: [], itemsView: "full", status: "completed", error: null,
+      startedAt: 1, completedAt: 2, durationMs: 1_000,
+    };
+    const active: Turn = {
+      id: "turn-b", items: [{ type: "agentMessage", id: "partial", text: "partial", phase: "commentary", memoryCitation: null }],
+      itemsView: "full", status: "inProgress", error: null, startedAt: 3, completedAt: null, durationMs: null,
+    };
+    store.createTurn(started.thread.id, completed);
+    store.createTurn(started.thread.id, active);
+    store.setTurnClaudeMessageUuid(started.thread.id, completed.id, "message-a");
+
+    const fork = await service.forkThread({ threadId: started.thread.id, beforeTurnId: active.id });
+    expect(fork.thread.turns.map((turn) => turn.id)).toEqual([completed.id]);
+    expect(service.readThread(started.thread.id, true).thread.turns).toEqual([completed, active]);
+    expect(transcriptCalls).toEqual(["message-a"]);
+    await expect(service.forkThread({
+      threadId: started.thread.id, lastTurnId: completed.id, beforeTurnId: active.id,
+    })).rejects.toThrow("cannot be combined");
+    await expect(service.forkThread({ threadId: started.thread.id, beforeTurnId: "missing" }))
+      .rejects.toThrow("Unknown Claude turn");
     await service.close();
   });
 
@@ -1227,6 +1317,7 @@ describe("ClaudeService", () => {
     const seed = new SqliteHybridStore(database);
     const thread = {
       id: "crashed-thread", extra: null, sessionId: "codex-session", forkedFromId: null, parentThreadId: null,
+      canAcceptDirectInput: true,
       preview: "crash", ephemeral: false, historyMode: "legacy" as const, modelProvider: "claude",
       createdAt: 1, updatedAt: 1, recencyAt: 1, status: { type: "active" as const, activeFlags: [] },
       path: null, cwd: directory, cliVersion: "test", source: "appServer" as const, threadSource: null,
@@ -1239,7 +1330,7 @@ describe("ClaudeService", () => {
       baseInstructions: null, developerInstructions: null, personality: null, resolvedModel: null,
       lastClaudeMessageUuid: null, lastCompletedTurnId: null, claudeCodeVersion: null,
       reasoningEffort: null, reasoningSummary: null, collaborationMode: null, outputSchema: null,
-      tokenUsageTotal: { totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+      tokenUsageTotal: { totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
       tokenUsageLast: null, modelContextWindow: null,
     });
     seed.createTurn(thread.id, {
@@ -3747,11 +3838,17 @@ describe("ClaudeService", () => {
     expect(childThreadId).toMatch(/^[0-9a-f-]{36}$/);
     const children = service.listThreads({ limit: 100, parentThreadId: started.thread.id });
     expect(children).toHaveLength(1);
-    expect(children[0]).toMatchObject({ id: childThreadId, parentThreadId: started.thread.id, threadSource: "subagent", status: { type: "idle" } });
+    expect(children[0]).toMatchObject({
+      id: childThreadId, parentThreadId: started.thread.id, canAcceptDirectInput: false,
+      threadSource: "subagent", status: { type: "idle" },
+    });
     const child = await service.resumeThread({
       threadId: childThreadId!,
       initialTurnsPage: { limit: 20, sortDirection: "desc", itemsView: "full" },
     });
+    expect(child.thread.canAcceptDirectInput).toBe(false);
+    expect(service.readThread(childThreadId!, false).thread.canAcceptDirectInput).toBe(false);
+    expect(started.thread.canAcceptDirectInput).toBe(true);
     expect(child.initialTurnsPage?.data[0]).toMatchObject({
       status: "completed",
       items: expect.arrayContaining([

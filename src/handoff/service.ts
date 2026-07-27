@@ -298,7 +298,9 @@ function pageItems(turns: Turn[], params: ThreadItemsListParams): ThreadItemsLis
   if (params.cursor && !params.cursor.startsWith("hyb-overlay-item:")) throw invalidParams("Invalid handoff item cursor.");
   const offset = params.cursor ? Number(params.cursor.slice("hyb-overlay-item:".length)) : 0;
   if (!Number.isInteger(offset) || offset < 0) throw invalidParams("Invalid handoff item cursor.");
-  const items = turns.flatMap((turn) => params.turnId && turn.id !== params.turnId ? [] : turn.items);
+  const items = turns.flatMap((turn) => params.turnId && turn.id !== params.turnId
+    ? []
+    : turn.items.map((item) => ({ turnId: turn.id, item })));
   const ordered = params.sortDirection === "desc" ? [...items].reverse() : items;
   const limit = Math.max(1, Math.min(params.limit ?? 50, 100));
   const data = ordered.slice(offset, offset + limit);

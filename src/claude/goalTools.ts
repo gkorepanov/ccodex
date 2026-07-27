@@ -68,7 +68,7 @@ The system has marked the goal as budget_limited, so do not start new substantiv
 Do not call update_goal unless the goal is actually complete.`;
 
 export function publicGoal(goal: InternalGoal): ThreadGoal {
-  const { goalId: _goalId, ...value } = goal;
+  const { goalId: _goalId, continuationDeferred: _continuationDeferred, ...value } = goal;
   return value;
 }
 

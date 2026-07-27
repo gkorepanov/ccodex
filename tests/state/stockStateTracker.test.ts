@@ -5,6 +5,7 @@ import { StockStateTracker } from "../../src/state/stockStateTracker.js";
 function thread(): Thread {
   return {
     id: "stock-1", extra: null, sessionId: "stock-1", forkedFromId: null, parentThreadId: null,
+    canAcceptDirectInput: true,
     preview: "", ephemeral: false, historyMode: "paginated", modelProvider: "openai",
     createdAt: 1, updatedAt: 1, recencyAt: 1, status: { type: "idle" }, path: null,
     cwd: "/tmp", cliVersion: "0.144.4", source: "appServer", threadSource: "user",

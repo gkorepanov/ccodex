@@ -189,10 +189,16 @@ export class MemoryHybridStore implements HybridStore {
     for (const turn of turns.slice(keepCount)) this.turnMessages.delete(`${threadId}:${turn.id}`);
     this.turns.set(threadId, turns.slice(0, keepCount));
   }
-  public commitForkedThread(record: ClaudeThreadRecord, turns: readonly Turn[], boundaries: readonly TurnProviderBoundary[]): void {
+  public commitForkedThread(
+    record: ClaudeThreadRecord,
+    turns: readonly Turn[],
+    boundaries: readonly TurnProviderBoundary[],
+    inheritedGoal?: InternalGoal,
+  ): void {
     this.createThread(record);
     for (const turn of turns) this.createTurn(record.thread.id, turn);
     for (const boundary of boundaries) this.setTurnClaudeMessageUuid(record.thread.id, boundary.turnId, boundary.messageUuid);
+    if (inheritedGoal) this.goals.set(record.thread.id, copy(inheritedGoal));
   }
   public commitThreadRollback(
     record: ClaudeThreadRecord,
@@ -371,6 +377,11 @@ export class MemoryHybridStore implements HybridStore {
       timeUsedSeconds: replace ? 0 : previous.timeUsedSeconds,
       createdAt: replace ? now : previous.createdAt,
       updatedAt: now,
+      ...(patch.continuationDeferred !== undefined
+        ? { continuationDeferred: patch.continuationDeferred }
+        : previous?.continuationDeferred !== undefined
+          ? { continuationDeferred: previous.continuationDeferred }
+          : {}),
     };
     if (goal.status === "active" && goal.tokenBudget !== null && goal.tokensUsed >= goal.tokenBudget) goal.status = "budgetLimited";
     this.goals.set(threadId, copy(goal));
@@ -472,8 +483,14 @@ export class LayeredHybridStore implements HybridStore {
     return this.owner(threadId).getTurnClaudeMessageUuid(threadId, turnId);
   }
   public truncateTurns(threadId: string, keepCount: number): void { this.owner(threadId).truncateTurns(threadId, keepCount); }
-  public commitForkedThread(record: ClaudeThreadRecord, turns: readonly Turn[], boundaries: readonly TurnProviderBoundary[]): void {
-    (this.persistent(record) ? this.durable : this.ephemeral).commitForkedThread(record, turns, boundaries);
+  public commitForkedThread(
+    record: ClaudeThreadRecord,
+    turns: readonly Turn[],
+    boundaries: readonly TurnProviderBoundary[],
+    inheritedGoal?: InternalGoal,
+  ): void {
+    (this.persistent(record) ? this.durable : this.ephemeral)
+      .commitForkedThread(record, turns, boundaries, inheritedGoal);
   }
   public commitThreadRollback(
     record: ClaudeThreadRecord,

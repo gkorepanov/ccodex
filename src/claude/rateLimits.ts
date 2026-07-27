@@ -77,6 +77,7 @@ export interface ClaudeRateLimitSnapshot {
   secondary: ClaudeRateLimitWindow | null;
   credits: null;
   individualLimit: null;
+  spendControlReached: null;
   planType: "pro" | "team" | "enterprise" | "unknown";
   rateLimitReachedType: "rate_limit_reached" | null;
 }
@@ -134,7 +135,8 @@ function snapshot(
   planType: ClaudeRateLimitSnapshot["planType"],
 ): ClaudeRateLimitSnapshot {
   return {
-    limitId, limitName, primary, secondary, credits: null, individualLimit: null, planType, rateLimitReachedType: null,
+    limitId, limitName, primary, secondary, credits: null, individualLimit: null,
+    planType, rateLimitReachedType: null, spendControlReached: null,
   };
 }
 

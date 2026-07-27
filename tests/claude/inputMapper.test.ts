@@ -32,6 +32,13 @@ describe("mapUserInput", () => {
     expect((mapped.message.content as Array<{ source?: { url?: string } }>)[0]?.source?.url).toBe("https://example.com/image.png");
   });
 
+  it("rejects audio explicitly instead of treating it as a local image", async () => {
+    await expect(mapUserInput([{ type: "audio", url: "https://example.com/audio.wav" }]))
+      .rejects.toThrow("Audio input is not supported by the pinned Claude runtime");
+    await expect(mapUserInput([{ type: "localAudio", path: "audio.wav" }]))
+      .rejects.toThrow("Audio input is not supported by the pinned Claude runtime");
+  });
+
   it("stamps only App-authored input as human", async () => {
     const human = await mapUserInput(
       [{ type: "text", text: "hello", text_elements: [] }],

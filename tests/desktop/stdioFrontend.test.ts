@@ -118,9 +118,19 @@ describe("desktop stdio frontend", () => {
     await waitFor(() => text().includes('{"id":1,"result":{}}\n'));
     input.write('{"id":2,"method":"model/list"}\n');
     await waitFor(() => text().includes('{"id":2,"result":{"echoed":"model/list"}}\n'));
+    const voice = {
+      id: 3, method: "thread/realtime/start", params: {
+        threadId: "stock-voice", version: "v3", outputModality: "audio",
+        codexResponseHandoffMode: "commentary",
+        initialItems: [{ role: "user", text: "voice context" }],
+      },
+    };
+    input.write(`${JSON.stringify(voice)}\n`);
+    await waitFor(() => text().includes('{"id":3,"result":{"echoed":"thread/realtime/start"}}\n'));
     expect(gateway.received.map((line) => JSON.parse(line))).toEqual([
       { id: 1, method: "initialize" },
       { id: 2, method: "model/list" },
+      voice,
     ]);
 
     input.end();

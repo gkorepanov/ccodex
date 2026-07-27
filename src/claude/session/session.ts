@@ -159,6 +159,7 @@ function usageBreakdown(usage: ClaudeIterationUsage): TokenUsageBreakdown {
     totalTokens: inputTokens + usage.output_tokens,
     inputTokens,
     cachedInputTokens: usage.cache_read_input_tokens,
+    cacheWriteInputTokens: usage.cache_creation_input_tokens,
     outputTokens: usage.output_tokens,
     reasoningOutputTokens: 0,
   };
@@ -187,6 +188,7 @@ function residentBreakdown(
     totalTokens,
     inputTokens,
     cachedInputTokens: Math.min(iteration?.cache_read_input_tokens ?? 0, inputTokens),
+    cacheWriteInputTokens: Math.min(iteration?.cache_creation_input_tokens ?? 0, inputTokens),
     outputTokens,
     reasoningOutputTokens: 0,
   };
@@ -4305,7 +4307,16 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           lastClaudeMessageUuid: boundaries.at(-1)?.messageUuid ?? null,
           lastCompletedTurnId: command.turns.findLast((turn) => turn.status === "completed")?.id ?? null,
         };
-        this.repository.commitFork(record, command.turns, boundaries);
+        this.repository.commitFork(
+          record,
+          command.turns,
+          boundaries,
+          command.inheritedGoal && {
+            ...command.inheritedGoal,
+            threadId: this.threadId,
+            continuationDeferred: true,
+          },
+        );
         this.record = record;
         this.lastPublishedUsage = this.usageKey(record);
         return record;

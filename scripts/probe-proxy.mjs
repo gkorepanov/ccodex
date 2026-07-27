@@ -13,7 +13,7 @@ const permissions = process.env.CODEX_HYBRID_TEST_PERMISSIONS;
 const approvalPolicy = process.env.CODEX_HYBRID_TEST_APPROVAL_POLICY ?? "never";
 const sandbox = process.env.CODEX_HYBRID_TEST_SANDBOX ?? "read-only";
 const approvalsReviewer = process.env.CODEX_HYBRID_TEST_APPROVALS_REVIEWER;
-const prompt = process.env.CODEX_HYBRID_TEST_PROMPT ?? "Reply with exactly SSH_PROXY_OK.";
+const prompt = process.env.CODEX_HYBRID_TEST_PROMPT ?? "Reply with exactly this token and nothing else: SSH_PROXY_OK";
 const expectedText = process.env.CODEX_HYBRID_EXPECT_TEXT ?? "SSH_PROXY_OK";
 const expectedCommand = process.env.CODEX_HYBRID_EXPECT_COMMAND === "1";
 const rejectedModel = process.env.CODEX_HYBRID_EXPECT_REJECTED_MODEL;
@@ -163,8 +163,10 @@ try {
         : notifications
             .filter((message) => message.method === "item/completed" && message.params?.turnId === running.turn.id)
             .map((message) => message.params.item);
-      assert.ok(completedItems.some((item) =>
-        item.type === "agentMessage" && item.text.trim() === expectedText));
+      assert.ok(
+        completedItems.some((item) => item.type === "agentMessage" && item.text.trim() === expectedText),
+        `Expected exact agent text ${JSON.stringify(expectedText)}; received ${JSON.stringify(completedItems)}`,
+      );
       if (expectedCommand) {
         assert.ok(completedItems.some((item) => item.type === "commandExecution" && item.status === "completed" && item.exitCode === 0));
       }

@@ -22,9 +22,9 @@ function path(): string {
 
 function thread(id: string): Thread {
   return {
-    id, extra: null, sessionId: id, forkedFromId: null, parentThreadId: null, preview: "hello",
+    id, extra: null, sessionId: id, forkedFromId: null, parentThreadId: null, canAcceptDirectInput: true, preview: "hello",
     ephemeral: false, historyMode: "legacy", modelProvider: "openai", createdAt: 1, updatedAt: 1,
-    recencyAt: 1, status: { type: "idle" }, path: null, cwd: "/tmp", cliVersion: "0.144.6",
+    recencyAt: 1, status: { type: "idle" }, path: null, cwd: "/tmp", cliVersion: "0.145.0",
     source: "appServer", threadSource: null, agentNickname: null, agentRole: null, gitInfo: null,
     name: "logical", turns: [],
   };

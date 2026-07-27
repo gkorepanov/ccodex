@@ -19,7 +19,7 @@ server.on("upgrade", (request, socket, head) => {
       if (message.method !== "initialize") return;
       while (!existsSync(gate)) await new Promise((resolve) => setTimeout(resolve, 5));
       client.send(
-        JSON.stringify({ id: message.id, result: { userAgent: "codex_app_server_daemon/0.144.6 (unmanaged-test)" } }),
+        JSON.stringify({ id: message.id, result: { userAgent: "codex_app_server_daemon/0.145.0 (unmanaged-test)" } }),
         () => {
           if (process.env.FAKE_UNMANAGED_EXIT_AFTER_PROBE === "1") process.exit(0);
         },

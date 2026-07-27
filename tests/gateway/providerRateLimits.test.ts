@@ -190,6 +190,13 @@ function fakeClaude() {
       response: { thread: { id: params.threadId } },
       notifyGoalSnapshot: vi.fn(),
     })),
+    searchOccurrences: vi.fn((params: { threadId: string; searchTerm: string }) => ({
+      data: [{
+        turnId: "claude-turn", itemId: "claude-item", snippet: params.searchTerm,
+        snippetMatchRange: { start: 0, end: params.searchTerm.length }, turnCursor: "hyb-turn:0",
+      }],
+      nextCursor: null,
+    })),
     forkThread: vi.fn(async (params: { threadId: string; ephemeral?: boolean; threadSource?: string }, visible?: string) => {
       const id = `claude-${++sequence}`;
       threads.add(id);
@@ -769,6 +776,39 @@ describe("provider-aware rate-limit gateway routing", () => {
     expect(harness.client.rawSent.at(-1)).toBe(JSON.stringify({
       method: "account/rateLimits/updated", params: { rateLimits: stockSnapshot.rateLimits },
     }));
+  });
+
+  it("passes realtime Voice V3 requests to stock without interpreting them", async () => {
+    const harness = await makeHarness();
+    const params = {
+      threadId: "stock-voice",
+      version: "v3",
+      outputModality: "audio",
+      codexResponseHandoffMode: "commentary",
+      initialItems: [{ role: "user", text: "voice context" }],
+    };
+    harness.client.request("voice-v3", "thread/realtime/start", params);
+    await settle();
+    expect(harness.stockRequests).toContainEqual({
+      id: "voice-v3", method: "thread/realtime/start", params,
+    });
+    expect(messages(harness, "voice-v3")).toEqual([{ id: "voice-v3", result: {} }]);
+  });
+
+  it("routes thread occurrence search to the Claude adapter for Claude threads", async () => {
+    const harness = await makeHarness();
+    harness.client.request("start-claude", "thread/start", { model: "claude:sonnet" });
+    await settle();
+    const threadId = (messages(harness, "start-claude")[0] as any).result.thread.id;
+    harness.client.request("search-claude", "thread/searchOccurrences", {
+      threadId, searchTerm: "needle", limit: 10,
+    });
+    await settle();
+    expect(harness.claude.searchOccurrences).toHaveBeenCalledWith({ threadId, searchTerm: "needle", limit: 10 });
+    expect(messages(harness, "search-claude")[0]).toMatchObject({
+      result: { data: [{ turnId: "claude-turn", itemId: "claude-item" }], nextCursor: null },
+    });
+    expect(harness.stockRequests.some((request) => request.id === "search-claude")).toBe(false);
   });
 
   it("suppresses every internal stock compact event before generic error rendering", async () => {

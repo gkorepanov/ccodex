@@ -18,8 +18,8 @@
   },
   "counts": {
     "architecture-invariant": 133,
-    "external-contract": 327,
-    "provider-mapping": 64,
+    "external-contract": 335,
+    "provider-mapping": 66,
     "old-implementation-detail": 26
   },
   "cases": [
@@ -409,6 +409,12 @@
     },
     {
       "path": "tests/claude/goalLifecycle.test.ts",
+      "title": "inherits a deferred goal into a durable fork and lets the first explicit turn run first",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/goalLifecycle.test.ts",
       "title": "persists goal identity and rejects stale usage after replacement",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
@@ -426,6 +432,12 @@
       "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
     },
     {
+      "path": "tests/claude/hookMapper.test.ts",
+      "title": "maps Claude SessionEnd to the native Codex session-end hook",
+      "classification": "provider-mapping",
+      "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
+    },
+    {
       "path": "tests/claude/inputMapper.test.ts",
       "title": "maps an in-workspace image and rejects lexical and symlink escapes",
       "classification": "provider-mapping",
@@ -434,6 +446,12 @@
     {
       "path": "tests/claude/inputMapper.test.ts",
       "title": "accepts only HTTP(S) remote images",
+      "classification": "provider-mapping",
+      "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
+    },
+    {
+      "path": "tests/claude/inputMapper.test.ts",
+      "title": "rejects audio explicitly instead of treating it as a local image",
       "classification": "provider-mapping",
       "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
     },
@@ -979,6 +997,12 @@
     },
     {
       "path": "tests/claude/service.test.ts",
+      "title": "projects title, cwd, and timestamps from native Claude session metadata",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
       "title": "creates hidden threads under suppression before they become durable",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
@@ -1082,6 +1106,18 @@
     {
       "path": "tests/claude/service.test.ts",
       "title": "matches the mobile resume bootstrap contract with excluded turns and a descending full page",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "searches visible Claude messages with UTF-16 ranges and deterministic pagination",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "forks strictly before a selected active turn without touching the source",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
@@ -1219,7 +1255,19 @@
     },
     {
       "path": "tests/claude/service.test.ts",
-      "title": "does not persist ephemeral threads across a service restart",
+      "title": "persists a user-created side thread across a service restart",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "keeps internal ephemeral threads process-local",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "unloads an idle user side runtime without deleting the conversation",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
@@ -2899,6 +2947,18 @@
     },
     {
       "path": "tests/gateway/providerRateLimits.test.ts",
+      "title": "passes realtime Voice V3 requests to stock without interpreting them",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/gateway/providerRateLimits.test.ts",
+      "title": "routes thread occurrence search to the Claude adapter for Claude threads",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/gateway/providerRateLimits.test.ts",
       "title": "suppresses every internal stock compact event before generic error rendering",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
@@ -3013,7 +3073,7 @@
     },
     {
       "path": "tests/gateway/providerRateLimits.test.ts",
-      "title": "leases an ephemeral side task for reconnect instead of deleting it on a transient disconnect",
+      "title": "keeps an ephemeral side task independent of transient transport disconnects",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
@@ -3037,7 +3097,7 @@
     },
     {
       "path": "tests/gateway/providerRateLimits.test.ts",
-      "title": "replays the authoritative logical title to a newly connected App client",
+      "title": "returns the provider-owned title without fabricating a rename event",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
@@ -3241,7 +3301,7 @@
     },
     {
       "path": "tests/store/sqliteStore.test.ts",
-      "title": "stores preserved fork turn and item ids under their owning thread",
+      "title": "stores preserved fork turns once without a duplicate item table",
       "classification": "old-implementation-detail",
       "rationale": "Freezes the current broad-record/SQLite implementation; retain as migration evidence, not reducer parity."
     },

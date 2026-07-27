@@ -24,4 +24,10 @@ describe("Claude hook lifecycle projection", () => {
       hookId: "hook-2", hookName: "notify", hookEvent: "Notification",
     }, "/repo", false, 0)).toBeUndefined();
   });
+
+  it("maps Claude SessionEnd to the native Codex session-end hook", () => {
+    expect(startHookRun({
+      hookId: "hook-end", hookName: "cleanup.sh", hookEvent: "SessionEnd",
+    }, "/repo", false, 0)).toMatchObject({ eventName: "sessionEnd", scope: "thread" });
+  });
 });

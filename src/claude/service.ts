@@ -10,6 +10,8 @@ import type { ThreadSetNameParams } from "../codex/generated/v2/ThreadSetNamePar
 import type { ThreadMetadataUpdateParams } from "../codex/generated/v2/ThreadMetadataUpdateParams.js";
 import type { ThreadItemsListParams } from "../codex/generated/v2/ThreadItemsListParams.js";
 import type { ThreadItemsListResponse } from "../codex/generated/v2/ThreadItemsListResponse.js";
+import type { ThreadSearchOccurrencesParams } from "../codex/generated/v2/ThreadSearchOccurrencesParams.js";
+import type { ThreadSearchOccurrencesResponse } from "../codex/generated/v2/ThreadSearchOccurrencesResponse.js";
 import type { ThreadGoal } from "../codex/generated/v2/ThreadGoal.js";
 import type { ThreadGoalSetParams } from "../codex/generated/v2/ThreadGoalSetParams.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
@@ -48,7 +50,7 @@ import type { HybridConfig } from "../config/config.js";
 import type { SubscriptionHub } from "../gateway/subscriptions.js";
 import type { Logger } from "../observability/logger.js";
 import type {
-  ClaudeThreadRecord, HybridStore, PendingThreadRemoval, TurnProviderBoundary,
+  ClaudeThreadRecord, HybridStore, InternalGoal, PendingThreadRemoval, TurnProviderBoundary,
 } from "../store/HybridStore.js";
 import { settingsGeneration, withSettingsFrom } from "../store/HybridStore.js";
 import { SqliteHybridStore } from "../store/sqliteStore.js";
@@ -185,7 +187,11 @@ function threadResponse(record: ClaudeThreadRecord, includeTurns: boolean): Thre
   } = threadSettings(record);
   return {
     ...settings,
-    thread: { ...record.thread, turns: includeTurns ? record.thread.turns : [] },
+    thread: {
+      ...record.thread,
+      canAcceptDirectInput: record.thread.parentThreadId ? false : true,
+      turns: includeTurns ? record.thread.turns : [],
+    },
     runtimeWorkspaceRoots: [record.thread.cwd],
     instructionSources: [],
     sandbox,
@@ -552,6 +558,8 @@ export class ClaudeService {
     if (record.thread.parentThreadId) {
       return {
         ...threadResponse(record, !resume.excludeTurns),
+        turnsBackwardsCursor: record.thread.turns.length ? "hyb-turn:0" : null,
+        itemsBackwardsCursor: record.thread.turns.some((turn) => turn.items.length) ? "hyb-item:0" : null,
         initialTurnsPage: resume.initialTurnsPage
           ? this.turnsPage({
             threadId,
@@ -569,6 +577,8 @@ export class ClaudeService {
     );
     return {
       ...threadResponse(record, !resume.excludeTurns),
+      turnsBackwardsCursor: record.thread.turns.length ? "hyb-turn:0" : null,
+      itemsBackwardsCursor: record.thread.turns.some((turn) => turn.items.length) ? "hyb-item:0" : null,
       initialTurnsPage: resume.initialTurnsPage
         ? this.turnsPage({
           threadId,
@@ -1140,7 +1150,9 @@ export class ClaudeService {
   public listItems(params: ThreadItemsListParams): ThreadItemsListResponse {
     this.assertThreadAvailable(params.threadId);
     const items = this.store.listTurns(params.threadId)
-      .flatMap((turn) => params.turnId && turn.id !== params.turnId ? [] : turn.items);
+      .flatMap((turn) => params.turnId && turn.id !== params.turnId
+        ? []
+        : turn.items.map((item) => ({ turnId: turn.id, item })));
     const ordered = params.sortDirection === "desc" ? [...items].reverse() : items;
     if (params.cursor && !params.cursor.startsWith("hyb-item:")) throw invalidParams("Invalid Claude item cursor.");
     const offset = params.cursor?.startsWith("hyb-item:") ? Number(params.cursor.slice("hyb-item:".length)) : 0;
@@ -1154,12 +1166,57 @@ export class ClaudeService {
     };
   }
 
+  public searchOccurrences(params: ThreadSearchOccurrencesParams): ThreadSearchOccurrencesResponse {
+    this.assertThreadAvailable(params.threadId);
+    const searchTerm = params.searchTerm.trim();
+    if (!searchTerm) throw invalidParams("thread/searchOccurrences requires a non-empty searchTerm.");
+    if (params.cursor && !params.cursor.startsWith("hyb-search:"))
+      throw invalidParams("Invalid Claude search cursor.");
+    const offset = params.cursor ? Number(params.cursor.slice("hyb-search:".length)) : 0;
+    if (!Number.isInteger(offset) || offset < 0) throw invalidParams("Invalid Claude search cursor.");
+    const turns = this.store.listTurns(params.threadId);
+    const needle = searchTerm.toLocaleLowerCase();
+    const occurrences = turns.flatMap((turn, turnIndex) => turn.items.flatMap((item) => {
+      const text = item.type === "userMessage"
+        ? item.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n")
+        : item.type === "agentMessage" && item.phase !== "commentary" ? item.text : undefined;
+      if (text === undefined) return [];
+      const haystack = text.toLocaleLowerCase();
+      const matches = [];
+      for (let start = haystack.indexOf(needle); start >= 0; start = haystack.indexOf(needle, start + needle.length)) {
+        matches.push({
+          turnId: turn.id,
+          itemId: item.id,
+          snippet: text,
+          snippetMatchRange: { start, end: start + needle.length },
+          turnCursor: `hyb-turn:${turns.length - 1 - turnIndex}`,
+        });
+      }
+      return matches;
+    }));
+    const limit = Math.max(1, Math.min(params.limit ?? 50, 100));
+    const data = occurrences.slice(offset, offset + limit);
+    return {
+      data,
+      nextCursor: offset + data.length < occurrences.length ? `hyb-search:${offset + data.length}` : null,
+    };
+  }
+
   public async forkThread(
     params: ThreadForkParams,
     visibleForkedFromId: string = params.threadId,
   ): Promise<ThreadForkResponse> {
     if (params.path) throw invalidParams("Claude thread forks must use threadId, not a Codex rollout path.");
     this.requireIndependentThread(params.threadId, "fork");
+    if (params.lastTurnId && params.beforeTurnId)
+      throw invalidParams("`beforeTurnId` cannot be combined with `lastTurnId`.");
+    if (params.ephemeral && params.deferGoalContinuation)
+      throw invalidParams("`deferGoalContinuation` cannot be combined with `ephemeral`.");
+    const inheritedGoal = params.deferGoalContinuation
+      ? await this.sessions.submit<InternalGoal | undefined>(
+        params.threadId, { type: "goal", command: { kind: "snapshotFork" } },
+      )
+      : undefined;
     const source = await this.sessions.submit<SessionBranchSnapshot>(params.threadId, { type: "snapshotBranch" });
     const sourceRecord = source.record;
     const sidePromotion = Boolean(
@@ -1175,13 +1232,17 @@ export class ClaudeService {
     const claudeModelValue = resolveClaudeModel(this.config, modelPickerId);
     if (!claudeModelValue) throw invalidParams("Cannot fork a Claude thread to a Codex model.");
     const activeSideFork = Boolean(params.ephemeral === true && params.excludeTurns === true
-      && params.threadSource === "user" && !params.lastTurnId);
+      && params.threadSource === "user" && !params.lastTurnId && !params.beforeTurnId);
     if (params.permissions && params.sandbox) throw invalidParams("Claude thread fork cannot combine permissions with sandbox.");
     const activeIndex = sourceRecord.thread.turns.findIndex((turn) => turn.status === "inProgress");
     const selectedIndex = params.lastTurnId
       ? sourceRecord.thread.turns.findIndex((turn) => turn.id === params.lastTurnId)
       : -1;
+    const beforeIndex = params.beforeTurnId
+      ? sourceRecord.thread.turns.findIndex((turn) => turn.id === params.beforeTurnId)
+      : -1;
     if (params.lastTurnId && selectedIndex < 0) throw invalidParams(`Unknown Claude turn '${params.lastTurnId}'.`);
+    if (params.beforeTurnId && beforeIndex < 0) throw invalidParams(`Unknown Claude turn '${params.beforeTurnId}'.`);
     const selectedTurn = selectedIndex >= 0 ? sourceRecord.thread.turns[selectedIndex] : undefined;
     const selectedBoundary = params.lastTurnId
       ? source.boundaries.find((entry) => entry.turnId === params.lastTurnId)
@@ -1193,6 +1254,8 @@ export class ClaudeService {
       ? activeIndex >= 0 ? activeIndex - 1 : sourceRecord.thread.turns.length - 1
       : params.lastTurnId
         ? selectedIndex
+        : params.beforeTurnId
+          ? beforeIndex - 1
         : sourceRecord.thread.turns.length - 1;
     if (sidePromotion && through < 0) {
       throw invalidParams("Cannot promote a Claude side chat before it has a completed turn.");
@@ -1233,6 +1296,7 @@ export class ClaudeService {
       sessionId: sourceRecord.thread.sessionId, forkedFromId: visibleForkedFromId,
       cwd, modelProvider: "claude", createdAt, updatedAt: createdAt, recencyAt: createdAt,
       status: params.ephemeral ? { type: "idle" } : { type: "notLoaded" },
+      canAcceptDirectInput: true,
       name: params.ephemeral
         ? sourceRecord.thread.name
         : sourceRecord.thread.name ? `${sourceRecord.thread.name} (fork)` : null,
@@ -1256,6 +1320,7 @@ export class ClaudeService {
       responseRecord = await this.sessions.submit(thread.id, {
         type: "commitForkTarget", record, turns: copiedTurns,
         sourceBoundaries, uuidMap: [...branch.uuidMap],
+        ...(inheritedGoal ? { inheritedGoal } : {}),
       });
     } catch (error) {
       await this.transcripts.delete(branch.sessionId, sourceRecord.thread.cwd).catch(() => undefined);
@@ -1668,13 +1733,17 @@ export class ClaudeService {
 
   private withNativeMetadata(record: ClaudeThreadRecord): Thread {
     const native = this.nativeMetadata.get(record.claudeSessionId);
-    if (!native) return record.thread;
+    if (!native) return {
+      ...record.thread,
+      canAcceptDirectInput: record.thread.parentThreadId ? false : true,
+    };
     const createdAt = native.createdAt === undefined
       ? record.thread.createdAt
       : Math.floor(native.createdAt / 1_000);
     const updatedAt = Math.floor(native.lastModified / 1_000);
     return {
       ...record.thread,
+      canAcceptDirectInput: record.thread.parentThreadId ? false : true,
       name: (native.customTitle ?? native.summary) || record.thread.name,
       preview: native.firstPrompt ?? record.thread.preview,
       cwd: native.cwd ?? record.thread.cwd,
@@ -1765,6 +1834,7 @@ export class ClaudeService {
         updatedAt: createdAt,
         recencyAt: createdAt,
         status: { type: "idle" },
+        canAcceptDirectInput: true,
         path: null,
         cwd,
         cliVersion: "claude-code",
@@ -1802,7 +1872,10 @@ export class ClaudeService {
           reasoningEffort as ThreadSettings["effort"],
         ),
       outputSchema: null,
-      tokenUsageTotal: { totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+      tokenUsageTotal: {
+        totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0,
+        outputTokens: 0, reasoningOutputTokens: 0,
+      },
       tokenUsageLast: null,
       modelContextWindow: null,
       providerCostUsdTotal: 0,

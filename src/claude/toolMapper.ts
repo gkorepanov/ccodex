@@ -154,11 +154,11 @@ export function startTool(
   }
   if (name === "WebSearch" || name === "web_search") {
     const query = text(input.query);
-    return { state, item: { type: "webSearch", id: state.itemId, query, action: { type: "search", query: query || null, queries: null } } };
+    return { state, item: { type: "webSearch", id: state.itemId, query, results: null, action: { type: "search", query: query || null, queries: null } } };
   }
   if (name === "WebFetch" || name === "web_fetch") {
     const url = text(input.url);
-    return { state, item: { type: "webSearch", id: state.itemId, query: url, action: { type: "openPage", url: url || null } } };
+    return { state, item: { type: "webSearch", id: state.itemId, query: url, results: null, action: { type: "openPage", url: url || null } } };
   }
   const native = nativeCommand(name, input, cwd);
   if (native) return { state, item: commandItem(state, native.command, native.actions, cwd) };

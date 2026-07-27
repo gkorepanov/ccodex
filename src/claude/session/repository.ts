@@ -132,8 +132,9 @@ export class ClaudeSessionRepository {
     record: ClaudeThreadRecord,
     turns: readonly Turn[],
     boundaries: readonly TurnProviderBoundary[],
+    inheritedGoal?: InternalGoal,
   ): void {
-    this.store.commitForkedThread(record, turns, boundaries);
+    this.store.commitForkedThread(record, turns, boundaries, inheritedGoal);
   }
 
   public commitRollback(

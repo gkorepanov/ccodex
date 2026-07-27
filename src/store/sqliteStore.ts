@@ -114,8 +114,19 @@ function recoverableDatabase(path: string): DatabaseSync {
 function parseRecord(row: ThreadRow, turns: Turn[]): ClaudeThreadRecord {
   const thread = JSON.parse(row.thread_json) as Thread;
   const runtime = row.runtime_settings_json ? JSON.parse(row.runtime_settings_json) as Record<string, unknown> : {};
+  const usage = (value: unknown): ClaudeThreadRecord["tokenUsageTotal"] => {
+    const stored = value && typeof value === "object" ? value as Partial<ClaudeThreadRecord["tokenUsageTotal"]> : {};
+    return {
+      totalTokens: stored.totalTokens ?? 0,
+      inputTokens: stored.inputTokens ?? 0,
+      cachedInputTokens: stored.cachedInputTokens ?? 0,
+      cacheWriteInputTokens: stored.cacheWriteInputTokens ?? 0,
+      outputTokens: stored.outputTokens ?? 0,
+      reasoningOutputTokens: stored.reasoningOutputTokens ?? 0,
+    };
+  };
   return {
-    thread: { ...thread, turns },
+    thread: { ...thread, canAcceptDirectInput: thread.parentThreadId ? false : true, turns },
     claudeSessionId: row.claude_session_id,
     modelPickerId: row.model_picker_id,
     claudeModelValue: row.claude_model_value,
@@ -136,11 +147,9 @@ function parseRecord(row: ThreadRow, turns: Turn[]): ClaudeThreadRecord {
     reasoningSummary: typeof runtime.reasoningSummary === "string" ? runtime.reasoningSummary : null,
     collaborationMode: runtime.collaborationMode ?? null,
     outputSchema: runtime.outputSchema ?? null,
-    tokenUsageTotal: runtime.tokenUsageTotal && typeof runtime.tokenUsageTotal === "object"
-      ? runtime.tokenUsageTotal as ClaudeThreadRecord["tokenUsageTotal"]
-      : { totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+    tokenUsageTotal: usage(runtime.tokenUsageTotal),
     tokenUsageLast: runtime.tokenUsageLast && typeof runtime.tokenUsageLast === "object"
-      ? runtime.tokenUsageLast as ClaudeThreadRecord["tokenUsageLast"]
+      ? usage(runtime.tokenUsageLast)
       : null,
     modelContextWindow: typeof runtime.modelContextWindow === "number" ? runtime.modelContextWindow : null,
     providerCostUsdTotal: typeof runtime.providerCostUsdTotal === "number" ? runtime.providerCostUsdTotal : 0,
@@ -426,12 +435,17 @@ export class SqliteHybridStore implements HybridStore {
     record: ClaudeThreadRecord,
     turns: readonly Turn[],
     boundaries: readonly TurnProviderBoundary[],
+    inheritedGoal?: InternalGoal,
   ): void {
     this.transaction(() => {
       this.createThread(record);
       for (const turn of turns) this.insertTurn(record.thread.id, turn);
       for (const boundary of boundaries) {
         this.setTurnClaudeMessageUuid(record.thread.id, boundary.turnId, boundary.messageUuid);
+      }
+      if (inheritedGoal) {
+        this.database.prepare("INSERT INTO goals (thread_id, goal_json) VALUES (?, ?)")
+          .run(record.thread.id, json(inheritedGoal));
       }
     });
   }
@@ -722,6 +736,11 @@ export class SqliteHybridStore implements HybridStore {
         timeUsedSeconds: replace ? 0 : previous.timeUsedSeconds,
         createdAt: replace ? now : previous.createdAt,
         updatedAt: now,
+        ...(patch.continuationDeferred !== undefined
+          ? { continuationDeferred: patch.continuationDeferred }
+          : previous?.continuationDeferred !== undefined
+            ? { continuationDeferred: previous.continuationDeferred }
+            : {}),
       };
       if (goal.status === "active" && goal.tokenBudget !== null && goal.tokensUsed >= goal.tokenBudget) goal.status = "budgetLimited";
       this.database.prepare(`

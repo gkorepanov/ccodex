@@ -6,7 +6,8 @@ import { filterSortThreads } from "../../src/store/threadFilter.js";
 
 function thread(id: string, createdAt: number, parentThreadId: string | null = null): Thread {
   return {
-    id, extra: null, sessionId: id, forkedFromId: null, parentThreadId, preview: id, ephemeral: false,
+    id, extra: null, sessionId: id, forkedFromId: null, parentThreadId,
+    canAcceptDirectInput: parentThreadId === null, preview: id, ephemeral: false,
     historyMode: "legacy", modelProvider: "claude", createdAt, updatedAt: createdAt, recencyAt: createdAt,
     status: { type: "idle" }, path: null, cwd: "/repo", cliVersion: "test", source: "appServer",
     threadSource: null, agentNickname: null, agentRole: null, gitInfo: null, name: id, turns: [],

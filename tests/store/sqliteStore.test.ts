@@ -23,6 +23,7 @@ function thread(id: string): Thread {
     sessionId: "session-1",
     forkedFromId: null,
     parentThreadId: null,
+    canAcceptDirectInput: true,
     preview: "hello",
     ephemeral: false,
     historyMode: "legacy",
@@ -65,7 +66,7 @@ function record(id = "thread-1") {
     reasoningSummary: null,
     collaborationMode: null,
     outputSchema: null,
-    tokenUsageTotal: { totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+    tokenUsageTotal: { totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
     tokenUsageLast: null,
     modelContextWindow: null,
   } as const;

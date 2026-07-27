@@ -14,6 +14,7 @@ import type { ThreadTurnsListParams } from "../codex/generated/v2/ThreadTurnsLis
 import type { ThreadSetNameParams } from "../codex/generated/v2/ThreadSetNameParams.js";
 import type { ThreadMetadataUpdateParams } from "../codex/generated/v2/ThreadMetadataUpdateParams.js";
 import type { ThreadItemsListParams } from "../codex/generated/v2/ThreadItemsListParams.js";
+import type { ThreadSearchOccurrencesParams } from "../codex/generated/v2/ThreadSearchOccurrencesParams.js";
 import type { ThreadGoalSetParams } from "../codex/generated/v2/ThreadGoalSetParams.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
@@ -597,6 +598,13 @@ export function attachClientConnection(
         if (request.method === "thread/items/list") {
           const result = target.provider === "claude"
             ? claude.listItems(params as unknown as ThreadItemsListParams)
+            : await optimisticStockRequest(request.method, params);
+          sendResult(request.id, projectSideResult(publicThreadId, target, result));
+          return;
+        }
+        if (request.method === "thread/searchOccurrences") {
+          const result = target.provider === "claude"
+            ? claude.searchOccurrences(params as unknown as ThreadSearchOccurrencesParams)
             : await optimisticStockRequest(request.method, params);
           sendResult(request.id, projectSideResult(publicThreadId, target, result));
           return;
@@ -1307,6 +1315,12 @@ export function attachClientConnection(
           }
           if (message.method === "thread/items/list") {
             sendResult(message.id, claude.listItems((message.params ?? {}) as ThreadItemsListParams));
+            return;
+          }
+          if (message.method === "thread/searchOccurrences") {
+            sendResult(message.id, claude.searchOccurrences(
+              (message.params ?? {}) as ThreadSearchOccurrencesParams,
+            ));
             return;
           }
           if (message.method === "thread/unsubscribe") {
