@@ -45,7 +45,7 @@ import type { CursorCodec } from "../protocol/cursor.js";
 import { ThreadCatalog } from "./threadList.js";
 import type { MetricsRegistry } from "../observability/metrics.js";
 import type { RpcRecorder } from "../observability/rpcRecorder.js";
-import type { RemoteControlHub } from "./remoteControlHub.js";
+import type { RemoteControlController } from "./remoteControlController.js";
 import { ServerRequestIds } from "./serverRequestIds.js";
 import type { CrossProviderForks } from "../handoff/service.js";
 import {
@@ -114,7 +114,7 @@ export function attachClientConnection(
   cursors: CursorCodec,
   metrics: MetricsRegistry,
   recorder: RpcRecorder,
-  remoteControl?: RemoteControlHub,
+  remoteControl?: RemoteControlController,
   features: FeatureConfig = DEFAULT_FEATURES,
   providerAvailability?: Pick<ProviderAvailabilityService, "read" | "refresh" | "refreshAll">,
   sharedStockState?: StockStateTracker,
@@ -738,6 +738,16 @@ export function attachClientConnection(
     if (message && isRequest(message)) {
       requestStarted.set(requestKey(message.id), performance.now());
       try {
+        if (message.method === "remoteControl/enable" && remoteControl) {
+          const params = message.params as { ephemeral?: boolean } | null;
+          sendResult(message.id, await remoteControl.enable(params?.ephemeral === true));
+          return;
+        }
+        if (message.method === "remoteControl/disable" && remoteControl) {
+          const params = message.params as { ephemeral?: boolean } | null;
+          sendResult(message.id, await remoteControl.disable(params?.ephemeral === true));
+          return;
+        }
         if (message.method === "remoteControl/status/read" && remoteControl?.current()) {
           sendResult(message.id, remoteControl.current());
           return;

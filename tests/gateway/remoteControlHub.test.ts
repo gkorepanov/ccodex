@@ -26,4 +26,22 @@ describe("RemoteControlHub", () => {
     expect(first).toHaveBeenCalledTimes(2);
     expect(second).toHaveBeenCalledTimes(3);
   });
+
+  it("adopts the stock identity only until relay status becomes authoritative", () => {
+    const hub = new RemoteControlHub();
+    const sink = vi.fn();
+    const disabled = {
+      status: "disabled" as const,
+      serverName: "test-host",
+      installationId: "installation",
+      environmentId: null,
+    };
+    hub.intercept("one", sink, disabled);
+    expect(hub.current()).toEqual(disabled);
+
+    const connected = { ...disabled, status: "connected" as const, environmentId: "environment" };
+    hub.update(connected);
+    hub.intercept("two", sink, { ...disabled, installationId: "stock-must-not-win" });
+    expect(hub.current()).toEqual(connected);
+  });
 });

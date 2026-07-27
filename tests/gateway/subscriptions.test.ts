@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SubscriptionHub } from "../../src/gateway/subscriptions.js";
+import { publicItemId } from "../../src/gateway/logicalThreadProjection.js";
 
 describe("SubscriptionHub", () => {
   it("broadcasts global catalog invalidations once per attached App", () => {
@@ -98,22 +99,32 @@ describe("SubscriptionHub", () => {
       (_method, params) => notifications.push(params),
       (_id, _method, params) => requests.push(params),
     );
-    hub.aliasThread("backend-thread", "public-thread");
+    hub.aliasThread("backend-thread", "public-thread", "epoch-1");
 
     expect(hub.hasSubscribers("backend-thread")).toBe(true);
     hub.emit("backend-thread", "turn/started", {
       threadId: "backend-thread",
-      turn: { id: "provider-turn", items: [] },
+      turn: {
+        id: "provider-turn",
+        items: [{ type: "agentMessage", id: "item-1", text: "done", phase: "final_answer" }],
+      },
     });
     hub.request("backend-thread", "approval-1", "item/commandExecution/requestApproval", {
       threadId: "backend-thread",
       turnId: "provider-turn",
+      itemId: "item-1",
       command: "echo backend-thread",
     });
 
-    expect(notifications).toEqual([expect.objectContaining({ threadId: "public-thread" })]);
+    expect(notifications).toEqual([expect.objectContaining({
+      threadId: "public-thread",
+      turn: expect.objectContaining({
+        items: [expect.objectContaining({ id: publicItemId("epoch-1", "item-1") })],
+      }),
+    })]);
     expect(requests).toEqual([expect.objectContaining({
       threadId: "public-thread",
+      itemId: publicItemId("epoch-1", "item-1"),
       command: "echo backend-thread",
     })]);
   });

@@ -553,14 +553,20 @@ describe("provider switch service", () => {
   });
 
   it("atomically switches Claude to stock, keeps the public id, and persists the epoch boundary", async () => {
-    const historicalStockTurn = turn("historical-stock-turn", "historical stock answer");
+    const historicalStockTurn = {
+      ...turn("historical-stock-turn", "historical stock answer"),
+      items: [{ ...turn("unused", "").items[0]!, id: "item-1", text: "historical stock answer" }],
+    } as Turn;
     const historicalStock = thread("historical-stock", "openai", [historicalStockTurn]);
     const historicalCompact = turn("historical-compact", "");
     const sourceTurn = turn("claude-turn", "source answer");
     const source = thread("public-thread", "claude", [sourceTurn]);
     const hidden = thread("hidden-compact", "claude", [sourceTurn]);
     const target = thread("stock-target", "openai");
-    const targetTurn = turn("stock-target-turn", "new provider answer");
+    const targetTurn = {
+      ...turn("stock-target-turn", "new provider answer"),
+      items: [{ ...turn("unused", "").items[0]!, id: "item-1", text: "new provider answer" }],
+    } as Turn;
     const stockFork = {
       ...thread("stock-fork", "openai", [targetTurn]),
       forkedFromId: target.id,
@@ -754,6 +760,14 @@ describe("provider switch service", () => {
     expect(read.result.thread.id).toBe(source.id);
     expect(read.result.thread.turns.map((value) => value.id))
       .toEqual([historicalStockTurn.id, historicalCompact.id, sourceTurn.id, compact.id, targetTurn.id]);
+    const publicItemIds = read.result.thread.turns.flatMap((value) => value.items.map((item) => item.id));
+    expect(new Set(publicItemIds).size).toBe(publicItemIds.length);
+    expect(read.result.thread.turns[0]!.items[0]!.id)
+      .not.toBe(read.result.thread.turns.at(-1)!.items[0]!.id);
+    const liveTarget = projected.find((event) => event.method === "turn/started"
+      && (event.params as { turn?: Turn }).turn?.id === targetTurn.id);
+    expect((liveTarget!.params as { turn: Turn }).turn.items[0]!.id)
+      .toBe(read.result.thread.turns.at(-1)!.items[0]!.id);
     const resumed = await service.requestLogical("thread/resume", {
       threadId: source.id,
       excludeTurns: true,
@@ -761,6 +775,13 @@ describe("provider switch service", () => {
     }, stock as never) as { result: { initialTurnsPage: { data: Turn[] } } };
     expect(resumed.result.initialTurnsPage.data.map((value) => value.id))
       .toEqual([targetTurn.id, compact.id, sourceTurn.id, historicalCompact.id, historicalStockTurn.id]);
+    const repeatedResume = await service.requestLogical("thread/resume", {
+      threadId: source.id,
+      excludeTurns: true,
+      initialTurnsPage: { limit: 5, sortDirection: "desc", itemsView: "full" },
+    }, stock as never) as { result: { initialTurnsPage: { data: Turn[] } } };
+    expect(repeatedResume.result.initialTurnsPage.data.flatMap((value) => value.items.map((item) => item.id)))
+      .toEqual(resumed.result.initialTurnsPage.data.flatMap((value) => value.items.map((item) => item.id)));
     expect(service.projectThreadCatalog([target], [source])).toMatchObject([{
       id: source.id,
       modelProvider: "openai",

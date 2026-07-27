@@ -15,6 +15,11 @@ interface BufferedNotification {
   readonly alreadyPublic: boolean;
 }
 
+interface ThreadAlias {
+  readonly publicThreadId: string;
+  readonly itemNamespace?: string;
+}
+
 export interface LifecycleBuffer {
   flush(): void;
   discard(): void;
@@ -26,7 +31,7 @@ export class SubscriptionHub {
   private readonly suppressedThreads = new Set<string>();
   private readonly mutedByConnection = new Map<string, Set<string>>();
   private readonly requestRecipients = new Map<string, Set<string>>();
-  private readonly threadAliases = new Map<string, string>();
+  private readonly threadAliases = new Map<string, ThreadAlias>();
   private readonly hiddenUserMessageTurns = new Map<string, Set<string>>();
   private readonly lifecycleBuffers = new Map<string, {
     readonly methods: ReadonlySet<string>;
@@ -117,9 +122,10 @@ export class SubscriptionHub {
     }
     const visibleParams = this.withoutHiddenUserMessage(threadId, method, params);
     if (visibleParams === undefined) return;
-    const publicThreadId = alreadyPublic ? threadId : this.publicThreadId(threadId);
+    const alias = alreadyPublic ? undefined : this.threadAliases.get(threadId);
+    const publicThreadId = alias?.publicThreadId ?? threadId;
     const projectedParams = publicThreadId === threadId ? visibleParams : projectRpcToPublicThread(
-      { params: visibleParams }, { publicThreadId, backendThreadId: threadId },
+      { params: visibleParams }, { publicThreadId, backendThreadId: threadId, ...alias },
     ).params;
     if (method === "serverRequest/resolved") {
       const requestId = projectedParams && typeof projectedParams === "object" && "requestId" in projectedParams
@@ -159,9 +165,10 @@ export class SubscriptionHub {
     connectionId?: string,
   ): boolean {
     if (this.suppressedThreads.has(threadId)) return false;
-    const publicThreadId = this.publicThreadId(threadId);
+    const alias = this.threadAliases.get(threadId);
+    const publicThreadId = alias?.publicThreadId ?? threadId;
     const projectedParams = publicThreadId === threadId ? params : projectRpcToPublicThread(
-      { params }, { publicThreadId, backendThreadId: threadId },
+      { params }, { publicThreadId, backendThreadId: threadId, ...alias },
     ).params;
     if (connectionId) {
       const target = this.subscriptions.get(publicThreadId)?.get(connectionId) ?? this.connections.get(connectionId);
@@ -199,8 +206,8 @@ export class SubscriptionHub {
   public suppress(threadId: string): void { this.suppressedThreads.add(threadId); }
   public unsuppress(threadId: string): void { this.suppressedThreads.delete(threadId); }
   public isSuppressed(threadId: string): boolean { return this.suppressedThreads.has(threadId); }
-  public revealAs(threadId: string, publicThreadId: string): void {
-    this.aliasThread(threadId, publicThreadId);
+  public revealAs(threadId: string, publicThreadId: string, itemNamespace?: string): void {
+    this.aliasThread(threadId, publicThreadId, itemNamespace);
     this.suppressedThreads.delete(threadId);
   }
   public threadDeleted(threadId: string): void {
@@ -216,9 +223,9 @@ export class SubscriptionHub {
     turns.add(turnId);
     this.hiddenUserMessageTurns.set(threadId, turns);
   }
-  public aliasThread(backendThreadId: string, publicThreadId: string): void {
+  public aliasThread(backendThreadId: string, publicThreadId: string, itemNamespace?: string): void {
     if (backendThreadId === publicThreadId) return;
-    this.threadAliases.set(backendThreadId, publicThreadId);
+    this.threadAliases.set(backendThreadId, { publicThreadId, ...(itemNamespace ? { itemNamespace } : {}) });
   }
   public unaliasThread(backendThreadId: string): void { this.threadAliases.delete(backendThreadId); }
   public mute(threadId: string, connectionId: string): void {
@@ -235,7 +242,7 @@ export class SubscriptionHub {
     return this.mutedByConnection.get(connectionId)?.has(threadId) ?? false;
   }
   private publicThreadId(threadId: string): string {
-    return this.threadAliases.get(threadId) ?? threadId;
+    return this.threadAliases.get(threadId)?.publicThreadId ?? threadId;
   }
 
   private withoutHiddenUserMessage(threadId: string, method: string, params: unknown): unknown | undefined {

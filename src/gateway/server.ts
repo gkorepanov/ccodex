@@ -16,8 +16,7 @@ import { CursorCodec } from "../protocol/cursor.js";
 import { probeHostCompatibility } from "../compatibility/probe.js";
 import { MetricsRegistry } from "../observability/metrics.js";
 import { RpcRecorder } from "../observability/rpcRecorder.js";
-import { RemoteControlHub } from "./remoteControlHub.js";
-import { startRemoteRelay, type RemoteRelay } from "./remoteRelay.js";
+import { RemoteControlController } from "./remoteControlController.js";
 import { remoteControlEnabled } from "./remoteControlMode.js";
 import { CrossProviderForks, HANDOFF_DAEMON_CONNECTION_ID } from "../handoff/service.js";
 import {
@@ -51,7 +50,7 @@ async function startGatewayOwner(
   const stock = await startStockProcess(config, stockArgs.filter((arg) => arg !== "--remote-control"), logger);
   const metrics = new MetricsRegistry();
   const recorder = new RpcRecorder(config);
-  const remoteControl = relayEnabled ? new RemoteControlHub() : undefined;
+  const remoteControl = new RemoteControlController(socketPath, logger, relayEnabled);
   const features = config.features ?? DEFAULT_FEATURES;
   const claudeModels = new ClaudeModelCatalog(config, logger, metrics);
   await claudeModels.list().catch((error: unknown) => {
@@ -223,9 +222,8 @@ async function startGatewayOwner(
     clearTimeout(force);
     await Promise.allSettled(connectionCleanups);
   };
-  let relay: RemoteRelay | undefined;
   try {
-    if (remoteControl) relay = await startRemoteRelay(socketPath, remoteControl, logger);
+    await remoteControl.start();
   } catch (error) {
     stockSideThreads.close();
     optimisticSideThreads.close();
@@ -245,7 +243,7 @@ async function startGatewayOwner(
 
   return {
     async stop(): Promise<void> {
-      await relay?.stop();
+      await remoteControl.stop();
       stockSideThreads.close();
       optimisticSideThreads.close();
       await closeConnections();

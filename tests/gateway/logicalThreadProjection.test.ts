@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  publicItemId,
   projectRpcToBackendThread,
   projectRpcToPublicThread,
   type LogicalThreadProjection,
@@ -127,6 +128,59 @@ describe("logical thread protocol projection", () => {
   it("does not invent an unlisted result.threadId projection", () => {
     const response = { id: 1, result: { threadId: "backend-thread", text: "backend-thread" } };
     expect(projectRpcToPublicThread(response, owner)).toBe(response);
+  });
+
+  it("gives repeated provider item ids stable epoch-scoped public identities", () => {
+    const epochA = { ...owner, itemNamespace: "stock-epoch-a" };
+    const epochB = { ...owner, itemNamespace: "stock-epoch-b" };
+    const snapshot = {
+      result: {
+        thread: {
+          id: "backend-thread",
+          turns: [{
+            id: "turn-a",
+            itemsView: "full",
+            status: "completed",
+            items: [{
+              type: "agentMessage",
+              id: "item-1",
+              text: "item-1 stays user-visible text",
+              metadata: { id: "item-1" },
+            }],
+          }],
+        },
+      },
+    };
+    const live = {
+      method: "item/completed",
+      params: {
+        threadId: "backend-thread",
+        turnId: "turn-a",
+        item: { type: "agentMessage", id: "item-1", text: "done" },
+      },
+    };
+
+    const first = projectRpcToPublicThread(snapshot, epochA);
+    const repeated = projectRpcToPublicThread(snapshot, epochA);
+    const otherEpoch = projectRpcToPublicThread(snapshot, epochB);
+    const liveId = projectRpcToPublicThread(live, epochA).params.item.id;
+    const snapshotId = first.result.thread.turns[0]!.items[0]!.id;
+
+    expect(snapshotId).toBe(publicItemId("stock-epoch-a", "item-1"));
+    expect(repeated.result.thread.turns[0]!.items[0]!.id).toBe(snapshotId);
+    expect(otherEpoch.result.thread.turns[0]!.items[0]!.id).not.toBe(snapshotId);
+    expect(liveId).toBe(snapshotId);
+    expect(first.result.thread.turns[0]!.items[0]!.text).toContain("item-1");
+    expect(first.result.thread.turns[0]!.items[0]!.metadata.id).toBe("item-1");
+  });
+
+  it("projects itemId references with the same epoch namespace", () => {
+    const projected = projectRpcToPublicThread({
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "backend-thread", turnId: "turn-a", itemId: "item-1" },
+    }, { ...owner, itemNamespace: "stock-epoch-a" });
+
+    expect(projected.params.itemId).toBe(publicItemId("stock-epoch-a", "item-1"));
   });
 
   it("returns the original envelope when no known root matches", () => {

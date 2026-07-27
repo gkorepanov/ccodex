@@ -13,7 +13,8 @@ export class RemoteControlHub {
 
   public intercept(connectionId: string, sink: Sink, fallback: unknown): void {
     this.sinks.set(connectionId, sink);
-    sink("remoteControl/status/changed", this.status ?? fallback);
+    this.status ??= fallback as RemoteControlStatusChangedNotification;
+    sink("remoteControl/status/changed", this.status);
   }
 
   public current(): RemoteControlStatusChangedNotification | undefined {

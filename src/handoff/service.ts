@@ -35,7 +35,11 @@ import type { ClaudeService } from "../claude/service.js";
 import { DEFAULT_RENAME_PROMPT } from "../config/config.js";
 import type { StockRpc } from "../gateway/stockRpc.js";
 import type { SubscriptionHub } from "../gateway/subscriptions.js";
-import { projectRpcToBackendThread, projectRpcToPublicThread } from "../gateway/logicalThreadProjection.js";
+import {
+  projectItemIds,
+  projectRpcToBackendThread,
+  projectRpcToPublicThread,
+} from "../gateway/logicalThreadProjection.js";
 import { invalidParams } from "../protocol/errors.js";
 import { filterSortThreads } from "../store/threadFilter.js";
 import { v7 as uuidv7 } from "uuid";
@@ -532,7 +536,11 @@ export class CrossProviderForks {
     const resolved = method === "thread/unarchive"
       ? unresolved
       : await this.hydrate(unresolved, this.daemonStock ?? clientStock);
-    const owner = { publicThreadId, backendThreadId: resolved.epoch.backendThreadId };
+    const owner = {
+      publicThreadId,
+      backendThreadId: resolved.epoch.backendThreadId,
+      itemNamespace: resolved.epoch.id,
+    };
     let params = projectRpcToBackendThread({ params: publicParams }, owner).params as Record<string, unknown>;
     if (method === "thread/settings/update" || method === "turn/start") {
       params = explicitPermissionParams(
@@ -588,7 +596,7 @@ export class CrossProviderForks {
             ...result,
             thread: this.epochs.projectThread(
               publicThreadId,
-              result.thread,
+              projectItemIds(result.thread, resolved.epoch.id),
               includeTurns,
               includeTurns ? (await this.historicalTurns(publicThreadId, stock)).map((entry) => entry.turn) : [],
             ),
@@ -624,7 +632,7 @@ export class CrossProviderForks {
       const includeTurns = (params as unknown as ThreadReadParams).includeTurns ?? false;
       const thread = this.epochs.projectThread(
         publicThreadId,
-        this.claude.readThread(threadId, includeTurns).thread,
+        projectItemIds(this.claude.readThread(threadId, includeTurns).thread, resolved.epoch.id),
         includeTurns,
         includeTurns
           ? (await this.historicalTurns(publicThreadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn)
@@ -638,7 +646,7 @@ export class CrossProviderForks {
       const response = prepared.response as ThreadResumeResponse;
       const thread = this.epochs.projectThread(
         publicThreadId,
-        response.thread,
+        projectItemIds(response.thread, resolved.epoch.id),
         !resume.excludeTurns,
         !resume.excludeTurns
           ? (await this.historicalTurns(publicThreadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn)
@@ -944,13 +952,14 @@ export class CrossProviderForks {
         selectedEpoch.settings,
         inheritedSegments,
       );
-      this.subscriptions?.aliasThread(forked.thread.id, targetId);
+      const targetEpochId = this.epochs.resolve(targetId)!.epoch.id;
+      this.subscriptions?.aliasThread(forked.thread.id, targetId, targetEpochId);
       if (stockBuildOwner) this.stockTargetBuilds.delete(stockBuildOwner);
       if (selectedEpoch.provider === "claude") {
         await this.claude.announceThread(forked.thread);
       } else {
         this.subscriptions?.emitPublic(targetId, "thread/started", {
-          thread: this.epochs.projectThread(targetId, forked.thread, false),
+          thread: this.epochs.projectThread(targetId, projectItemIds(forked.thread, targetEpochId), false),
         });
       }
       const settings = selectedEpoch.settings;
@@ -958,7 +967,7 @@ export class CrossProviderForks {
         ...forked,
         thread: this.epochs.projectThread(
           targetId,
-          forked.thread,
+          projectItemIds(forked.thread, targetEpochId),
           !params.excludeTurns,
           !params.excludeTurns
             ? (await this.historicalTurns(targetId, this.daemonStock ?? clientStock)).map((entry) => entry.turn)
@@ -1022,7 +1031,7 @@ export class CrossProviderForks {
           }) as ThreadReadResponse).thread;
         return { thread: this.epochs.projectThread(
           params.threadId,
-          backend,
+          projectItemIds(backend, target.epoch.id),
           true,
           (await this.historicalTurns(params.threadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn),
         ) };
@@ -1038,7 +1047,7 @@ export class CrossProviderForks {
         }) as ThreadRollbackResponse;
       return { thread: this.epochs.projectThread(
         params.threadId,
-        rolled.thread,
+        projectItemIds(rolled.thread, target.epoch.id),
         true,
         (await this.historicalTurns(params.threadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn),
       ) };
@@ -1130,14 +1139,14 @@ export class CrossProviderForks {
       throw new Error("Logical rollback lost its atomic commit boundary.");
     }
     this.subscriptions?.suppress(target.epoch.backendThreadId);
-    this.subscriptions?.aliasThread(forked.thread.id, params.threadId);
+    this.subscriptions?.aliasThread(forked.thread.id, params.threadId, targetEpochId);
     if (stockBuildOwner) this.stockTargetBuilds.delete(stockBuildOwner);
     if (pendingFork) {
       if (selectedEpoch.provider === "claude") await this.claude.announceThread(forked.thread);
       else this.subscriptions?.emitPublic(params.threadId, "thread/started", {
         thread: this.epochs.projectThread(
           params.threadId,
-          forked.thread,
+          projectItemIds(forked.thread, targetEpochId),
           true,
           (await this.historicalTurns(params.threadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn),
         ),
@@ -1153,7 +1162,7 @@ export class CrossProviderForks {
     });
     return { thread: this.epochs.projectThread(
       params.threadId,
-      forked.thread,
+      projectItemIds(forked.thread, targetEpochId),
       true,
       (await this.historicalTurns(params.threadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn),
     ) };
@@ -1180,7 +1189,9 @@ export class CrossProviderForks {
   public configureSubscriptions(subscriptions: SubscriptionHub): void {
     this.subscriptions = subscriptions;
     for (const mapping of this.lineage.listMappings()) {
-      if (mapping.state === "current") subscriptions.aliasThread(mapping.backendThreadId, mapping.publicThreadId);
+      if (mapping.state === "current") {
+        subscriptions.aliasThread(mapping.backendThreadId, mapping.publicThreadId, mapping.epochId);
+      }
       else subscriptions.suppress(mapping.backendThreadId);
     }
     for (const threadId of this.store.hiddenProviderSwitchTargetIds()) subscriptions.suppress(threadId);
@@ -1941,7 +1952,11 @@ export class CrossProviderForks {
     const result: NewLogicalTurn[] = [];
     for (const segment of this.lineage.listSegments(publicThreadId)) {
       if (segment.kind === "synthetic") {
-        result.push({ publicTurnId: segment.publicTurnId, turn: segment.turn, kind: "migrationCompact" });
+        result.push({
+          publicTurnId: segment.publicTurnId,
+          turn: projectItemIds(segment.turn, segment.publicTurnId),
+          kind: "migrationCompact",
+        });
         continue;
       }
       const epoch = this.lineage.getEpoch(segment.epochId);
@@ -1965,7 +1980,7 @@ export class CrossProviderForks {
         publicTurnId: turn.id,
         epochId: epoch.epochId,
         providerTurnId: turn.id,
-        turn,
+        turn: projectItemIds(turn, epoch.epochId),
         kind: "provider" as const,
       })));
     }
@@ -1977,9 +1992,11 @@ export class CrossProviderForks {
     currentBackendTurns: readonly Turn[],
     stock: StockRpc,
   ): Promise<Turn[]> {
+    const currentEpochId = this.epochs.resolve(publicThreadId)?.epoch.id;
+    if (!currentEpochId) throw new Error(`Unknown logical thread '${publicThreadId}'.`);
     return [
       ...(await this.historicalTurns(publicThreadId, stock)).map((entry) => entry.turn),
-      ...currentBackendTurns,
+      ...currentBackendTurns.map((turn) => projectItemIds(turn, currentEpochId)),
     ];
   }
 
@@ -1996,7 +2013,7 @@ export class CrossProviderForks {
         publicTurnId: turn.id,
         epochId: resolved.epoch.id,
         providerTurnId: turn.id,
-        turn,
+        turn: projectItemIds(turn, resolved.epoch.id),
         kind: "provider" as const,
       })),
     ];
@@ -2291,9 +2308,13 @@ export class CrossProviderForks {
       deleteDone: sourceBoundary.deleteDone,
     };
     this.subscriptions?.suppress(source.backendThreadId);
-    this.subscriptions?.revealAs(target.id, job.publicThreadId);
+    this.subscriptions?.revealAs(target.id, job.publicThreadId, targetEpochId);
     this.subscriptions?.emitPublic(job.publicThreadId, "thread/started", {
-      thread: this.epochs.projectThread(job.publicThreadId, target, false),
+      thread: this.epochs.projectThread(
+        job.publicThreadId,
+        projectItemIds(target, targetEpochId),
+        false,
+      ),
     });
     this.subscriptions?.emitPublic(job.publicThreadId, "thread/name/updated", {
       threadId: job.publicThreadId,

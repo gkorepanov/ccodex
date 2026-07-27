@@ -13,6 +13,7 @@ import { DEFAULT_FEATURES } from "../../src/config/config.js";
 import { CursorCodec } from "../../src/protocol/cursor.js";
 import { MetricsRegistry } from "../../src/observability/metrics.js";
 import { SubscriptionHub } from "../../src/gateway/subscriptions.js";
+import { RemoteControlController } from "../../src/gateway/remoteControlController.js";
 
 function thread(id: string, name: string, modelProvider = "openai"): Thread {
   return {
@@ -74,6 +75,7 @@ interface StockHarness {
   readonly server: Server;
   readonly wss: WebSocketServer;
   readonly clients: Set<WebSocket>;
+  readonly requests: string[];
   close(): Promise<void>;
 }
 
@@ -94,6 +96,7 @@ async function stockHarness(active: Thread[], archived: Thread[]): Promise<Stock
   const server = createServer();
   const wss = new WebSocketServer({ noServer: true });
   const clients = new Set<WebSocket>();
+  const requests: string[] = [];
   server.on("upgrade", (request, connection, head) => {
     wss.handleUpgrade(request, connection, head, (client) => {
       clients.add(client);
@@ -104,6 +107,7 @@ async function stockHarness(active: Thread[], archived: Thread[]): Promise<Stock
           method: string;
           params?: { archived?: boolean };
         };
+        requests.push(request.method);
         if (request.method === "thread/list") {
           client.send(JSON.stringify({
             id: request.id,
@@ -128,6 +132,7 @@ async function stockHarness(active: Thread[], archived: Thread[]): Promise<Stock
     server,
     wss,
     clients,
+    requests,
     async close() {
       for (const client of clients) client.close();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -154,7 +159,7 @@ function fakeClaude(active: Thread[], archived: Thread[]) {
   };
 }
 
-function handoffs(activePublic: Thread, archivedPublic: Thread) {
+function handoffs(activePublic: Thread, archivedPublic: Thread, readable = activePublic) {
   return {
     logical: (id: string) => id === activePublic.id || id === archivedPublic.id
       ? { epoch: { provider: "claude", backendThreadId: `${id}-backend` } }
@@ -164,6 +169,12 @@ function handoffs(activePublic: Thread, archivedPublic: Thread) {
       params?.archived ? archivedPublic : activePublic,
     ],
     projectLoadedThreadIds: (stock: string[], claude: string[]) => [...stock, ...claude],
+    requestLogical: vi.fn(async (method: string, params: { threadId?: string }) => {
+      if (method === "thread/read" && params.threadId === readable.id) {
+        return { provider: "claude", result: { thread: readable } };
+      }
+      throw new Error(`unexpected logical request ${method}`);
+    }),
     ownsSystemEphemeral: vi.fn(() => false),
     captureInternalStockMessage: vi.fn(() => false),
     rewriteTitleMessages: vi.fn(() => undefined),
@@ -178,6 +189,7 @@ async function connect(
   claude: ReturnType<typeof fakeClaude>,
   logical: ReturnType<typeof handoffs>,
   subscriptions: SubscriptionHub,
+  remoteControl?: RemoteControlController,
 ): Promise<ConnectionHarness> {
   const client = new FakeClient();
   const connection = attachClientConnection(
@@ -191,7 +203,7 @@ async function connect(
     new CursorCodec(Buffer.alloc(32, 9)),
     new MetricsRegistry(),
     { connection: vi.fn(), frame: vi.fn(), lifecycle: vi.fn() } as never,
-    undefined,
+    remoteControl,
     DEFAULT_FEATURES,
   );
   while (stock.clients.size === 0) await new Promise((resolve) => setTimeout(resolve, 1));
@@ -327,5 +339,61 @@ describe("remote provider-owned thread catalog", () => {
     expect(reduceCatalog([...firstPass, ...repeatedPass])).toEqual(reduceCatalog(firstPass));
     expect(reduceCatalog(secondPass)).toEqual(reduceCatalog(firstPass));
     expect(secondPass).toEqual(firstPass);
+  });
+
+  it("routes App-enabled remote control through the gateway projection and never enables stock transport", async () => {
+    const physicalCurrent = thread("physical-current", "only epoch B");
+    const turns = [
+      { id: "turn-a", status: "completed", items: [{ type: "agentMessage", text: "CATALOG_STOCK_A" }] },
+      { id: "turn-claude", status: "completed", items: [{ type: "agentMessage", text: "CATALOG_CLAUDE" }] },
+      { id: "turn-b", status: "completed", items: [{ type: "agentMessage", text: "CATALOG_STOCK_B" }] },
+    ];
+    const publicThread = { ...thread("public", "Some title", "openai"), turns } as Thread;
+    const archived = thread("archived", "Archived", "claude");
+    const stock = await stockHarness([physicalCurrent], []);
+    const claude = fakeClaude([], []);
+    const logical = handoffs(publicThread, archived, publicThread);
+    const subscriptions = new SubscriptionHub();
+    const relayStop = vi.fn(async () => undefined);
+    const relayStart = vi.fn(async (_socket, hub) => {
+      hub.update({
+        status: "connected",
+        serverName: "ccodex-lab",
+        installationId: "installation",
+        environmentId: "environment",
+      });
+      return { child: {} as never, stop: relayStop };
+    });
+    const remoteControl = new RemoteControlController(
+      stock.socket,
+      { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
+      false,
+      relayStart,
+      vi.fn(),
+    );
+    const desktop = await connect(stock, claude, logical, subscriptions, remoteControl);
+    desktop.client.request("desktop-init", "initialize", {
+      clientInfo: { name: "codex_app", title: "Codex Desktop", version: "1" },
+    });
+    desktop.client.request("enable", "remoteControl/enable", { ephemeral: false });
+    await settle();
+
+    expect(relayStart).toHaveBeenCalledTimes(1);
+    expect(stock.requests).not.toContain("remoteControl/enable");
+    expect(desktop.client.sent).toContainEqual({ id: "enable", result: expect.objectContaining({ status: "connected" }) });
+
+    const remote = await connect(stock, claude, logical, subscriptions, remoteControl);
+    remote.client.request("remote-init", "initialize", {
+      clientInfo: { name: "codex-backend", title: "Codex Remote Control", version: "unknown" },
+    });
+    remote.client.request("read", "thread/read", { threadId: publicThread.id, includeTurns: true });
+    await settle();
+
+    expect(remote.client.sent).toContainEqual({ id: "read", result: { thread: publicThread } });
+    expect(JSON.stringify(remote.client.sent)).toContain("CATALOG_STOCK_A");
+    expect(JSON.stringify(remote.client.sent)).toContain("CATALOG_CLAUDE");
+    expect(JSON.stringify(remote.client.sent)).toContain("CATALOG_STOCK_B");
+    expect(reduceCatalog(notifications(remote.client)).has(physicalCurrent.id)).toBe(false);
+    expect(stock.requests).not.toContain("remoteControl/enable");
   });
 });
