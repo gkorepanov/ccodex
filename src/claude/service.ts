@@ -303,6 +303,7 @@ export class ClaudeService {
       state: "ready",
     }),
     private readonly skillsChanged?: (cwd: string) => void,
+    private readonly nativeSessionCatalog: () => Promise<SDKSessionInfo[]> = () => listSessions(),
   ) {
     this.store = new LayeredHybridStore(durableStore);
     const sessionRepository = new ClaudeSessionRepository(this.store);
@@ -998,7 +999,7 @@ export class ClaudeService {
   public refreshNativeMetadata(): Promise<void> {
     if (Date.now() - this.nativeMetadataReadAt < 30_000) return Promise.resolve();
     if (this.nativeMetadataRead) return this.nativeMetadataRead;
-    const read = listSessions().then((sessions) => {
+    const read = this.nativeSessionCatalog().then((sessions) => {
       this.nativeMetadata = new Map(sessions.map((session) => [session.sessionId, session]));
       this.nativeMetadataReadAt = Date.now();
     }).catch((error: unknown) => {

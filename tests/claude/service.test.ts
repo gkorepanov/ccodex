@@ -105,6 +105,52 @@ afterEach(() => {
 });
 
 describe("ClaudeService", () => {
+  it("projects title, cwd, and timestamps from native Claude session metadata", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-native-metadata-"));
+    directories.push(directory);
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    let threadId = "";
+    const service = new ClaudeService(
+      config(directory),
+      new SubscriptionHub(),
+      new Logger("error"),
+      store,
+      new FakeClaudeQuery().factory,
+      undefined,
+      new MetricsRegistry(),
+      undefined,
+      { rename: async () => undefined, delete: async () => undefined },
+      undefined,
+      undefined,
+      undefined,
+      async () => [{
+        sessionId: store.getThreadRecord(threadId, false)!.claudeSessionId,
+        summary: "Native summary",
+        customTitle: "🌊 Native title",
+        firstPrompt: "native first prompt",
+        cwd: directory,
+        createdAt: 1_700_000_000_000,
+        lastModified: 1_700_000_123_000,
+      }],
+    );
+    threadId = (await service.startThread({ model: "claude:haiku", cwd: directory })).thread.id;
+
+    await service.refreshNativeMetadata();
+
+    expect(service.readThread(threadId, false).thread).toMatchObject({
+      name: "🌊 Native title",
+      preview: "native first prompt",
+      cwd: directory,
+      createdAt: 1_700_000_000,
+      updatedAt: 1_700_000_123,
+      recencyAt: 1_700_000_123,
+    });
+    expect(service.listThreads({})).toEqual([
+      expect.objectContaining({ id: threadId, name: "🌊 Native title" }),
+    ]);
+    await service.close();
+  });
+
   it("creates hidden threads under suppression before they become durable", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-hidden-thread-"));
     directories.push(directory);
