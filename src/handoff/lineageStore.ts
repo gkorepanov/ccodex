@@ -421,6 +421,51 @@ export class LineageStore {
     });
   }
 
+  public commitRollback(
+    publicThreadId: string,
+    expectedEpochId: string,
+    expectedRevision: number,
+    target: NewEpochBoundary,
+    retainedSegments: readonly NewTranscriptSegment[],
+  ): PublicTaskIdentity | undefined {
+    return this.transaction(() => {
+      const task = this.getTask(publicThreadId);
+      if (!task || task.currentEpochId !== expectedEpochId || task.revision !== expectedRevision) return undefined;
+      const sourceBoundary = [...retainedSegments].reverse().find(
+        (segment): segment is Omit<ProviderSegment, "position"> =>
+          segment.kind === "provider" && segment.epochId === expectedEpochId,
+      );
+      const sealed = this.database.prepare(`
+        UPDATE lineage_epochs SET state = 'sealed',
+          start_turn_id = COALESCE(?, start_turn_id), end_turn_id = COALESCE(?, end_turn_id),
+          archive_pending = CASE WHEN provider = 'stock' THEN 1 ELSE archive_pending END
+        WHERE epoch_id = ? AND public_thread_id = ? AND state = 'current'
+      `).run(
+        sourceBoundary?.startTurnId ?? null, sourceBoundary?.endTurnId ?? null,
+        expectedEpochId, publicThreadId,
+      );
+      if (Number(sealed.changes) !== 1) return undefined;
+      const ordinal = (this.database.prepare(`
+        SELECT COALESCE(MAX(ordinal), -1) + 1 AS ordinal
+        FROM lineage_epochs WHERE public_thread_id = ?
+      `).get(publicThreadId) as unknown as { ordinal: number }).ordinal;
+      this.database.prepare(`
+        INSERT INTO lineage_epochs (
+          epoch_id, public_thread_id, ordinal, provider, backend_thread_id, state,
+          archive_pending, delete_done
+        ) VALUES (?, ?, ?, ?, ?, 'current', 0, 0)
+      `).run(target.epochId, publicThreadId, ordinal, target.provider, target.backendThreadId);
+      this.database.prepare("DELETE FROM lineage_segments WHERE public_thread_id = ?").run(publicThreadId);
+      retainedSegments.forEach((segment, position) => this.insertSegment(publicThreadId, position, segment));
+      const updated = this.database.prepare(`
+        UPDATE lineage_tasks SET current_epoch_id = ?, revision = revision + 1
+        WHERE public_thread_id = ? AND current_epoch_id = ? AND revision = ?
+      `).run(target.epochId, publicThreadId, expectedEpochId, expectedRevision);
+      if (Number(updated.changes) !== 1) throw new Error("Rollback commit lost its task CAS.");
+      return this.getTask(publicThreadId)!;
+    });
+  }
+
   public putSwitchJournal(journal: SwitchJournal): void {
     const active = ["queued", "running", "targetCreated"].includes(journal.status);
     this.database.prepare(`

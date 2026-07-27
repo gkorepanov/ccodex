@@ -312,6 +312,44 @@ describe("LineageStore", () => {
     expect(store.getEpoch("source-current")).toBeUndefined();
     store.close();
   });
+
+  it("commits rollback history and a replacement current epoch under one CAS", () => {
+    const store = new LineageStore(databasePath());
+    store.createTask({
+      publicThreadId: "public",
+      currentEpochId: "stock-current",
+      sessionId: "public",
+      createdAt: 1,
+    }, {
+      epochId: "stock-current",
+      provider: "stock",
+      backendThreadId: "stock-backend",
+    });
+    const retained: Parameters<LineageStore["commitRollback"]>[4] = [{
+      kind: "provider",
+      epochId: "stock-current",
+      startTurnId: "turn-1",
+      endTurnId: "turn-2",
+    }];
+    expect(store.commitRollback("public", "wrong", 1, {
+      epochId: "claude-current",
+      provider: "claude",
+      backendThreadId: "claude-backend",
+    }, retained)).toBeUndefined();
+    expect(store.commitRollback("public", "stock-current", 1, {
+      epochId: "claude-current",
+      provider: "claude",
+      backendThreadId: "claude-backend",
+    }, retained)).toMatchObject({ currentEpochId: "claude-current", revision: 2 });
+    expect(store.listSegments("public")).toMatchObject(retained);
+    expect(store.getEpoch("stock-current")).toMatchObject({
+      state: "sealed",
+      startTurnId: "turn-1",
+      endTurnId: "turn-2",
+      archivePending: true,
+    });
+    store.close();
+  });
 });
 
 function createLegacySchema(database: DatabaseSync): void {
