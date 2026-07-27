@@ -201,11 +201,6 @@ describe("LineageStore", () => {
       { kind: "provider", epochId: "stock-epoch", startTurnId: "stock-1", endTurnId: "stock-2" },
       { kind: "synthetic", publicTurnId: "compact", turn: { id: "compact" } },
     ]);
-    expect(store.getSwitchJournal("active-job")).toMatchObject({
-      status: "targetCreated",
-      payload: { targetBackendThreadId: "new-stock" },
-    });
-    expect(store.getSwitchJournal("committed-job")).not.toHaveProperty("payload");
     store.close();
 
     store = new LineageStore(path);
@@ -231,37 +226,6 @@ describe("LineageStore", () => {
     expect(minimal).not.toContain("claude-secret");
     expect(minimal).toContain("SYNTHETIC HANDOFF");
     migrated.close();
-  });
-
-  it("keeps payload only while a provider switch remains recoverable", () => {
-    const store = new LineageStore(databasePath());
-    const base = {
-      jobId: "switch",
-      publicThreadId: "public",
-      expectedEpochId: "stock-epoch",
-      expectedThreadRevision: 3,
-      pendingRevision: 2,
-      targetProvider: "claude" as const,
-      targetModel: "claude:sonnet",
-      createdAt: 10,
-    };
-    store.putSwitchJournal({
-      ...base,
-      status: "targetCreated",
-      payload: { settings: { permission: "full" }, targetBackendThreadId: "claude-backend" },
-      updatedAt: 20,
-    });
-    expect(store.getSwitchJournal("switch")).toMatchObject({
-      status: "targetCreated",
-      payload: { targetBackendThreadId: "claude-backend" },
-    });
-    store.putSwitchJournal({ ...base, status: "committed", updatedAt: 30 });
-    expect(store.getSwitchJournal("switch")).toEqual({
-      ...base,
-      status: "committed",
-      updatedAt: 30,
-    });
-    store.close();
   });
 
   it("keeps shared provider boundaries until the last fork stops referencing them", () => {

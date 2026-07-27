@@ -62,21 +62,6 @@ export interface NewEpochBoundary {
   readonly state?: ProviderEpochState;
 }
 
-export interface SwitchJournal {
-  readonly jobId: string;
-  readonly publicThreadId: string;
-  readonly expectedEpochId: string;
-  readonly expectedThreadRevision: number;
-  readonly pendingRevision: number;
-  readonly targetProvider: ProviderKind;
-  readonly targetModel: string;
-  readonly status: "queued" | "running" | "targetCreated" | "committed" | "failed";
-  readonly payload?: Record<string, unknown>;
-  readonly error?: string;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-}
-
 interface LegacyThreadRow {
   public_thread_id: string;
   current_epoch_id: string;
@@ -138,28 +123,14 @@ interface SegmentRow {
   synthetic_turn_json: string | null;
 }
 
-interface JournalRow {
-  job_id: string;
-  public_thread_id: string;
-  expected_epoch_id: string;
-  expected_thread_revision: number;
-  pending_revision: number;
-  target_provider: ProviderKind;
-  target_model: string;
-  status: SwitchJournal["status"];
-  payload_json: string | null;
-  error: string | null;
-  created_at: number;
-  updated_at: number;
-}
-
 /**
  * Minimal cross-provider source of truth.
  *
  * Provider-owned Thread, Turn and settings payloads deliberately have no column
  * in this schema. Provider segments retain only the boundary IDs needed to read
  * and slice the native provider transcript. Full JSON is accepted only for
- * CCodex-owned synthetic turns and an unfinished switch transaction journal.
+ * CCodex-owned synthetic turns. In-flight provider switches live in the
+ * operational journal, which is cleared when the transaction settles.
  */
 export class LineageStore {
   private readonly database: DatabaseSync;
@@ -466,46 +437,6 @@ export class LineageStore {
     });
   }
 
-  public putSwitchJournal(journal: SwitchJournal): void {
-    const active = ["queued", "running", "targetCreated"].includes(journal.status);
-    this.database.prepare(`
-      INSERT INTO lineage_switch_jobs (
-        job_id, public_thread_id, expected_epoch_id, expected_thread_revision, pending_revision,
-        target_provider, target_model, status, payload_json, error, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(job_id) DO UPDATE SET
-        status = excluded.status,
-        payload_json = excluded.payload_json,
-        error = excluded.error,
-        updated_at = excluded.updated_at
-    `).run(
-      journal.jobId, journal.publicThreadId, journal.expectedEpochId,
-      journal.expectedThreadRevision, journal.pendingRevision, journal.targetProvider,
-      journal.targetModel, journal.status, active ? JSON.stringify(journal.payload ?? {}) : null,
-      journal.error ?? null, journal.createdAt, journal.updatedAt,
-    );
-  }
-
-  public getSwitchJournal(jobId: string): SwitchJournal | undefined {
-    const row = this.database.prepare(`
-      SELECT * FROM lineage_switch_jobs WHERE job_id = ?
-    `).get(jobId) as unknown as JournalRow | undefined;
-    return row ? {
-      jobId: row.job_id,
-      publicThreadId: row.public_thread_id,
-      expectedEpochId: row.expected_epoch_id,
-      expectedThreadRevision: row.expected_thread_revision,
-      pendingRevision: row.pending_revision,
-      targetProvider: row.target_provider,
-      targetModel: row.target_model,
-      status: row.status,
-      ...(row.payload_json ? { payload: JSON.parse(row.payload_json) as Record<string, unknown> } : {}),
-      ...(row.error ? { error: row.error } : {}),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    } : undefined;
-  }
-
   public needsLegacyMigration(): boolean {
     return this.userVersion() < SCHEMA_VERSION && this.hasTable("logical_threads");
   }
@@ -540,7 +471,6 @@ export class LineageStore {
     this.transaction(() => {
       this.createSchema();
       if (this.hasTable("logical_threads")) this.importLegacyLineage();
-      if (this.hasTable("provider_switch_jobs")) this.importLegacySwitchJobs();
       this.scrubLegacySnapshots();
       this.database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     });
@@ -590,22 +520,7 @@ export class LineageStore {
           OR (kind = 'synthetic' AND epoch_id IS NULL AND start_turn_id IS NULL
           AND end_turn_id IS NULL AND public_turn_id IS NOT NULL AND synthetic_turn_json IS NOT NULL))
       );
-      CREATE TABLE IF NOT EXISTS lineage_switch_jobs (
-        job_id TEXT PRIMARY KEY,
-        public_thread_id TEXT NOT NULL,
-        expected_epoch_id TEXT NOT NULL,
-        expected_thread_revision INTEGER NOT NULL,
-        pending_revision INTEGER NOT NULL,
-        target_provider TEXT NOT NULL CHECK(target_provider IN ('claude', 'stock')),
-        target_model TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'targetCreated', 'committed', 'failed')),
-        payload_json TEXT,
-        error TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        CHECK((status IN ('queued', 'running', 'targetCreated') AND payload_json IS NOT NULL)
-          OR (status IN ('committed', 'failed') AND payload_json IS NULL))
-      );
+      DROP TABLE IF EXISTS lineage_switch_jobs;
     `);
   }
 
@@ -694,37 +609,6 @@ export class LineageStore {
       });
     }
     flush();
-  }
-
-  private importLegacySwitchJobs(): void {
-    const rows = this.database.prepare("SELECT * FROM provider_switch_jobs")
-      .all() as unknown as Array<Record<string, unknown>>;
-    for (const row of rows) {
-      const status = row.status as SwitchJournal["status"];
-      const active = ["queued", "running", "targetCreated"].includes(status);
-      const payload = active ? {
-        settings: parseJson(row.settings_json),
-        turnParams: parseJson(row.turn_params_json),
-        compactionTurn: parseJson(row.compaction_turn_json),
-        summary: row.summary,
-        targetBackendThreadId: row.target_backend_thread_id,
-        targetProviderTurnId: row.target_provider_turn_id,
-      } : undefined;
-      this.putSwitchJournal({
-        jobId: row.job_id as string,
-        publicThreadId: row.public_thread_id as string,
-        expectedEpochId: row.expected_epoch_id as string,
-        expectedThreadRevision: row.expected_thread_revision as number,
-        pendingRevision: row.pending_revision as number,
-        targetProvider: row.target_provider as ProviderKind,
-        targetModel: row.target_model as string,
-        status,
-        ...(payload ? { payload } : {}),
-        ...(typeof row.error === "string" ? { error: row.error } : {}),
-        createdAt: row.created_at as number,
-        updatedAt: row.updated_at as number,
-      });
-    }
   }
 
   private scrubLegacySnapshots(): void {
@@ -824,8 +708,4 @@ export class LineageStore {
       throw error;
     }
   }
-}
-
-function parseJson(value: unknown): unknown {
-  return typeof value === "string" && value.length > 0 ? JSON.parse(value) : undefined;
 }
