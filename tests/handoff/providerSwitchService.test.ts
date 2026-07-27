@@ -779,6 +779,8 @@ describe("provider switch service", () => {
         return {};
       }),
       prepareTurn: vi.fn(async (_params: unknown) => prepared),
+      readThread: vi.fn((id: string) => ({ thread: id === target.id ? target : source })),
+      currentThreadSettings: vi.fn(() => ({ model: "claude:sonnet", effort: "high" })),
       deleteThread: vi.fn(async () => ({})),
     };
     const stock = {
@@ -795,8 +797,11 @@ describe("provider switch service", () => {
         return {};
       }),
     };
-    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
-    service = new CrossProviderForks(store, claude as never);
+    const providerLineagePath = join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite");
+    const store = new HandoffStore(providerLineagePath);
+    const lineage = new LineageStore(providerLineagePath);
+    lineage.finalizeLegacyMigration(new Set());
+    service = new CrossProviderForks(store, claude as never, undefined, lineage);
     service.configureSubscriptions(hub);
     (service as unknown as { providerSwitchSummary: () => Promise<string> }).providerSwitchSummary =
       vi.fn(async () => "stock compact summary");
@@ -838,9 +843,18 @@ describe("provider switch service", () => {
     expect(service.logical(source.id)?.epoch).toMatchObject({
       provider: "claude", backendThreadId: target.id,
     });
-    expect(store.listLogicalTurns(source.id).map((value) => value.publicTurnId))
-      .toEqual([sourceTurn.id, compact.id]);
+    expect(lineage.listSegments(source.id)).toMatchObject([
+      { kind: "provider", startTurnId: sourceTurn.id, endTurnId: sourceTurn.id },
+      { kind: "synthetic", publicTurnId: compact.id },
+    ]);
+    expect(store.listLogicalTurns(source.id)).toEqual([]);
     service.close();
+
+    const database = new DatabaseSync(providerLineagePath, { readOnly: true });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM logical_threads").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM provider_epochs").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM provider_switch_jobs_v2").get()).toEqual({ count: 0 });
+    database.close();
   });
 
   it("explicitly forwards and retains permissions when App omits them on later logical turns", async () => {
