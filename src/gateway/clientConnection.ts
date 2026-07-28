@@ -1589,7 +1589,8 @@ export function attachClientConnection(
             handoffs.registerForwardedEphemeralCandidate(connectionId, result.thread.id, forwarded.systemEphemeral);
           }
         }
-        if (forwarded?.threadId && isUuid(forwarded.threadId) && "error" in message) {
+        if (forwarded?.threadId && isUuid(forwarded.threadId) && "error" in message
+          && forwarded.method !== "thread/read") {
           emitSystemError(forwarded.threadId, message.error.message);
         }
         if (forwarded && "result" in message) {

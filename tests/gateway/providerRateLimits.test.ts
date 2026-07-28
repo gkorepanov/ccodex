@@ -360,10 +360,18 @@ async function makeHarness(
           result: resolved,
         })));
       }
-      else if (request.method === "thread/read") ws.send(JSON.stringify({
-        id: request.id,
-        result: { thread: stockThread((request.params as any).threadId) },
-      }));
+      else if (request.method === "thread/read") {
+        const threadId = (request.params as any).threadId;
+        ws.send(JSON.stringify(threadId === "unmaterialized-voice"
+          ? {
+              id: request.id,
+              error: {
+                code: -32600,
+                message: `thread ${threadId} is not materialized yet; includeTurns is unavailable before first user message`,
+              },
+            }
+          : { id: request.id, result: { thread: stockThread(threadId) } }));
+      }
       else ws.send(JSON.stringify({ id: request.id, result: {} }));
     });
   }));
@@ -793,6 +801,40 @@ describe("provider-aware rate-limit gateway routing", () => {
       id: "voice-v3", method: "thread/realtime/start", params,
     });
     expect(messages(harness, "voice-v3")).toEqual([{ id: "voice-v3", result: {} }]);
+  });
+
+  it("does not render the pre-message Voice V3 thread/read failure as an agent turn", async () => {
+    const harness = await makeHarness();
+    const threadId = "unmaterialized-voice";
+    harness.client.request("voice-v3", "thread/realtime/start", {
+      threadId, version: "v3", outputModality: "audio",
+    });
+    await settle();
+
+    const beforeRead = harness.client.sent.length;
+    harness.client.request("voice-read", "thread/read", { threadId, includeTurns: true });
+    await settle();
+    for (const ws of harness.stockClients) ws.send(JSON.stringify({
+      method: "thread/realtime/started",
+      params: { threadId, realtimeSessionId: "voice-session", version: "v3" },
+    }));
+    await settle();
+
+    expect(messages(harness, "voice-read")).toEqual([{
+      id: "voice-read",
+      error: {
+        code: -32600,
+        message: `thread ${threadId} is not materialized yet; includeTurns is unavailable before first user message`,
+      },
+    }]);
+    expect(harness.client.sent.slice(beforeRead).filter((message: any) =>
+      ["turn/started", "item/started", "item/agentMessage/delta", "item/completed", "turn/completed"]
+        .includes(message.method)
+      && message.params?.threadId === threadId)).toEqual([]);
+    expect(harness.client.sent).toContainEqual({
+      method: "thread/realtime/started",
+      params: { threadId, realtimeSessionId: "voice-session", version: "v3" },
+    });
   });
 
   it("routes thread occurrence search to the Claude adapter for Claude threads", async () => {
