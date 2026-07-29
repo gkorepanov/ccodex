@@ -5,6 +5,7 @@ import { invalidParams } from "../protocol/errors.js";
 
 function sourceKind(thread: Thread): ThreadSourceKind {
   if (typeof thread.source === "string") return thread.source;
+  if (thread.source == null) return "unknown";
   if ("custom" in thread.source) return "unknown";
   const source = thread.source.subAgent;
   if (source === "review") return "subAgentReview";

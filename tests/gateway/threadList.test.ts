@@ -22,6 +22,13 @@ describe("merged thread listing", () => {
     expect(() => filterSortThreads(threads, { parentThreadId: "root", ancestorThreadId: "root" })).toThrow("mutually exclusive");
   });
 
+  it("treats legacy threads without source as unknown", () => {
+    const legacy = thread("legacy", 1);
+    Reflect.deleteProperty(legacy, "source");
+    expect(filterSortThreads([legacy], { sourceKinds: ["unknown"] })).toEqual([legacy]);
+    expect(filterSortThreads([legacy], { sourceKinds: ["subAgentThreadSpawn"] })).toEqual([]);
+  });
+
   it("uses stable signed keyset cursors in both directions", async () => {
     const stockThreads = [thread("stock-4", 4), thread("stock-2", 2)];
     const claudeThreads = [thread("claude-3", 3), thread("claude-1", 1)];

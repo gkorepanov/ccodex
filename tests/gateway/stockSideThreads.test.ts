@@ -38,7 +38,7 @@ describe("stock side-chat promotion", () => {
     const sides = new StockSideThreads(true, cleanupStock as never, new Logger("error"), 10);
     const create = await sides.prepareRequest("app", {
       id: "create", method: "thread/fork", params: {
-        threadId: "parent", ephemeral: true, excludeTurns: true, threadSource: "user",
+        threadId: "parent", ephemeral: true, excludeTurns: true,
       },
     }, cleanupStock as never) as Extract<RpcMessage, { id: unknown; method: string }>;
     expect(create.params).toMatchObject({

@@ -1517,7 +1517,7 @@ describe("provider-aware rate-limit gateway routing", () => {
       .toBe(false);
   });
 
-  it("routes captured /side params on a logical Claude task to one native ephemeral fork", async () => {
+  it("normalizes captured iPhone /side params without threadSource on a logical Claude task", async () => {
     const claude = fakeClaude();
     claude.threads.add("claude-backend");
     const forkLogical = vi.fn();
@@ -1531,7 +1531,6 @@ describe("provider-aware rate-limit gateway routing", () => {
     harness.client.request("side", "thread/fork", {
       threadId: "public-thread",
       cwd: "/tmp",
-      threadSource: "user",
       excludeTurns: true,
       ephemeral: true,
     });

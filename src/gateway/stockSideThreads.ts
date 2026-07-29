@@ -9,6 +9,7 @@ import { v7 as uuidv7 } from "uuid";
 import { projectRpcToPublicThread } from "./logicalThreadProjection.js";
 import type { StockRpc } from "./stockRpc.js";
 import type { SubscriptionHub } from "./subscriptions.js";
+import { isUserSideFork } from "./sideFork.js";
 
 export const STOCK_SIDE_THREAD_SOURCE = "ccodexSide";
 export const STOCK_SIDE_DISCONNECT_GRACE_MS = 60 * 60_000;
@@ -60,10 +61,6 @@ async function hasPersistedMarker(thread: Thread): Promise<boolean> {
   }
 }
 
-function userSideFork(params: ThreadForkParams): boolean {
-  return params.ephemeral === true && params.excludeTurns === true && params.threadSource === "user";
-}
-
 /**
  * Keeps stock `/side` chats on native Codex rollout rails while projecting
  * them as ephemeral to App clients. A later ordinary fork therefore promotes
@@ -113,7 +110,7 @@ export class StockSideThreads {
     const params = message.params && typeof message.params === "object"
       ? message.params as Record<string, unknown>
       : {};
-    if (message.method === "thread/fork" && userSideFork(params as ThreadForkParams)) {
+    if (message.method === "thread/fork" && isUserSideFork(params as ThreadForkParams)) {
       this.pending.set(requestKey(connectionId, message.id), { kind: "create", connectionId });
       return {
         ...message,

@@ -68,16 +68,13 @@ import { StockStateTracker } from "../state/stockStateTracker.js";
 import { STOCK_SIDE_THREAD_SOURCE, type StockSideThreads } from "./stockSideThreads.js";
 import type { OptimisticSideThreads, OptimisticSideTarget } from "./optimisticSideThreads.js";
 import { projectRpcToPublicThread } from "./logicalThreadProjection.js";
+import { isUserSideFork, normalizeUserSideFork } from "./sideFork.js";
 
 type ForegroundProvider = "codex" | "claude";
 type FastSettings = Pick<ThreadSettings, "model" | "serviceTier">;
 
 function requestedFast(serviceTier: string | null | undefined): boolean {
   return serviceTier === "fast" || serviceTier === "priority";
-}
-
-function isUserSideFork(params: ThreadForkParams): boolean {
-  return params.ephemeral === true && params.excludeTurns === true && params.threadSource === "user";
 }
 
 function claudeModelNoticeName(model: string): string {
@@ -1069,7 +1066,7 @@ export function attachClientConnection(
           }
         }
         if (params.threadId && message.method === "thread/fork") {
-          const forkParams = (message.params ?? {}) as ThreadForkParams;
+          const forkParams = normalizeUserSideFork((message.params ?? {}) as ThreadForkParams);
           if (handoffs.isSystemEphemeralFork(forkParams)) {
             sendResult(message.id, await handoffs.forkSystemEphemeral(forkParams, stockRpc, connectionId));
             return;
@@ -1365,7 +1362,9 @@ export function attachClientConnection(
             return;
           }
           if (message.method === "thread/fork") {
-            const result = await claude.forkThread((message.params ?? {}) as ThreadForkParams);
+            const result = await claude.forkThread(
+              normalizeUserSideFork((message.params ?? {}) as ThreadForkParams),
+            );
             sendResult(message.id, result);
             selectForeground("claude", result.thread.id);
             subscribeClaude(result.thread.id);
@@ -1530,7 +1529,8 @@ export function attachClientConnection(
       if (params !== message.params) forwarded = { ...message, params };
     }
     if (message && isRequest(message) && message.method === "thread/fork") {
-      const params = (message.params ?? {}) as ThreadForkParams;
+      const params = normalizeUserSideFork((message.params ?? {}) as ThreadForkParams);
+      if (params !== message.params) forwarded = { ...message, params };
       if (params.ephemeral !== true && params.threadSource !== "system") {
         const completed = stockState.completeForkParams(params);
         if (completed !== params) forwarded = { ...message, params: completed };
