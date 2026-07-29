@@ -185,4 +185,4 @@ jobs:
           path: release-metadata
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" release-metadata/* --verify-tag --generate-notes
+        run: gh release create "${GITHUB_REF_NAME}" release-metadata/* --verify-tag --notes-from-tag
