@@ -155,6 +155,7 @@ export class StockStateTracker {
       thread: {
         ...source,
         id: targetThreadId,
+        sessionId: targetThreadId,
         forkedFromId: params.threadId,
         ephemeral: true,
         path: null,

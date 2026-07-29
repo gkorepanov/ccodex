@@ -5,7 +5,8 @@ import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { Turn } from "../codex/generated/v2/Turn.js";
 import type { ProviderKind, ProviderEpochState } from "./store.js";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+const LEGACY_SCHEMA_VERSION = 2;
 
 export interface PublicTaskIdentity {
   readonly publicThreadId: string;
@@ -146,7 +147,9 @@ export class LineageStore {
     `);
     chmodSync(path, 0o600);
     if (this.needsLegacyMigration()) return;
+    const version = this.userVersion();
     this.createSchema();
+    if (version < 3) this.migrateCatalogIdentities();
     if (this.userVersion() < SCHEMA_VERSION) this.database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
@@ -159,7 +162,8 @@ export class LineageStore {
           public_thread_id, current_epoch_id, revision, session_id, created_at, forked_from_id, parent_thread_id
         ) VALUES (?, ?, 1, ?, ?, ?, ?)
       `).run(
-        identity.publicThreadId, identity.currentEpochId, identity.sessionId,
+        identity.publicThreadId, identity.currentEpochId,
+        identity.parentThreadId ? identity.sessionId : identity.publicThreadId,
         identity.createdAt,
         identity.forkedFromId ?? null, identity.parentThreadId ?? null,
       );
@@ -287,7 +291,8 @@ export class LineageStore {
           public_thread_id, current_epoch_id, revision, session_id, created_at, forked_from_id, parent_thread_id
         ) VALUES (?, ?, 1, ?, ?, ?, ?)
       `).run(
-        identity.publicThreadId, identity.currentEpochId, identity.sessionId,
+        identity.publicThreadId, identity.currentEpochId,
+        identity.parentThreadId ? identity.sessionId : identity.publicThreadId,
         identity.createdAt,
         identity.forkedFromId ?? null, identity.parentThreadId ?? null,
       );
@@ -438,7 +443,7 @@ export class LineageStore {
   }
 
   public needsLegacyMigration(): boolean {
-    return this.userVersion() < SCHEMA_VERSION && this.hasTable("logical_threads");
+    return this.userVersion() < LEGACY_SCHEMA_VERSION && this.hasTable("logical_threads");
   }
 
   public legacyBackendRefs(): LegacyBackendRef[] {
@@ -535,7 +540,7 @@ export class LineageStore {
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(
         row.public_thread_id, row.current_epoch_id, row.revision,
-        thread.sessionId || row.public_thread_id, thread.createdAt,
+        thread.parentThreadId ? thread.sessionId || row.public_thread_id : row.public_thread_id, thread.createdAt,
         thread.forkedFromId, thread.parentThreadId,
       );
     }
@@ -564,6 +569,16 @@ export class LineageStore {
         turns.filter((row) => row.public_thread_id === publicThreadId),
       );
     }
+  }
+
+  private migrateCatalogIdentities(): void {
+    this.transaction(() => {
+      this.database.prepare(`
+        UPDATE lineage_tasks SET session_id = public_thread_id
+        WHERE parent_thread_id IS NULL AND session_id != public_thread_id
+      `).run();
+      this.database.exec("PRAGMA user_version = 3");
+    });
   }
 
   private importLegacyTurns(publicThreadId: string, currentEpochId: string, turns: LegacyTurnRow[]): void {

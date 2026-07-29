@@ -478,6 +478,7 @@ export class ClaudeService {
       thread: {
         ...source,
         id: targetThreadId,
+        sessionId: targetThreadId,
         forkedFromId: visibleForkedFromId,
         ephemeral: true,
         path: null,
@@ -1291,9 +1292,10 @@ export class ClaudeService {
     }
     const createdAt = nowSeconds();
     const cwd = existingThreadCwd(params.cwd ?? sourceRecord.thread.cwd);
+    const threadId = uuidv7();
     const thread: Thread = {
-      ...sourceRecord.thread, id: uuidv7(), ephemeral: params.ephemeral ?? false,
-      sessionId: sourceRecord.thread.sessionId, forkedFromId: visibleForkedFromId,
+      ...sourceRecord.thread, id: threadId, ephemeral: params.ephemeral ?? false,
+      sessionId: threadId, forkedFromId: visibleForkedFromId,
       cwd, modelProvider: "claude", createdAt, updatedAt: createdAt, recencyAt: createdAt,
       status: params.ephemeral ? { type: "idle" } : { type: "notLoaded" },
       canAcceptDirectInput: true,

@@ -1733,8 +1733,9 @@ describe("ClaudeService", () => {
     const source = await service.startThread({ model: "claude:haiku", cwd: directory });
     const fork = await service.forkThread({ threadId: source.thread.id, ephemeral: true, excludeTurns: true });
     expect(fork.thread).toMatchObject({
-      ephemeral: true, forkedFromId: source.thread.id, status: { type: "idle" }, turns: [],
+      ephemeral: true, sessionId: fork.thread.id, forkedFromId: source.thread.id, status: { type: "idle" }, turns: [],
     });
+    expect(fork.thread.sessionId).not.toBe(source.thread.sessionId);
     expect(service.loadedThreadIds()).toContain(fork.thread.id);
     await service.injectItems({
       threadId: fork.thread.id,
@@ -1891,11 +1892,13 @@ describe("ClaudeService", () => {
     const promoted = await service.forkThread({ threadId: side.thread.id, threadSource: "user" });
     expect(promoted.thread).toMatchObject({
       ephemeral: false,
+      sessionId: promoted.thread.id,
       forkedFromId: side.thread.id,
       modelProvider: "claude",
       threadSource: "user",
       status: { type: "notLoaded" },
     });
+    expect(promoted.thread.sessionId).not.toBe(side.thread.sessionId);
     expect(promoted.thread.turns).toHaveLength(2);
     expect(promoted.thread.turns.map((turn) => turn.status)).toEqual(["completed", "completed"]);
     expect(forkCalls).toHaveLength(1);
@@ -2814,6 +2817,33 @@ describe("ClaudeService", () => {
       ephemeral: true,
       threadSource: "user",
     });
+    await second.close();
+  });
+
+  it("publishes cold durable idle threads as notLoaded without changing user side threads", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ccodex-cold-catalog-status-"));
+    directories.push(directory);
+    const database = join(directory, "state.sqlite");
+    const first = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(database), new FakeClaudeQuery().factory,
+    );
+    const durable = await first.startThread({ model: "claude:haiku", cwd: directory });
+    const side = await first.startThread({
+      model: "claude:haiku", cwd: directory, ephemeral: true, threadSource: "user",
+    });
+    expect(durable.thread.status.type).toBe("idle");
+    expect(side.thread.status.type).toBe("idle");
+    await first.close();
+
+    const second = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(database), new FakeClaudeQuery().factory,
+    );
+    await second.ready();
+    const catalog = new Map(second.listThreads({ limit: 100 }).map((thread) => [thread.id, thread]));
+    expect(catalog.get(durable.thread.id)?.status.type).toBe("notLoaded");
+    expect(catalog.get(side.thread.id)?.status.type).toBe("idle");
     await second.close();
   });
 

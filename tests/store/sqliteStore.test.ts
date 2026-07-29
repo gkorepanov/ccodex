@@ -90,6 +90,28 @@ describe("SqliteHybridStore", () => {
     reopened.close();
   });
 
+  it("repairs duplicated catalog identities only for top-level threads", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ccodex-store-session-identity-"));
+    directories.push(directory);
+    const path = join(directory, "state.sqlite");
+    const store = new SqliteHybridStore(path);
+    store.createThread({ ...record("top-level"), thread: { ...thread("top-level"), sessionId: "shared" } });
+    store.createThread({
+      ...record("child"),
+      thread: { ...thread("child"), sessionId: "shared", parentThreadId: "top-level" },
+    });
+    store.close();
+
+    const legacy = new DatabaseSync(path);
+    legacy.prepare("DELETE FROM schema_migrations WHERE version = 8").run();
+    legacy.close();
+
+    const migrated = new SqliteHybridStore(path);
+    expect(migrated.getThreadRecord("top-level")?.thread.sessionId).toBe("top-level");
+    expect(migrated.getThreadRecord("child")?.thread.sessionId).toBe("shared");
+    migrated.close();
+  });
+
   it("loads legacy runtime settings without a persisted resident usage snapshot", () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-store-legacy-usage-"));
     directories.push(directory);
@@ -545,7 +567,7 @@ describe("SqliteHybridStore", () => {
     expect(() => store.commitThreadState(startCommit)).toThrow("injected start event failure");
     store.close();
     store = new SqliteHybridStore(path);
-    expect(store.getThreadRecord(original.thread.id)?.thread.status).toEqual({ type: "idle" });
+    expect(store.getThreadRecord(original.thread.id)?.thread.status).toEqual({ type: "notLoaded" });
     expect(store.getTurn(original.thread.id, turn.id)).toBeUndefined();
     const startRepair = new DatabaseSync(path);
     startRepair.exec("DROP TRIGGER fail_start_event");
@@ -614,7 +636,7 @@ describe("SqliteHybridStore", () => {
     store.close();
 
     const restarted = new SqliteHybridStore(path);
-    expect(restarted.getThreadRecord(original.thread.id)?.thread.status).toEqual({ type: "idle" });
+    expect(restarted.getThreadRecord(original.thread.id)?.thread.status).toEqual({ type: "notLoaded" });
     expect(restarted.getTurn(original.thread.id, turn.id)?.status).toBe("completed");
     expect(restarted.listEventsAfter(original.thread.id, 0).map((event) => event.method)).toEqual([
       "thread/status/changed",
@@ -720,7 +742,7 @@ describe("SqliteHybridStore", () => {
     expect(reopened.getThreadRecord(original.thread.id, false)).toMatchObject({
       lastClaudeMessageUuid: "compact-boundary",
       lastCompletedTurnId: activeTurn.id,
-      thread: { status: { type: "idle" } },
+      thread: { status: { type: "notLoaded" } },
     });
     expect(reopened.getTurn(original.thread.id, activeTurn.id)?.status).toBe("completed");
     expect(reopened.getTurnClaudeMessageUuid(original.thread.id, activeTurn.id)).toBe("compact-boundary");

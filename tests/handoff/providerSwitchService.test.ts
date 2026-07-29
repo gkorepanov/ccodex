@@ -333,6 +333,8 @@ describe("provider switch service", () => {
       model: "claude:sonnet",
     }, source.id);
     expect(forked.thread.turns.map((value) => value.id)).toEqual([sourceTurn.id]);
+    expect(forked.thread.sessionId).toBe(forked.thread.id);
+    expect(forked.thread.sessionId).not.toBe(source.sessionId);
     expect(service.logical(forked.thread.id)?.epoch).toMatchObject({
       provider: "claude",
       backendThreadId: nativeFork.id,

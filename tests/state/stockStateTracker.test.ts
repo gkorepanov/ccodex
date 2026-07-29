@@ -163,6 +163,7 @@ describe("stock state tracker", () => {
     }, "public-side")).toMatchObject({
       thread: {
         id: "public-side",
+        sessionId: "public-side",
         forkedFromId: "stock-1",
         ephemeral: true,
         path: null,

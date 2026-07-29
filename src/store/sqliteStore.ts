@@ -200,6 +200,7 @@ export class SqliteHybridStore implements HybridStore {
     this.database.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;");
     if (existed) this.backup();
     this.migrate();
+    this.recoverColdThreadStatuses();
     chmodSync(path, 0o600);
   }
 
@@ -1029,8 +1030,34 @@ export class SqliteHybridStore implements HybridStore {
           INSERT INTO schema_migrations(version) VALUES (7);
         `);
       }
+      const uniqueCatalogIdentity = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 8").get();
+      if (!uniqueCatalogIdentity) {
+        if (threadColumns.has("session_id") && threadColumns.has("thread_json")) {
+          this.database.exec(`
+            UPDATE threads
+            SET session_id = id,
+                thread_json = json_set(thread_json, '$.sessionId', id)
+            WHERE json_extract(thread_json, '$.parentThreadId') IS NULL
+              AND session_id != id;
+          `);
+        }
+        this.database.exec("INSERT INTO schema_migrations(version) VALUES (8)");
+      }
       this.database.exec("DROP TABLE IF EXISTS items");
     });
+  }
+
+  private recoverColdThreadStatuses(): void {
+    const columns = new Set((this.database.prepare("PRAGMA table_info(threads)").all() as Array<{ name: string }>)
+      .map((column) => column.name));
+    if (!["thread_json", "ephemeral"].every((column) => columns.has(column))) return;
+    this.database.exec(`
+      UPDATE threads
+      SET thread_json = json_set(thread_json, '$.status.type', 'notLoaded')
+      WHERE ephemeral = 0
+        AND json_extract(thread_json, '$.parentThreadId') IS NULL
+        AND json_extract(thread_json, '$.status.type') = 'idle';
+    `);
   }
 
   private migrateThreadScopedIds(): void {

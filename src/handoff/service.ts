@@ -409,6 +409,7 @@ export class CrossProviderForks {
       thread: {
         ...source.logical.thread,
         id: targetThreadId,
+        sessionId: targetThreadId,
         forkedFromId: params.threadId,
         ephemeral: true,
         path: null,
@@ -929,7 +930,7 @@ export class CrossProviderForks {
     const thread: Thread = {
       ...forked.thread,
       id: targetId,
-      sessionId: source.logical.thread.sessionId,
+      sessionId: targetId,
       forkedFromId: params.threadId,
       parentThreadId: null,
       createdAt: now,

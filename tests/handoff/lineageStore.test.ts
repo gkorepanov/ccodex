@@ -62,13 +62,35 @@ afterEach(() => {
 });
 
 describe("LineageStore", () => {
+  it("repairs duplicated catalog identities only for top-level tasks", () => {
+    const path = databasePath();
+    const store = new LineageStore(path);
+    store.createTask({
+      publicThreadId: "top-level", currentEpochId: "top-epoch", sessionId: "shared", createdAt: 1,
+    }, { epochId: "top-epoch", provider: "claude", backendThreadId: "top-backend" });
+    store.createTask({
+      publicThreadId: "child", currentEpochId: "child-epoch", sessionId: "shared", createdAt: 1,
+      parentThreadId: "top-level",
+    }, { epochId: "child-epoch", provider: "claude", backendThreadId: "child-backend" });
+    store.close();
+
+    const legacy = new DatabaseSync(path);
+    legacy.exec("PRAGMA user_version = 2");
+    legacy.close();
+
+    const migrated = new LineageStore(path);
+    expect(migrated.getTask("top-level")?.sessionId).toBe("top-level");
+    expect(migrated.getTask("child")?.sessionId).toBe("shared");
+    migrated.close();
+  });
+
   it("stores only public identity, provider boundaries, and synthetic CCodex turns", () => {
     const path = databasePath();
     const store = new LineageStore(path);
     expect(store.createTask({
       publicThreadId: "public",
       currentEpochId: "stock-epoch",
-      sessionId: "public-session",
+      sessionId: "public",
       createdAt: 1,
       forkedFromId: "parent-public",
     }, {
@@ -194,7 +216,7 @@ describe("LineageStore", () => {
       publicThreadId: "public",
       currentEpochId: "claude-epoch",
       revision: 7,
-      sessionId: "public-session",
+      sessionId: "public",
       createdAt: 1,
       forkedFromId: "parent-public",
     });
@@ -204,6 +226,10 @@ describe("LineageStore", () => {
     ]);
     store.close();
 
+    const previousVersion = new DatabaseSync(path);
+    previousVersion.exec("PRAGMA user_version = 2");
+    previousVersion.close();
+
     store = new LineageStore(path);
     expect(store.listSegments("public")).toHaveLength(2);
     expect(store.listEpochs("public")).toHaveLength(2);
@@ -211,7 +237,7 @@ describe("LineageStore", () => {
 
     const migrated = new DatabaseSync(path, { readOnly: true });
     expect((migrated.prepare("PRAGMA user_version").get() as unknown as { user_version: number }).user_version)
-      .toBe(2);
+      .toBe(3);
     const minimal = JSON.stringify({
       tasks: migrated.prepare("SELECT * FROM lineage_tasks").all(),
       epochs: migrated.prepare("SELECT * FROM lineage_epochs").all(),
