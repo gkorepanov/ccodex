@@ -79,14 +79,30 @@ export function mapClaudeModels(models: readonly ModelInfo[], prefix: string): M
     .map((model) => mapClaudeModel(model, prefix));
 }
 
+export function claudeModelPickerIds(models: readonly ModelInfo[], prefix: string): ReadonlyMap<string, string> {
+  const ids = new Map<string, string>();
+  for (const model of models) {
+    if (model.value === "default") continue;
+    const id = `${prefix}${modelCatalogValue(model)}`;
+    ids.set(normalizeClaudeModelIdentifier(model.value), id);
+    if (model.resolvedModel) ids.set(normalizeClaudeModelIdentifier(model.resolvedModel), id);
+  }
+  return ids;
+}
+
 async function* idlePrompt(signal: AbortSignal): AsyncGenerator<SDKUserMessage> {
   if (signal.aborted) return;
   await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
 }
 
 export class ClaudeModelCatalog {
-  private cache: { readonly key: string; readonly expiresAt: number; readonly models: Model[] } | undefined;
+  private cache: {
+    readonly key: string;
+    readonly expiresAt: number;
+    readonly models: Model[];
+  } | undefined;
   private loading: Promise<Model[]> | undefined;
+  private pickerIds: ReadonlyMap<string, string> = new Map();
 
   public constructor(
     private readonly config: HybridConfig,
@@ -106,6 +122,13 @@ export class ClaudeModelCatalog {
 
   public invalidate(): void {
     this.cache = undefined;
+  }
+
+  public cachedPickerId(model: string): string | undefined {
+    const normalized = normalizeClaudeModelIdentifier(model);
+    const value = normalized.startsWith(this.config.modelPrefix)
+      ? normalized.slice(this.config.modelPrefix.length) : normalized;
+    return this.pickerIds.get(value);
   }
 
   private async load(): Promise<Model[]> {
@@ -134,6 +157,7 @@ export class ClaudeModelCatalog {
       await sdkQuery.reinitialize();
       await sdkQuery.interrupt();
       const mapped = mapClaudeModels(models, this.config.modelPrefix);
+      this.pickerIds = claudeModelPickerIds(models, this.config.modelPrefix);
       this.cache = {
         key: this.cacheKey(),
         expiresAt: Date.now() + this.config.modelCacheSeconds * 1_000,

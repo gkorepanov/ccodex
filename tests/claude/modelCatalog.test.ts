@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assertClaudeControlSurface,
+  claudeModelPickerIds,
   claudeModelDisplayName,
   mapClaudeModel,
   mapClaudeModels,
@@ -83,6 +84,24 @@ describe("mapClaudeModel", () => {
     })).toBe("Opus 5");
     expect(claudeModelLabel("claude-sonnet-5")).toBe("Sonnet 5");
     expect(claudeModelLabel("claude-haiku-4-5-20251001")).toBe("Haiku 4.5");
+  });
+
+  it("maps provider aliases and resolved models to the advertised picker id", () => {
+    const ids = claudeModelPickerIds([{
+      value: "opus[1m]",
+      resolvedModel: "claude-opus-5[1m]",
+      displayName: "Opus (1M context)",
+      description: "Largest Claude context.",
+    }, {
+      value: "sonnet",
+      resolvedModel: "claude-sonnet-5",
+      displayName: "Sonnet",
+      description: "Efficient Claude model.",
+    }], "claude:");
+    expect(ids.get("opus")).toBe("claude:claude-opus-5");
+    expect(ids.get("claude-opus-5")).toBe("claude:claude-opus-5");
+    expect(ids.get("sonnet")).toBe("claude:sonnet");
+    expect(ids.get("claude-sonnet-5")).toBe("claude:sonnet");
   });
 
   it("does not invent effort or service tiers", () => {

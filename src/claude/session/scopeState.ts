@@ -146,7 +146,11 @@ export function newChildScope(
   return { record, turn, item };
 }
 
-export function withResolvedChildModel(record: ClaudeThreadRecord, model: string): ClaudeThreadRecord {
+export function withResolvedChildModel(
+  record: ClaudeThreadRecord,
+  model: string,
+  selection?: { readonly modelPickerId: string; readonly claudeModelValue: string },
+): ClaudeThreadRecord {
   const currentName = record.thread.name ?? record.thread.agentNickname ?? "Agent";
   const title = currentName.replace(/\s+\[[^\]\r\n]+\]$/u, "");
   const name = `${title} [${claudeModelLabel(model)}]`;
@@ -157,6 +161,7 @@ export function withResolvedChildModel(record: ClaudeThreadRecord, model: string
     : source;
   return {
     ...record,
+    ...selection,
     resolvedModel: normalizeClaudeModelIdentifier(model),
     thread: {
       ...record.thread,

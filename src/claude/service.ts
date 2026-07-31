@@ -110,6 +110,7 @@ import { syncedCollaborationMode, threadSettings } from "./threadSettings.js";
 interface ModelCatalog {
   list(): Promise<Model[]>;
   invalidate?(): void;
+  cachedPickerId?(model: string): string | undefined;
 }
 
 type PreparedGoalHandle<T> = { readonly response: T; notify(): Promise<void> };
@@ -342,8 +343,8 @@ export class ClaudeService {
           interactiveQuestions: this.config.features?.interactiveQuestions ?? true,
           resolveChildModel: (model) => {
             const value = normalizeClaudeModelIdentifier(model);
-            const modelPickerId = value.startsWith(this.config.modelPrefix)
-              ? value : `${this.config.modelPrefix}${value}`;
+            const modelPickerId = this.modelCatalog?.cachedPickerId?.(value)
+              ?? (value.startsWith(this.config.modelPrefix) ? value : `${this.config.modelPrefix}${value}`);
             const claudeModelValue = resolveClaudeModel(this.config, modelPickerId);
             return claudeModelValue ? { modelPickerId, claudeModelValue } : undefined;
           },
@@ -463,7 +464,16 @@ export class ClaudeService {
   }
 
   public currentThreadSettings(threadId: string): ThreadSettings {
-    return threadSettings(this.requireRecord(threadId, false));
+    return threadSettings(this.withCatalogModel(this.requireRecord(threadId, false)));
+  }
+
+  private withCatalogModel(record: ClaudeThreadRecord): ClaudeThreadRecord {
+    const modelPickerId = this.modelCatalog?.cachedPickerId?.(
+      record.resolvedModel ?? record.claudeModelValue,
+    );
+    if (!modelPickerId || modelPickerId === record.modelPickerId) return record;
+    const claudeModelValue = resolveClaudeModel(this.config, modelPickerId);
+    return claudeModelValue ? { ...record, modelPickerId, claudeModelValue } : record;
   }
 
   public sideSnapshot(
@@ -558,6 +568,7 @@ export class ClaudeService {
     let record = this.store.getThreadRecord(threadId, true);
     if (!record) throw invalidParams(`Unknown Claude thread '${threadId}'.`);
     if (record.thread.parentThreadId) {
+      record = this.withCatalogModel(record);
       return {
         ...threadResponse(record, !resume.excludeTurns),
         turnsBackwardsCursor: record.thread.turns.length ? turnCursor(record.thread.turns.at(-1)!.id, true) : null,
@@ -577,6 +588,7 @@ export class ClaudeService {
       threadId,
       { type: "readThread", includeTurns: true },
     );
+    record = this.withCatalogModel(record);
     return {
       ...threadResponse(record, !resume.excludeTurns),
       turnsBackwardsCursor: record.thread.turns.length ? turnCursor(record.thread.turns.at(-1)!.id, true) : null,

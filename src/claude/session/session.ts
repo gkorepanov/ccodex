@@ -7710,7 +7710,11 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       const childThreadId = projection.completed.receiverThreadIds[0];
       const child = childThreadId ? this.repository.read(childThreadId, false) : undefined;
       if (child) {
-        const updated = withResolvedChildModel(child, projection.completed.model);
+        const updated = withResolvedChildModel(
+          child,
+          projection.completed.model,
+          this.runtimeDependencies?.resolveChildModel?.(projection.completed.model),
+        );
         const renamed = updated.thread.name !== child.thread.name;
         this.commitState(updated, renamed ? [{
           turnId: null,

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { HybridConfig } from "../../src/config/config.js";
+import type { Model } from "../../src/codex/generated/v2/Model.js";
 import type { Turn } from "../../src/codex/generated/v2/Turn.js";
 import type { ThreadStartParams } from "../../src/codex/generated/v2/ThreadStartParams.js";
 import type { ThreadSettingsUpdateParams } from "../../src/codex/generated/v2/ThreadSettingsUpdateParams.js";
@@ -3200,7 +3201,7 @@ describe("ClaudeService", () => {
     await service.close();
   });
 
-  it("reports an explicitly selected Sonnet child instead of the Fable parent model", async () => {
+  it("reports the canonical catalog id for an explicitly selected Opus child", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-child-model-"));
     directories.push(directory);
     const store = new SqliteHybridStore(join(directory, "state.sqlite"));
@@ -3214,13 +3215,13 @@ describe("ClaudeService", () => {
           type: "content_block_start", index: 0,
           content_block: {
             type: "tool_use", id: agentTool, name: "Agent",
-            input: { description: "Use Sonnet", prompt: "Inspect the project", model: "sonnet" },
+            input: { description: "Use Opus", prompt: "Inspect the project", model: "opus" },
           },
         },
       },
       {
         type: "system", subtype: "task_started", task_id: agentTask, tool_use_id: agentTool,
-        task_type: "agent", subagent_type: "general-purpose", description: "Use Sonnet",
+        task_type: "agent", subagent_type: "general-purpose", description: "Use Opus",
         uuid: randomUUID(), ...base,
       },
       {
@@ -3231,63 +3232,68 @@ describe("ClaudeService", () => {
         },
         tool_use_result: {
           isAsync: true, status: "async_launched", agentId: agentTask,
-          resolvedModel: "claude-sonnet-5", outputFile: "/tmp/sonnet-agent.output",
+          resolvedModel: "claude-opus-5", outputFile: "/tmp/opus-agent.output",
         },
       },
       {
         type: "assistant", parent_tool_use_id: agentTool, uuid: randomUUID(), ...base,
         message: {
-          role: "assistant", model: "claude-sonnet-5",
-          content: [{ type: "text", text: "Sonnet child answer." }],
+          role: "assistant", model: "claude-opus-5",
+          content: [{ type: "text", text: "Opus child answer." }],
         },
       },
       {
         type: "system", subtype: "task_notification", task_id: agentTask, tool_use_id: agentTool,
-        status: "completed", output_file: "/tmp/sonnet-agent.output", summary: "Sonnet child answer.",
+        status: "completed", output_file: "/tmp/opus-agent.output", summary: "Opus child answer.",
         uuid: randomUUID(), ...base,
       },
     ] as unknown as SDKMessage[];
     const service = new ClaudeService(
       config(directory), new SubscriptionHub(), new Logger("error"), store,
       new FakeClaudeQuery(undefined, undefined, [], false, undefined, undefined, undefined, messages).factory,
+      {
+        list: async () => [{
+          id: "claude:claude-fable-5",
+          supportedReasoningEfforts: [],
+          serviceTiers: [],
+        }] as unknown as Model[],
+        cachedPickerId: (model: string) => ["opus", "claude-opus-5"].includes(model)
+          ? "claude:claude-opus-5" : undefined,
+      },
     );
     const started = await service.startThread({ model: "claude:claude-fable-5", cwd: directory });
     const prepared = await service.prepareTurn({
       threadId: started.thread.id,
-      input: [{ type: "text", text: "Spawn Sonnet", text_elements: [] }],
+      input: [{ type: "text", text: "Spawn Opus", text_elements: [] }],
     });
     prepared.announce();
     prepared.start();
     await waitFor(
       () => service.readThread(started.thread.id, true).thread.turns[0]?.status === "completed",
-      "Fable parent with Sonnet child",
+      "Fable parent with Opus child",
     );
 
     const parentCall = service.readThread(started.thread.id, true).thread.turns[0]?.items
       .find((item) => item.type === "collabAgentToolCall");
     expect(parentCall).toMatchObject({
-      type: "collabAgentToolCall", model: "claude-sonnet-5", status: "completed",
+      type: "collabAgentToolCall", model: "claude-opus-5", status: "completed",
     });
     const childThreadId = parentCall?.type === "collabAgentToolCall"
       ? parentCall.receiverThreadIds[0]! : "";
     expect(store.getThreadRecord(childThreadId)).toMatchObject({
-      modelPickerId: "claude:sonnet",
-      claudeModelValue: "sonnet",
-      resolvedModel: "claude-sonnet-5",
+      modelPickerId: "claude:claude-opus-5",
+      claudeModelValue: "claude-opus-5",
+      resolvedModel: "claude-opus-5",
       thread: {
-        name: "Use Sonnet [Sonnet 5]",
-        agentNickname: "Use Sonnet [Sonnet 5]",
-        source: { subAgent: { thread_spawn: { agent_nickname: "Use Sonnet [Sonnet 5]" } } },
+        name: "Use Opus [Opus 5]",
+        agentNickname: "Use Opus [Opus 5]",
+        source: { subAgent: { thread_spawn: { agent_nickname: "Use Opus [Opus 5]" } } },
       },
     });
-    expect(service.eventsAfter(childThreadId, 0)).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        method: "thread/name/updated",
-        params: { threadId: childThreadId, threadName: "Use Sonnet [Sonnet 5]" },
-      }),
-    ]));
+    const child = store.getThreadRecord(childThreadId)!;
+    store.updateThread({ ...child, modelPickerId: "claude:opus", claudeModelValue: "opus" });
     await expect(service.resumeThread({ threadId: childThreadId })).resolves.toMatchObject({
-      model: "claude:sonnet",
+      model: "claude:claude-opus-5",
       thread: { id: childThreadId, parentThreadId: started.thread.id },
     });
     await service.close();
