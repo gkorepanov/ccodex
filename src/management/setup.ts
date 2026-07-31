@@ -20,6 +20,7 @@ import {
 import {
   installManagedShims, restoreManagedShims, type ManagedShimChange,
 } from "./shims.js";
+import { compareSemver } from "./shimSelect.js";
 import {
   installRemoteCodexShim, relocatedDelegate, restoreRemoteCodexShim, type RemoteCodexShim,
 } from "./remoteShim.js";
@@ -66,8 +67,26 @@ async function npmStage(destination: string, version = packageVersion()): Promis
   });
 }
 
+const stagedCli = (staged: string) => join(staged, "node_modules", ".bin", "ccodex");
+
+function handOffSetup(staged: string, version: string, layout: InstallLayout): Promise<number> {
+  const command = stagedCli(staged);
+  if (!existsSync(command)) throw new Error(`Staged CCodex executable is missing: ${command}`);
+  const child = spawn(command, ["setup", "--staged", staged, "--version", version], {
+    env: { ...process.env, CCODEX_HOME: layout.home },
+    stdio: "inherit",
+  });
+  return new Promise((resolveExit, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (signal) reject(new Error(`CCodex ${version} setup was terminated by ${signal}.`));
+      else resolveExit(code ?? 1);
+    });
+  });
+}
+
 async function stagedDoctor(staged: string, layout: InstallLayout): Promise<void> {
-  const command = join(staged, "node_modules", ".bin", "ccodex");
+  const command = stagedCli(staged);
   if (!existsSync(command)) throw new Error(`Staged CCodex executable is missing: ${command}`);
   try {
     const { stdout } = await execute(command, ["doctor", "--json"], {
@@ -98,7 +117,7 @@ async function stagedDoctor(staged: string, layout: InstallLayout): Promise<void
 
 async function startupSmoke(staged: string, layout: InstallLayout): Promise<void> {
   if (process.env.CCODEX_SKIP_STARTUP_SMOKE === "1") return;
-  const command = join(staged, "node_modules", ".bin", "ccodex");
+  const command = stagedCli(staged);
   const socket = join(layout.staging, `smoke-${process.pid}.sock`);
   rmSync(socket, { force: true });
   const detached = process.platform !== "win32";
@@ -283,7 +302,9 @@ export function activate(layout: InstallLayout, version: string): string | null 
   const previous = activeVersion(layout);
   if (previous && previous !== version) atomicSymlink(join("versions", previous), layout.previous);
   atomicSymlink(join("versions", version), layout.current);
-  return previous;
+  return previous && existsSync(layout.previous) && lstatSync(layout.previous).isSymbolicLink()
+    ? basename(readlinkSync(layout.previous))
+    : null;
 }
 
 export async function setup(args: readonly string[]): Promise<number> {
@@ -300,10 +321,6 @@ export async function setup(args: readonly string[]): Promise<number> {
 
   const layout = installLayout();
   ensureLayout(layout);
-  migrateLegacyState(layout);
-  const discoveredDelegate = delegatedCodexExecutable(layout.home, pinnedCodexExecutable());
-  let delegateCodex = discoveredDelegate ? realpathSync(discoveredDelegate) : undefined;
-  const publicSocket = loadConfig().publicSocket;
   const versionPath = join(layout.versions, requestedVersion);
   const repairExisting = args.includes("--repair") && existsSync(versionPath);
   let staged = repairExisting ? versionPath : supplied ? resolve(supplied) : join(layout.staging, `${requestedVersion}-${process.pid}`);
@@ -311,12 +328,23 @@ export async function setup(args: readonly string[]): Promise<number> {
     rmSync(staged, { recursive: true, force: true });
     await npmStage(staged, requestedVersion);
   }
-  await stagedDoctor(staged, layout);
-  await startupSmoke(staged, layout);
   const compatibility = stagedCompatibility(staged);
   if (compatibility.productVersion !== requestedVersion) {
     throw new Error(`Staged package is ${compatibility.productVersion}, expected ${requestedVersion}. Nothing was activated.`);
   }
+  if (compareSemver(requestedVersion, packageVersion()) > 0) {
+    try {
+      return await handOffSetup(staged, requestedVersion, layout);
+    } finally {
+      if (!repairExisting && !supplied) rmSync(staged, { recursive: true, force: true });
+    }
+  }
+  migrateLegacyState(layout);
+  const discoveredDelegate = delegatedCodexExecutable(layout.home, pinnedCodexExecutable());
+  let delegateCodex = discoveredDelegate ? realpathSync(discoveredDelegate) : undefined;
+  const publicSocket = loadConfig().publicSocket;
+  await stagedDoctor(staged, layout);
+  await startupSmoke(staged, layout);
 
   if (!existsSync(versionPath)) {
     renameSync(staged, versionPath);
@@ -358,7 +386,7 @@ export async function setup(args: readonly string[]): Promise<number> {
     installedDesktopHook = desktopCliPath;
     const manifest: InstallManifest = {
       schemaVersion: 1,
-      method: supplied ? "curl" : "npm",
+      method: previousManifest?.method ?? (supplied ? "curl" : "npm"),
       package: "@gkorepanov/ccodex",
       activeVersion: requestedVersion,
       previousVersion: previous,

@@ -8,7 +8,7 @@ import { compatibilityManifest } from "../../src/compatibility/probe.js";
 import { installLayout } from "../../src/management/layout.js";
 import { posixManagedBlock } from "../../src/management/shellRouting.js";
 import { rollback, uninstall } from "../../src/management/lifecycle.js";
-import type { InstallManifest } from "../../src/management/setup.js";
+import { activate, type InstallManifest } from "../../src/management/setup.js";
 
 const roots: string[] = [];
 const oldHome = process.env.HOME;
@@ -66,6 +66,13 @@ function fixture(): { root: string; layout: ReturnType<typeof installLayout>; ma
 }
 
 describe("public install lifecycle", () => {
+  it("keeps the rollback target when setup repairs the active version", () => {
+    const { layout } = fixture();
+    expect(activate(layout, "0.3.0")).toBe("0.2.9");
+    expect(readlinkSync(layout.current)).toBe(join("versions", "0.3.0"));
+    expect(readlinkSync(layout.previous)).toBe(join("versions", "0.2.9"));
+  });
+
   it("atomically swaps active and previous versions on rollback", async () => {
     const { layout } = fixture();
     await rollback([]);
