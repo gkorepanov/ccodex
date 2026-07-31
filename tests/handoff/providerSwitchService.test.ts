@@ -34,6 +34,50 @@ function thread(id: string, provider: string, turns: Turn[] = []): Thread {
 }
 
 describe("provider switch service", () => {
+  it("continues overlay pagination from a stable turn anchor after live turns are appended", async () => {
+    const inheritedTurns = Array.from({ length: 20 }, (_, index) => turn(`overlay-${index + 1}`, "history"));
+    const target = thread("overlay-target", "openai");
+    const source = thread("overlay-source", "claude", inheritedTurns);
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    store.setOverlay({
+      threadId: target.id,
+      sourceThreadId: source.id,
+      sourceThread: source,
+      inheritedTurns,
+    });
+    let liveTurns: Turn[] = [];
+    const stock = {
+      request: vi.fn(async (method: string) => {
+        if (method === "thread/read") return { thread: { ...target, turns: liveTurns } };
+        return {};
+      }),
+    };
+    const service = new CrossProviderForks(store, {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: () => false,
+    } as never);
+
+    const first = await service.turnsOverlay({
+      threadId: target.id, limit: 5, sortDirection: "desc", itemsView: "full",
+    }, stock as never);
+    expect(first.data.map((value) => value.id))
+      .toEqual(["overlay-20", "overlay-19", "overlay-18", "overlay-17", "overlay-16"]);
+    expect(first.nextCursor).toBe(JSON.stringify({ turnId: "overlay-16", includeAnchor: false }));
+
+    liveTurns = Array.from({ length: 9 }, (_, index) => turn(`overlay-${index + 21}`, "live"));
+    const second = await service.turnsOverlay({
+      threadId: target.id,
+      cursor: first.nextCursor,
+      limit: 5,
+      sortDirection: "desc",
+      itemsView: "full",
+    }, stock as never);
+    expect(second.data.map((value) => value.id))
+      .toEqual(["overlay-15", "overlay-14", "overlay-13", "overlay-12", "overlay-11"]);
+    expect(new Set([...first.data, ...second.data].map((value) => value.id)).size).toBe(10);
+    service.close();
+  });
+
   it("renames the native target before revealing a provider switch", async () => {
     const source = { ...thread("rename-public", "openai", [turn("rename-source-turn", "source")]), name: "Native title" };
     const target = { ...thread("rename-claude-target", "claude"), name: null };

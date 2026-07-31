@@ -41,6 +41,7 @@ import {
   projectRpcToPublicThread,
 } from "../gateway/logicalThreadProjection.js";
 import { invalidParams } from "../protocol/errors.js";
+import { paginateTurns } from "../protocol/turnPagination.js";
 import { filterSortThreads } from "../store/threadFilter.js";
 import { v7 as uuidv7 } from "uuid";
 import {
@@ -278,20 +279,7 @@ function stagedSettings(base: ThreadSettings, pending: PendingProviderSwitch): T
 }
 
 function pageTurns(turns: Turn[], params: ThreadTurnsListParams): ThreadTurnsListResponse {
-  if (params.cursor && !params.cursor.startsWith("hyb-overlay-turn:")) throw invalidParams("Invalid handoff turn cursor.");
-  const offset = params.cursor ? Number(params.cursor.slice("hyb-overlay-turn:".length)) : 0;
-  if (!Number.isInteger(offset) || offset < 0) throw invalidParams("Invalid handoff turn cursor.");
-  const ordered = params.sortDirection === "asc" ? turns : [...turns].reverse();
-  const limit = Math.max(1, Math.min(params.limit ?? 50, 100));
-  const itemsView = params.itemsView ?? "summary";
-  const data = ordered.slice(offset, offset + limit).map((turn) => ({
-    ...turn, itemsView, ...(itemsView === "notLoaded" ? { items: [] } : {}),
-  }));
-  return {
-    data,
-    nextCursor: offset + data.length < ordered.length ? `hyb-overlay-turn:${offset + data.length}` : null,
-    backwardsCursor: data.length > 0 ? `hyb-overlay-turn:${Math.max(0, offset - limit)}` : null,
-  };
+  return paginateTurns(turns, params, ["hyb-overlay-turn:", "hyb-turn:"]);
 }
 
 function pageItems(turns: Turn[], params: ThreadItemsListParams): ThreadItemsListResponse {

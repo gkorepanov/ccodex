@@ -60,6 +60,19 @@ function config(dataDir: string): HybridConfig {
   };
 }
 
+function paginationTurn(id: string): Turn {
+  return {
+    id,
+    items: [{ type: "agentMessage", id: `${id}-item`, text: id, phase: "final_answer", memoryCitation: null }],
+    itemsView: "full",
+    status: "completed",
+    error: null,
+    startedAt: 1,
+    completedAt: 2,
+    durationMs: 1,
+  };
+}
+
 class ProviderOrderStore extends SqliteHybridStore {
   public readonly order: string[] = [];
   private watchedSequence: number | undefined;
@@ -1215,9 +1228,12 @@ describe("ClaudeService", () => {
     expect(resumed.initialTurnsPage).toMatchObject({
       data: [{ itemsView: "full", items: [{ type: "userMessage" }, { type: "agentMessage" }] }],
       nextCursor: null,
-      backwardsCursor: "hyb-turn:0",
+      backwardsCursor: JSON.stringify({ turnId: resumed.initialTurnsPage!.data[0]!.id, includeAnchor: true }),
     });
-    expect(resumed).toMatchObject({ turnsBackwardsCursor: "hyb-turn:0", itemsBackwardsCursor: "hyb-item:0" });
+    expect(resumed).toMatchObject({
+      turnsBackwardsCursor: JSON.stringify({ turnId: resumed.initialTurnsPage!.data[0]!.id, includeAnchor: true }),
+      itemsBackwardsCursor: "hyb-item:0",
+    });
     expect(service.listItems({ threadId: started.thread.id })).toEqual({
       data: [
         { turnId: expect.any(String), item: expect.objectContaining({ type: "userMessage" }) },
@@ -1226,6 +1242,51 @@ describe("ClaudeService", () => {
       nextCursor: null,
       backwardsCursor: "hyb-item:0",
     });
+    await service.close();
+  });
+
+  it("continues descending turn pagination from a stable anchor after live turns are appended", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-anchor-pagination-"));
+    directories.push(directory);
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), store, new FakeClaudeQuery().factory,
+    );
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    for (let index = 1; index <= 20; index += 1) {
+      store.createTurn(started.thread.id, paginationTurn(`turn-${index}`));
+    }
+
+    const first = service.turnsPage({ threadId: started.thread.id, limit: 5, sortDirection: "desc", itemsView: "full" });
+    expect(first.data.map((turn) => turn.id)).toEqual(["turn-20", "turn-19", "turn-18", "turn-17", "turn-16"]);
+    expect(first.nextCursor).toBe(JSON.stringify({ turnId: "turn-16", includeAnchor: false }));
+    expect(first.backwardsCursor).toBe(JSON.stringify({ turnId: "turn-20", includeAnchor: true }));
+
+    for (let index = 21; index <= 29; index += 1) {
+      store.createTurn(started.thread.id, paginationTurn(`turn-${index}`));
+    }
+    const second = service.turnsPage({
+      threadId: started.thread.id,
+      cursor: first.nextCursor,
+      limit: 5,
+      sortDirection: "desc",
+      itemsView: "full",
+    });
+    expect(second.data.map((turn) => turn.id)).toEqual(["turn-15", "turn-14", "turn-13", "turn-12", "turn-11"]);
+    expect(new Set([...first.data, ...second.data].map((turn) => turn.id)).size).toBe(10);
+    expect(service.turnsPage({
+      threadId: started.thread.id,
+      cursor: first.backwardsCursor,
+      limit: 5,
+      sortDirection: "desc",
+    }).data.map((turn) => turn.id)).toEqual(first.data.map((turn) => turn.id));
+
+    expect(service.turnsPage({
+      threadId: started.thread.id,
+      cursor: "hyb-turn:5",
+      limit: 1,
+      sortDirection: "desc",
+    }).data[0]?.id).toBe("turn-24");
     await service.close();
   });
 
@@ -1252,7 +1313,7 @@ describe("ClaudeService", () => {
     expect(first).toEqual({
       data: [{
         turnId, itemId: "user", snippet: "😀 Needle",
-        snippetMatchRange: { start: 3, end: 9 }, turnCursor: "hyb-turn:0",
+        snippetMatchRange: { start: 3, end: 9 }, turnCursor: JSON.stringify({ turnId, includeAnchor: true }),
       }],
       nextCursor: "hyb-search:1",
     });
@@ -1261,10 +1322,16 @@ describe("ClaudeService", () => {
     })).toEqual({
       data: [{
         turnId, itemId: "answer", snippet: "second NEEDLE",
-        snippetMatchRange: { start: 7, end: 13 }, turnCursor: "hyb-turn:0",
+        snippetMatchRange: { start: 7, end: 13 }, turnCursor: JSON.stringify({ turnId, includeAnchor: true }),
       }],
       nextCursor: null,
     });
+    expect(service.turnsPage({
+      threadId: started.thread.id,
+      cursor: first.data[0]!.turnCursor,
+      limit: 1,
+      sortDirection: "desc",
+    }).data[0]?.id).toBe(turnId);
     await service.close();
   });
 

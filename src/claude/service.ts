@@ -60,6 +60,7 @@ import { claudeEnvironment } from "./environment.js";
 import type { Model } from "../codex/generated/v2/Model.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
 import { invalidParams } from "../protocol/errors.js";
+import { paginateTurns, turnCursor } from "../protocol/turnPagination.js";
 import { MetricsRegistry } from "../observability/metrics.js";
 import { SdkTranscriptBrancher, type TranscriptBrancher } from "./transcriptBrancher.js";
 import {
@@ -559,7 +560,7 @@ export class ClaudeService {
     if (record.thread.parentThreadId) {
       return {
         ...threadResponse(record, !resume.excludeTurns),
-        turnsBackwardsCursor: record.thread.turns.length ? "hyb-turn:0" : null,
+        turnsBackwardsCursor: record.thread.turns.length ? turnCursor(record.thread.turns.at(-1)!.id, true) : null,
         itemsBackwardsCursor: record.thread.turns.some((turn) => turn.items.length) ? "hyb-item:0" : null,
         initialTurnsPage: resume.initialTurnsPage
           ? this.turnsPage({
@@ -578,7 +579,7 @@ export class ClaudeService {
     );
     return {
       ...threadResponse(record, !resume.excludeTurns),
-      turnsBackwardsCursor: record.thread.turns.length ? "hyb-turn:0" : null,
+      turnsBackwardsCursor: record.thread.turns.length ? turnCursor(record.thread.turns.at(-1)!.id, true) : null,
       itemsBackwardsCursor: record.thread.turns.some((turn) => turn.items.length) ? "hyb-item:0" : null,
       initialTurnsPage: resume.initialTurnsPage
         ? this.turnsPage({
@@ -973,23 +974,7 @@ export class ClaudeService {
 
   public turnsPage(params: ThreadTurnsListParams): ThreadTurnsListResponse {
     this.assertThreadAvailable(params.threadId);
-    const turns = this.listTurns(params.threadId);
-    const ordered = params.sortDirection === "asc" ? turns : [...turns].reverse();
-    if (params.cursor && !params.cursor.startsWith("hyb-turn:")) throw invalidParams("Invalid Claude turn cursor.");
-    const offset = params.cursor?.startsWith("hyb-turn:") ? Number(params.cursor.slice("hyb-turn:".length)) : 0;
-    if (!Number.isInteger(offset) || offset < 0) throw invalidParams("Invalid Claude turn cursor.");
-    const limit = Math.max(1, Math.min(params.limit ?? 50, 100));
-    const itemsView = params.itemsView ?? "summary";
-    const data = ordered.slice(offset, offset + limit).map((turn) => ({
-      ...turn,
-      itemsView,
-      ...(itemsView === "notLoaded" ? { items: [] } : {}),
-    }));
-    return {
-      data,
-      nextCursor: offset + data.length < ordered.length ? `hyb-turn:${offset + data.length}` : null,
-      backwardsCursor: data.length > 0 ? `hyb-turn:${Math.max(0, offset - limit)}` : null,
-    };
+    return paginateTurns(this.listTurns(params.threadId), params, ["hyb-turn:"]);
   }
 
   public listThreads(params: Parameters<HybridStore["listThreads"]>[0]): Thread[] {
@@ -1177,7 +1162,7 @@ export class ClaudeService {
     if (!Number.isInteger(offset) || offset < 0) throw invalidParams("Invalid Claude search cursor.");
     const turns = this.store.listTurns(params.threadId);
     const needle = searchTerm.toLocaleLowerCase();
-    const occurrences = turns.flatMap((turn, turnIndex) => turn.items.flatMap((item) => {
+    const occurrences = turns.flatMap((turn) => turn.items.flatMap((item) => {
       const text = item.type === "userMessage"
         ? item.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n")
         : item.type === "agentMessage" && item.phase !== "commentary" ? item.text : undefined;
@@ -1190,7 +1175,7 @@ export class ClaudeService {
           itemId: item.id,
           snippet: text,
           snippetMatchRange: { start, end: start + needle.length },
-          turnCursor: `hyb-turn:${turns.length - 1 - turnIndex}`,
+          turnCursor: turnCursor(turn.id, true),
         });
       }
       return matches;
