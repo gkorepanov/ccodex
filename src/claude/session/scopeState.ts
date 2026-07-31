@@ -2,6 +2,7 @@ import { v7 as uuidv7 } from "uuid";
 import type { ThreadItem } from "../../codex/generated/v2/ThreadItem.js";
 import type { Turn } from "../../codex/generated/v2/Turn.js";
 import type { ClaudeThreadRecord } from "../../store/HybridStore.js";
+import { claudeModelLabel, normalizeClaudeModelIdentifier } from "../modelSelection.js";
 import type { ActiveTool } from "../toolMapper.js";
 import type { FileSnapshot } from "../fileSnapshots.js";
 import type { MainStreamFact, MainStreamProjection } from "./commands.js";
@@ -111,6 +112,8 @@ export function newChildScope(
     ? parent.thread.source.subAgent : undefined;
   const depth = typeof subAgent === "object" && "thread_spawn" in subAgent ? subAgent.thread_spawn.depth : 0;
   const text = fact.prompt ?? fact.description;
+  const childModel = model?.claudeModelValue ?? parent.resolvedModel ?? parent.claudeModelValue;
+  const childName = `${fact.description.replace(/\s+/gu, " ").trim()} [${claudeModelLabel(childModel)}]`;
   const thread = {
     ...parent.thread, id: childThreadId, forkedFromId: parentThreadId, parentThreadId,
     preview: text, createdAt, updatedAt: createdAt, recencyAt: createdAt,
@@ -118,10 +121,10 @@ export function newChildScope(
     status: { type: "active" as const, activeFlags: [] }, path: null,
     source: { subAgent: { thread_spawn: {
       parent_thread_id: parentThreadId, depth: depth + 1, agent_path: null,
-      agent_nickname: fact.subagentType ?? null, agent_role: null,
+      agent_nickname: childName, agent_role: null,
     } } } as const,
-    threadSource: "subagent", agentNickname: fact.subagentType ?? null,
-    agentRole: null, name: null, turns: [],
+    threadSource: "subagent", agentNickname: childName,
+    agentRole: null, name: childName, turns: [],
   };
   const record: ClaudeThreadRecord = {
     ...parent, ...model, thread, resolvedModel: model ? null : parent.resolvedModel,
@@ -141,4 +144,26 @@ export function newChildScope(
     startedAt: createdAt, completedAt: null, durationMs: null,
   };
   return { record, turn, item };
+}
+
+export function withResolvedChildModel(record: ClaudeThreadRecord, model: string): ClaudeThreadRecord {
+  const currentName = record.thread.name ?? record.thread.agentNickname ?? "Agent";
+  const title = currentName.replace(/\s+\[[^\]\r\n]+\]$/u, "");
+  const name = `${title} [${claudeModelLabel(model)}]`;
+  const source = record.thread.source;
+  const subAgent = typeof source === "object" && "subAgent" in source ? source.subAgent : undefined;
+  const nextSource = typeof subAgent === "object" && "thread_spawn" in subAgent
+    ? { subAgent: { thread_spawn: { ...subAgent.thread_spawn, agent_nickname: name } } } as const
+    : source;
+  return {
+    ...record,
+    resolvedModel: normalizeClaudeModelIdentifier(model),
+    thread: {
+      ...record.thread,
+      source: nextSource,
+      agentNickname: name,
+      name,
+      updatedAt: Math.floor(Date.now() / 1_000),
+    },
+  };
 }

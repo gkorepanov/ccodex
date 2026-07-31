@@ -5,6 +5,7 @@ import {
   mapClaudeModel,
   mapClaudeModels,
 } from "../../src/claude/modelCatalog.js";
+import { claudeModelLabel } from "../../src/claude/modelSelection.js";
 
 describe("mapClaudeModel", () => {
   it("rejects an SDK query missing required lifecycle controls", () => {
@@ -80,6 +81,8 @@ describe("mapClaudeModel", () => {
       displayName: "Opus 5",
       description: "Already explicit.",
     })).toBe("Opus 5");
+    expect(claudeModelLabel("claude-sonnet-5")).toBe("Sonnet 5");
+    expect(claudeModelLabel("claude-haiku-4-5-20251001")).toBe("Haiku 4.5");
   });
 
   it("does not invent effort or service tiers", () => {

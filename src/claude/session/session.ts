@@ -78,6 +78,7 @@ import {
 import { isFileMutationTool, toolPolicy } from "../permissionPolicy.js";
 import {
   newChildScope, newMainStreamState, scopeProjection, streamItem, taskUsesProvider, toolAt,
+  withResolvedChildModel,
   type MainStreamState, type ScopeTask, type SessionTool,
 } from "./scopeState.js";
 import { systemNoticeText } from "../../gateway/transientNotice.js";
@@ -7708,10 +7709,17 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       && projection.completed.tool === "spawnAgent" && projection.completed.model) {
       const childThreadId = projection.completed.receiverThreadIds[0];
       const child = childThreadId ? this.repository.read(childThreadId, false) : undefined;
-      if (child) this.repository.update({
-        ...child,
-        resolvedModel: normalizeClaudeModelIdentifier(projection.completed.model),
-      });
+      if (child) {
+        const updated = withResolvedChildModel(child, projection.completed.model);
+        const renamed = updated.thread.name !== child.thread.name;
+        this.commitState(updated, renamed ? [{
+          turnId: null,
+          method: "thread/name/updated",
+          params: { threadId: updated.thread.id, threadName: updated.thread.name },
+          providerEventId: source.providerEventId,
+          providerEventType: source.providerEventType,
+        }] : []);
+      }
     }
     if (!tool.started) {
       tool.started = true;

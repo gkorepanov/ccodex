@@ -3207,7 +3207,18 @@ describe("ClaudeService", () => {
       modelPickerId: "claude:sonnet",
       claudeModelValue: "sonnet",
       resolvedModel: "claude-sonnet-5",
+      thread: {
+        name: "Use Sonnet [Sonnet 5]",
+        agentNickname: "Use Sonnet [Sonnet 5]",
+        source: { subAgent: { thread_spawn: { agent_nickname: "Use Sonnet [Sonnet 5]" } } },
+      },
     });
+    expect(service.eventsAfter(childThreadId, 0)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        method: "thread/name/updated",
+        params: { threadId: childThreadId, threadName: "Use Sonnet [Sonnet 5]" },
+      }),
+    ]));
     await expect(service.resumeThread({ threadId: childThreadId })).resolves.toMatchObject({
       model: "claude:sonnet",
       thread: { id: childThreadId, parentThreadId: started.thread.id },
@@ -3851,7 +3862,7 @@ describe("ClaudeService", () => {
     const service = new ClaudeService(
       config(directory), hub, new Logger("error"), new SqliteHybridStore(database), fake.factory,
     );
-    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const started = await service.startThread({ model: "claude:claude-haiku-4-5", cwd: directory });
     const prepared = await service.prepareTurn({
       threadId: started.thread.id,
       input: [{ type: "text", text: "spawn child", text_elements: [] }],
@@ -3871,6 +3882,9 @@ describe("ClaudeService", () => {
     expect(children[0]).toMatchObject({
       id: childThreadId, parentThreadId: started.thread.id, canAcceptDirectInput: false,
       threadSource: "subagent", status: { type: "idle" },
+      name: "Inspect the repo [Haiku 4.5]",
+      agentNickname: "Inspect the repo [Haiku 4.5]",
+      source: { subAgent: { thread_spawn: { agent_nickname: "Inspect the repo [Haiku 4.5]" } } },
     });
     const child = await service.resumeThread({
       threadId: childThreadId!,

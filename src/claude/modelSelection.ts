@@ -10,6 +10,14 @@ export function normalizeClaudeModelIdentifier(value: string): string {
   return value.replace(ANSI_SEQUENCE, "").replace(LITERAL_STYLE_SUFFIX, "");
 }
 
+export function claudeModelLabel(value: string): string {
+  const normalized = normalizeClaudeModelIdentifier(value);
+  const version = /^claude-([a-z][a-z0-9]*?)-(\d+)(?:-(\d{1,2})(?=-|$))?/u.exec(normalized);
+  const family = version?.[1] ?? /^(?:claude-)?([a-z][a-z0-9]*)/u.exec(normalized)?.[1] ?? normalized;
+  const label = `${family[0]?.toUpperCase() ?? ""}${family.slice(1)}`;
+  return version ? `${label} ${version[2]}${version[3] ? `.${version[3]}` : ""}` : label;
+}
+
 export function modelCatalogValue(model: ModelInfo): string {
   const value = normalizeClaudeModelIdentifier(model.value);
   const resolved = model.resolvedModel && normalizeClaudeModelIdentifier(model.resolvedModel);
