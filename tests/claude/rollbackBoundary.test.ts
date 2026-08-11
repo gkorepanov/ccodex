@@ -41,7 +41,7 @@ function record(directory: string): ClaudeThreadRecord {
     thread: {
       id: "rollback-thread", extra: null, sessionId: randomUUID(), forkedFromId: null, parentThreadId: null,
       canAcceptDirectInput: true,
-      preview: "compacted branch", ephemeral: false, historyMode: "legacy", modelProvider: "claude",
+      preview: "compacted branch", ephemeral: false, isPinned: false, historyMode: "legacy", modelProvider: "claude",
       createdAt: 1, updatedAt: 2, recencyAt: 2, status: { type: "idle" }, path: null, cwd: directory,
       cliVersion: "2.1.209", source: "appServer", threadSource: null, agentNickname: null, agentRole: null,
       gitInfo: null, name: "rollback fixture ✳️", turns: [],
@@ -284,7 +284,7 @@ describe("compacted transcript rollback boundary", () => {
       input: [{ type: "text", text: "message before edit", text_elements: [] }],
     });
     interrupted.announce();
-    interrupted.start();
+    await interrupted.startAndWait();
     await waitFor(() => activeFake.prompts.length === 1, "active edit target");
     await service.interruptTurn({ threadId: "rollback-thread", turnId: interrupted.response.turn.id });
     releaseActive();

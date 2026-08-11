@@ -5,7 +5,7 @@ import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { Turn } from "../codex/generated/v2/Turn.js";
 import type { ProviderKind, ProviderEpochState } from "./store.js";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const LEGACY_SCHEMA_VERSION = 2;
 
 export interface PublicTaskIdentity {
@@ -14,6 +14,7 @@ export interface PublicTaskIdentity {
   readonly revision: number;
   readonly sessionId: string;
   readonly createdAt: number;
+  readonly isPinned: boolean;
   readonly forkedFromId?: string;
   readonly parentThreadId?: string;
 }
@@ -97,6 +98,7 @@ interface TaskRow {
   revision: number;
   session_id: string;
   created_at: number;
+  is_pinned: number;
   forked_from_id: string | null;
   parent_thread_id: string | null;
 }
@@ -150,21 +152,26 @@ export class LineageStore {
     const version = this.userVersion();
     this.createSchema();
     if (version < 3) this.migrateCatalogIdentities();
+    if (version < 4) this.migratePinnedTasks();
     if (this.userVersion() < SCHEMA_VERSION) this.database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
   public close(): void { this.database.close(); }
 
-  public createTask(identity: Omit<PublicTaskIdentity, "revision">, epoch: NewEpochBoundary): PublicTaskIdentity {
+  public createTask(
+    identity: Omit<PublicTaskIdentity, "revision" | "isPinned"> & { readonly isPinned?: boolean },
+    epoch: NewEpochBoundary,
+  ): PublicTaskIdentity {
     return this.transaction(() => {
       this.database.prepare(`
         INSERT INTO lineage_tasks (
-          public_thread_id, current_epoch_id, revision, session_id, created_at, forked_from_id, parent_thread_id
-        ) VALUES (?, ?, 1, ?, ?, ?, ?)
+          public_thread_id, current_epoch_id, revision, session_id, created_at, is_pinned,
+          forked_from_id, parent_thread_id
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
       `).run(
         identity.publicThreadId, identity.currentEpochId,
         identity.parentThreadId ? identity.sessionId : identity.publicThreadId,
-        identity.createdAt,
+        identity.createdAt, identity.isPinned ? 1 : 0,
         identity.forkedFromId ?? null, identity.parentThreadId ?? null,
       );
       this.database.prepare(`
@@ -191,6 +198,12 @@ export class LineageStore {
     return (this.database.prepare(`
       SELECT * FROM lineage_tasks ORDER BY public_thread_id ASC
     `).all() as unknown as TaskRow[]).map((row) => this.taskFromRow(row));
+  }
+
+  public updateTaskPinned(publicThreadId: string, isPinned: boolean): boolean {
+    return Number(this.database.prepare(`
+      UPDATE lineage_tasks SET is_pinned = ?, revision = revision + 1 WHERE public_thread_id = ?
+    `).run(isPinned ? 1 : 0, publicThreadId).changes) === 1;
   }
 
   public getEpoch(epochId: string): EpochBoundary | undefined {
@@ -281,19 +294,20 @@ export class LineageStore {
   }
 
   public createForkTask(
-    identity: Omit<PublicTaskIdentity, "revision">,
+    identity: Omit<PublicTaskIdentity, "revision" | "isPinned"> & { readonly isPinned?: boolean },
     epoch: NewEpochBoundary,
     inheritedSegments: readonly NewTranscriptSegment[],
   ): PublicTaskIdentity {
     return this.transaction(() => {
       this.database.prepare(`
         INSERT INTO lineage_tasks (
-          public_thread_id, current_epoch_id, revision, session_id, created_at, forked_from_id, parent_thread_id
-        ) VALUES (?, ?, 1, ?, ?, ?, ?)
+          public_thread_id, current_epoch_id, revision, session_id, created_at, is_pinned,
+          forked_from_id, parent_thread_id
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
       `).run(
         identity.publicThreadId, identity.currentEpochId,
         identity.parentThreadId ? identity.sessionId : identity.publicThreadId,
-        identity.createdAt,
+        identity.createdAt, identity.isPinned ? 1 : 0,
         identity.forkedFromId ?? null, identity.parentThreadId ?? null,
       );
       this.database.prepare(`
@@ -491,6 +505,7 @@ export class LineageStore {
         revision INTEGER NOT NULL,
         session_id TEXT NOT NULL,
         created_at INTEGER NOT NULL,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
         forked_from_id TEXT,
         parent_thread_id TEXT
       );
@@ -536,11 +551,13 @@ export class LineageStore {
       const thread = JSON.parse(row.thread_json) as Thread;
       this.database.prepare(`
         INSERT OR IGNORE INTO lineage_tasks (
-          public_thread_id, current_epoch_id, revision, session_id, created_at, forked_from_id, parent_thread_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          public_thread_id, current_epoch_id, revision, session_id, created_at, is_pinned,
+          forked_from_id, parent_thread_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         row.public_thread_id, row.current_epoch_id, row.revision,
         thread.parentThreadId ? thread.sessionId || row.public_thread_id : row.public_thread_id, thread.createdAt,
+        thread.isPinned ? 1 : 0,
         thread.forkedFromId, thread.parentThreadId,
       );
     }
@@ -579,6 +596,14 @@ export class LineageStore {
       `).run();
       this.database.exec("PRAGMA user_version = 3");
     });
+  }
+
+  private migratePinnedTasks(): void {
+    if (!(this.database.prepare("PRAGMA table_info(lineage_tasks)").all() as Array<{ name: string }>)
+      .some((column) => column.name === "is_pinned")) {
+      this.database.exec("ALTER TABLE lineage_tasks ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0");
+    }
+    this.database.exec("PRAGMA user_version = 4");
   }
 
   private importLegacyTurns(publicThreadId: string, currentEpochId: string, turns: LegacyTurnRow[]): void {
@@ -678,6 +703,7 @@ export class LineageStore {
       revision: row.revision,
       sessionId: row.session_id,
       createdAt: row.created_at,
+      isPinned: row.is_pinned === 1,
       ...(row.forked_from_id ? { forkedFromId: row.forked_from_id } : {}),
       ...(row.parent_thread_id ? { parentThreadId: row.parent_thread_id } : {}),
     };

@@ -94,7 +94,7 @@ function commandItem(
   cwd: string,
 ): ThreadItem {
   return {
-    type: "commandExecution", id: state.itemId, command, cwd,
+    type: "commandExecution", id: state.itemId, pluginId: null, scriptPath: null, command, cwd,
     processId: null, source: "agent", status: "inProgress", commandActions: actions,
     aggregatedOutput: null, exitCode: null, durationMs: null,
   };

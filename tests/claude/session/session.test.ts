@@ -34,6 +34,7 @@ function record(threadId: string): ClaudeThreadRecord {
     canAcceptDirectInput: true,
     preview: "",
     ephemeral: false,
+    isPinned: false,
     historyMode: "legacy",
     modelProvider: "claude",
     createdAt: 1,
@@ -2691,7 +2692,7 @@ describe("ClaudeSession Phase 3 slice", () => {
     const staleCandidate = { ...initial, reasoningEffort: "high" };
     await registry.submit("thread-1", {
       type: "threadAdmin",
-      command: { kind: "metadata", gitInfo: { branch: "main", sha: "abc123" } },
+      command: { kind: "metadata", gitInfo: { branch: "main", sha: "abc123" }, isPinned: undefined },
     });
     await registry.submit("thread-1", {
       type: "updateDesiredSettings",

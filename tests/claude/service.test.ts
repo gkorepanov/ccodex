@@ -165,6 +165,53 @@ describe("ClaudeService", () => {
     await service.close();
   });
 
+  it("does not let a later native Claude ai-title overwrite the persisted thread name", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_000_000);
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-persisted-name-"));
+    directories.push(directory);
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    let threadId = "";
+    let nativeTitle = "Initial native title";
+    const service = new ClaudeService(
+      config(directory),
+      new SubscriptionHub(),
+      new Logger("error"),
+      store,
+      new FakeClaudeQuery().factory,
+      undefined,
+      new MetricsRegistry(),
+      undefined,
+      { rename: async () => undefined, delete: async () => undefined },
+      undefined,
+      undefined,
+      undefined,
+      async () => [{
+        sessionId: store.getThreadRecord(threadId, false)!.claudeSessionId,
+        summary: nativeTitle,
+        customTitle: nativeTitle,
+        firstPrompt: "native first prompt",
+        cwd: directory,
+        createdAt: 1_700_000_000_000,
+        lastModified: Date.now(),
+      }],
+    );
+    threadId = (await service.startThread({ model: "claude:haiku", cwd: directory })).thread.id;
+    await service.refreshNativeMetadata();
+    expect(service.readThread(threadId, false).thread.name).toBe(nativeTitle);
+
+    await service.setThreadName({ threadId, name: "❤️ XRP MM (Fable v3)" });
+    nativeTitle = "Оптимизировать баланс между хеджированием и маркаутами";
+    vi.advanceTimersByTime(30_001);
+    await service.refreshNativeMetadata();
+
+    expect(service.readThread(threadId, false).thread.name).toBe("❤️ XRP MM (Fable v3)");
+    expect(service.listThreads({})).toContainEqual(
+      expect.objectContaining({ id: threadId, name: "❤️ XRP MM (Fable v3)" }),
+    );
+    await service.close();
+  });
+
   it("creates hidden threads under suppression before they become durable", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-hidden-thread-"));
     directories.push(directory);
@@ -269,7 +316,8 @@ describe("ClaudeService", () => {
       commandActions: [expect.objectContaining({ type: "read", path: join(directory, "package.json") })],
     }));
     expect(turn.items.filter((item) => item.id === failedId)).toEqual([{
-      type: "commandExecution", id: failedId, command: "Read plots/missing.jpg", cwd: directory,
+      type: "commandExecution", id: failedId, pluginId: null, scriptPath: null,
+      command: "Read plots/missing.jpg", cwd: directory,
       processId: null, source: "agent", status: "failed",
       commandActions: [{
         type: "read", command: "Read plots/missing.jpg", name: "missing.jpg",
@@ -1386,7 +1434,7 @@ describe("ClaudeService", () => {
     const thread = {
       id: "crashed-thread", extra: null, sessionId: "codex-session", forkedFromId: null, parentThreadId: null,
       canAcceptDirectInput: true,
-      preview: "crash", ephemeral: false, historyMode: "legacy" as const, modelProvider: "claude",
+      preview: "crash", ephemeral: false, isPinned: false, historyMode: "legacy" as const, modelProvider: "claude",
       createdAt: 1, updatedAt: 1, recencyAt: 1, status: { type: "active" as const, activeFlags: [] },
       path: null, cwd: directory, cliVersion: "test", source: "appServer" as const, threadSource: null,
       agentNickname: null, agentRole: null, gitInfo: null, name: null, turns: [],
@@ -1407,7 +1455,8 @@ describe("ClaudeService", () => {
         { type: "userMessage", id: "crashed-turn", clientId: null, content: [] },
         { type: "agentMessage", id: "partial-review", text: "P1 persisted finding", phase: "commentary", memoryCitation: null },
         {
-          type: "commandExecution", id: "crashed-command", command: "sleep 10", cwd: directory,
+          type: "commandExecution", id: "crashed-command", pluginId: null, scriptPath: null,
+          command: "sleep 10", cwd: directory,
           processId: null, source: "agent", status: "inProgress", commandActions: [], aggregatedOutput: "TICK 1\n",
           exitCode: null, durationMs: null,
         },
@@ -2653,6 +2702,8 @@ describe("ClaudeService", () => {
       items: [{
         type: "commandExecution",
         id: "live-provider-task-secret",
+        pluginId: null,
+        scriptPath: null,
         command: "sleep 60; echo done",
         cwd: directory,
         processId: null,
@@ -7225,6 +7276,108 @@ describe("ClaudeService", () => {
       "turn after raced Stop",
     );
     expect(generations).toBe(2);
+    await service.close();
+  });
+
+  it("persists multi-directory roots and passes only extra roots to Claude", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ccodex-multidir-"));
+    directories.push(directory);
+    const database = join(directory, "state.sqlite");
+    const extra = join(directory, "extra-does-not-need-to-exist");
+    const firstQuery = new FakeClaudeQuery();
+    const first = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(database), firstQuery.factory,
+    );
+    const started = await first.startThread({
+      model: "claude:haiku", cwd: directory, runtimeWorkspaceRoots: [directory, extra, extra],
+    });
+    expect(started.runtimeWorkspaceRoots).toEqual([directory, extra]);
+    await first.resumeThread({ threadId: started.thread.id, excludeTurns: true });
+    expect(firstQuery.inputs[0]?.options.additionalDirectories).toEqual([extra]);
+    await first.close();
+
+    const resumedQuery = new FakeClaudeQuery();
+    const resumed = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(database), resumedQuery.factory,
+    );
+    const response = await resumed.resumeThread({ threadId: started.thread.id, excludeTurns: true });
+    expect(response.runtimeWorkspaceRoots).toEqual([directory, extra]);
+    expect(resumedQuery.inputs[0]?.options.additionalDirectories).toEqual([extra]);
+    await resumed.close();
+  });
+
+  it("applies root replacement, cwd retargeting, fork inheritance, and local-only environments", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ccodex-multidir-settings-"));
+    const nextCwd = mkdtempSync(join(tmpdir(), "ccodex-multidir-next-"));
+    directories.push(directory, nextCwd);
+    const extra = join(directory, "extra");
+    const fake = new FakeClaudeQuery();
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory,
+    );
+    const source = await service.startThread({
+      model: "claude:haiku", cwd: directory, runtimeWorkspaceRoots: [directory, extra],
+    });
+    await service.updateThreadMetadata({ threadId: source.thread.id, isPinned: true });
+    expect(service.listThreads({ isPinned: true })).toEqual([
+      expect.objectContaining({ id: source.thread.id, isPinned: true }),
+    ]);
+
+    const inherited = await service.forkThread({ threadId: source.thread.id });
+    expect(inherited).toMatchObject({
+      runtimeWorkspaceRoots: [directory, extra], thread: { isPinned: false },
+    });
+    const replaced = await service.forkThread({
+      threadId: source.thread.id, runtimeWorkspaceRoots: [],
+    });
+    expect(replaced.runtimeWorkspaceRoots).toEqual([]);
+
+    const retargeted = await service.resumeThread({
+      threadId: source.thread.id, cwd: nextCwd, excludeTurns: true,
+    });
+    expect(retargeted.runtimeWorkspaceRoots).toEqual([nextCwd, extra]);
+    expect(fake.inputs.at(-1)?.options.additionalDirectories).toEqual([extra]);
+
+    const ephemeral = await service.startThread({
+      model: "claude:haiku", cwd: directory, ephemeral: true,
+    });
+    await expect(service.updateThreadMetadata({
+      threadId: ephemeral.thread.id, isPinned: true,
+    })).rejects.toThrow("cannot be pinned");
+    await expect(service.startThread({
+      model: "claude:haiku", environments: [{ environmentId: "remote", cwd: directory }],
+    })).rejects.toThrow("only support the local Codex environment");
+    await service.close();
+  });
+
+  it("applies turn-level runtime roots before creating the Claude runtime", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ccodex-multidir-turn-"));
+    directories.push(directory);
+    const extra = join(directory, "extra");
+    const fake = new FakeClaudeQuery();
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory,
+    );
+    const source = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const prepared = await service.prepareTurn({
+      threadId: source.thread.id,
+      runtimeWorkspaceRoots: [directory, extra],
+      input: [{ type: "text", text: "OK", text_elements: [] }],
+    });
+    prepared.announce();
+    prepared.start();
+    await waitFor(
+      () => service.readThread(source.thread.id, true).thread.turns.at(-1)?.status === "completed",
+      "multi-directory turn",
+    );
+    expect(fake.inputs[0]?.options.additionalDirectories).toEqual([extra]);
+    expect((await service.resumeThread({
+      threadId: source.thread.id, excludeTurns: true,
+    })).runtimeWorkspaceRoots).toEqual([directory, extra]);
     await service.close();
   });
 });

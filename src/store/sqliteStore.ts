@@ -126,7 +126,15 @@ function parseRecord(row: ThreadRow, turns: Turn[]): ClaudeThreadRecord {
     };
   };
   return {
-    thread: { ...thread, canAcceptDirectInput: thread.parentThreadId ? false : true, turns },
+    thread: {
+      ...thread,
+      isPinned: thread.isPinned ?? false,
+      canAcceptDirectInput: thread.parentThreadId ? false : true,
+      turns,
+    },
+    runtimeWorkspaceRoots: Array.isArray(runtime.runtimeWorkspaceRoots)
+      ? runtime.runtimeWorkspaceRoots as string[]
+      : [thread.cwd],
     claudeSessionId: row.claude_session_id,
     modelPickerId: row.model_picker_id,
     claudeModelValue: row.claude_model_value,
@@ -236,6 +244,7 @@ export class SqliteHybridStore implements HybridStore {
       record.lastCompletedTurnId,
       record.claudeCodeVersion,
       json({
+        runtimeWorkspaceRoots: record.runtimeWorkspaceRoots ?? [record.thread.cwd],
         approvalsReviewer: record.approvalsReviewer,
         reasoningEffort: record.reasoningEffort,
         reasoningSummary: record.reasoningSummary,
@@ -318,6 +327,7 @@ export class SqliteHybridStore implements HybridStore {
       merged.lastCompletedTurnId,
       merged.claudeCodeVersion,
       json({
+        runtimeWorkspaceRoots: merged.runtimeWorkspaceRoots ?? [merged.thread.cwd],
         approvalsReviewer: merged.approvalsReviewer,
         reasoningEffort: merged.reasoningEffort,
         reasoningSummary: merged.reasoningSummary,

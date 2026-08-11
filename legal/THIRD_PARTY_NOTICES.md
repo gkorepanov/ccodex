@@ -136,9 +136,9 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:chrono | 0.4.45 | MIT OR Apache-2.0 |
 | cargo:chunked_transfer | 1.5.0 | MIT OR Apache-2.0 |
 | cargo:cipher | 0.4.4 | MIT OR Apache-2.0 |
-| cargo:clang-sys | 1.8.1 | Apache-2.0 |
-| cargo:clap | 4.6.4 | MIT OR Apache-2.0 |
-| cargo:clap_builder | 4.6.2 | MIT OR Apache-2.0 |
+| cargo:clang-sys | 1.9.1 | Apache-2.0 |
+| cargo:clap | 4.6.5 | MIT OR Apache-2.0 |
+| cargo:clap_builder | 4.6.5 | MIT OR Apache-2.0 |
 | cargo:clap_derive | 4.6.4 | MIT OR Apache-2.0 |
 | cargo:clap_lex | 1.1.0 | MIT OR Apache-2.0 |
 | cargo:clatter | 2.2.0 | MIT |
@@ -148,80 +148,80 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:cmov | 0.5.4 | Apache-2.0 OR MIT |
 | cargo:cmp_any | 0.8.1 | MIT OR Apache-2.0 |
 | cargo:cobs | 0.3.0 | MIT OR Apache-2.0 |
-| cargo:codex-agent-graph-store | 0.145.0 | Apache-2.0 |
-| cargo:codex-agent-identity | 0.145.0 | Apache-2.0 |
-| cargo:codex-analytics | 0.145.0 | Apache-2.0 |
-| cargo:codex-api | 0.145.0 | Apache-2.0 |
-| cargo:codex-app-server-protocol | 0.145.0 | Apache-2.0 |
-| cargo:codex-app-server-transport | 0.145.0 | Apache-2.0 |
-| cargo:codex-apply-patch | 0.145.0 | Apache-2.0 |
-| cargo:codex-async-utils | 0.145.0 | Apache-2.0 |
-| cargo:codex-aws-auth | 0.145.0 | Apache-2.0 |
-| cargo:codex-client | 0.145.0 | Apache-2.0 |
-| cargo:codex-code-mode | 0.145.0 | Apache-2.0 |
-| cargo:codex-code-mode-protocol | 0.145.0 | Apache-2.0 |
-| cargo:codex-collaboration-mode-templates | 0.145.0 | Apache-2.0 |
-| cargo:codex-config | 0.145.0 | Apache-2.0 |
-| cargo:codex-connectors | 0.145.0 | Apache-2.0 |
-| cargo:codex-context-fragments | 0.145.0 | Apache-2.0 |
-| cargo:codex-core | 0.145.0 | Apache-2.0 |
-| cargo:codex-core-plugins | 0.145.0 | Apache-2.0 |
-| cargo:codex-core-skills | 0.145.0 | Apache-2.0 |
-| cargo:codex-exec-server | 0.145.0 | Apache-2.0 |
-| cargo:codex-exec-server-protocol | 0.145.0 | Apache-2.0 |
-| cargo:codex-execpolicy | 0.145.0 | Apache-2.0 |
-| cargo:codex-experimental-api-macros | 0.145.0 | Apache-2.0 |
-| cargo:codex-extension-api | 0.145.0 | Apache-2.0 |
-| cargo:codex-extension-items | 0.145.0 | Apache-2.0 |
-| cargo:codex-features | 0.145.0 | Apache-2.0 |
-| cargo:codex-feedback | 0.145.0 | Apache-2.0 |
-| cargo:codex-file-search | 0.145.0 | Apache-2.0 |
-| cargo:codex-file-system | 0.145.0 | Apache-2.0 |
-| cargo:codex-git-utils | 0.145.0 | Apache-2.0 |
-| cargo:codex-hooks | 0.145.0 | Apache-2.0 |
-| cargo:codex-http-client | 0.145.0 | Apache-2.0 |
-| cargo:codex-install-context | 0.145.0 | Apache-2.0 |
-| cargo:codex-keyring-store | 0.145.0 | Apache-2.0 |
-| cargo:codex-login | 0.145.0 | Apache-2.0 |
-| cargo:codex-mcp | 0.145.0 | Apache-2.0 |
-| cargo:codex-memories-read | 0.145.0 | Apache-2.0 |
-| cargo:codex-model-provider | 0.145.0 | Apache-2.0 |
-| cargo:codex-model-provider-info | 0.145.0 | Apache-2.0 |
-| cargo:codex-models-manager | 0.145.0 | Apache-2.0 |
-| cargo:codex-network-proxy | 0.145.0 | Apache-2.0 |
-| cargo:codex-otel | 0.145.0 | Apache-2.0 |
-| cargo:codex-plugin | 0.145.0 | Apache-2.0 |
-| cargo:codex-prompts | 0.145.0 | Apache-2.0 |
-| cargo:codex-protocol | 0.145.0 | Apache-2.0 |
-| cargo:codex-response-debug-context | 0.145.0 | Apache-2.0 |
-| cargo:codex-rmcp-client | 0.145.0 | Apache-2.0 |
-| cargo:codex-rollout | 0.145.0 | Apache-2.0 |
-| cargo:codex-rollout-trace | 0.145.0 | Apache-2.0 |
-| cargo:codex-sandboxing | 0.145.0 | Apache-2.0 |
-| cargo:codex-secrets | 0.145.0 | Apache-2.0 |
-| cargo:codex-shell-command | 0.145.0 | Apache-2.0 |
-| cargo:codex-shell-escalation | 0.145.0 | Apache-2.0 |
-| cargo:codex-skills | 0.145.0 | Apache-2.0 |
-| cargo:codex-state | 0.145.0 | Apache-2.0 |
-| cargo:codex-terminal-detection | 0.145.0 | Apache-2.0 |
-| cargo:codex-thread-store | 0.145.0 | Apache-2.0 |
-| cargo:codex-tools | 0.145.0 | Apache-2.0 |
-| cargo:codex-uds | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-absolute-path | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-cache | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-home-dir | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-image | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-output-truncation | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-path | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-path-uri | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-plugins | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-pty | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-rustls-provider | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-stream-parser | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-string | 0.145.0 | Apache-2.0 |
-| cargo:codex-utils-template | 0.145.0 | Apache-2.0 |
-| cargo:codex-websocket-client | 0.145.0 | Apache-2.0 |
-| cargo:codex-windows-sandbox | 0.145.0 | Apache-2.0 |
+| cargo:codex-agent-graph-store | 0.146.0 | Apache-2.0 |
+| cargo:codex-agent-identity | 0.146.0 | Apache-2.0 |
+| cargo:codex-analytics | 0.146.0 | Apache-2.0 |
+| cargo:codex-api | 0.146.0 | Apache-2.0 |
+| cargo:codex-app-server-protocol | 0.146.0 | Apache-2.0 |
+| cargo:codex-app-server-transport | 0.146.0 | Apache-2.0 |
+| cargo:codex-apply-patch | 0.146.0 | Apache-2.0 |
+| cargo:codex-async-utils | 0.146.0 | Apache-2.0 |
+| cargo:codex-aws-auth | 0.146.0 | Apache-2.0 |
+| cargo:codex-client | 0.146.0 | Apache-2.0 |
+| cargo:codex-code-mode | 0.146.0 | Apache-2.0 |
+| cargo:codex-code-mode-protocol | 0.146.0 | Apache-2.0 |
+| cargo:codex-collaboration-mode-templates | 0.146.0 | Apache-2.0 |
+| cargo:codex-config | 0.146.0 | Apache-2.0 |
+| cargo:codex-connectors | 0.146.0 | Apache-2.0 |
+| cargo:codex-context-fragments | 0.146.0 | Apache-2.0 |
+| cargo:codex-core | 0.146.0 | Apache-2.0 |
+| cargo:codex-core-plugins | 0.146.0 | Apache-2.0 |
+| cargo:codex-core-skills | 0.146.0 | Apache-2.0 |
+| cargo:codex-exec-server | 0.146.0 | Apache-2.0 |
+| cargo:codex-exec-server-protocol | 0.146.0 | Apache-2.0 |
+| cargo:codex-execpolicy | 0.146.0 | Apache-2.0 |
+| cargo:codex-experimental-api-macros | 0.146.0 | Apache-2.0 |
+| cargo:codex-extension-api | 0.146.0 | Apache-2.0 |
+| cargo:codex-extension-items | 0.146.0 | Apache-2.0 |
+| cargo:codex-features | 0.146.0 | Apache-2.0 |
+| cargo:codex-feedback | 0.146.0 | Apache-2.0 |
+| cargo:codex-file-search | 0.146.0 | Apache-2.0 |
+| cargo:codex-file-system | 0.146.0 | Apache-2.0 |
+| cargo:codex-git-utils | 0.146.0 | Apache-2.0 |
+| cargo:codex-hooks | 0.146.0 | Apache-2.0 |
+| cargo:codex-http-client | 0.146.0 | Apache-2.0 |
+| cargo:codex-install-context | 0.146.0 | Apache-2.0 |
+| cargo:codex-keyring-store | 0.146.0 | Apache-2.0 |
+| cargo:codex-login | 0.146.0 | Apache-2.0 |
+| cargo:codex-mcp | 0.146.0 | Apache-2.0 |
+| cargo:codex-memories-read | 0.146.0 | Apache-2.0 |
+| cargo:codex-model-provider | 0.146.0 | Apache-2.0 |
+| cargo:codex-model-provider-info | 0.146.0 | Apache-2.0 |
+| cargo:codex-models-manager | 0.146.0 | Apache-2.0 |
+| cargo:codex-network-proxy | 0.146.0 | Apache-2.0 |
+| cargo:codex-otel | 0.146.0 | Apache-2.0 |
+| cargo:codex-plugin | 0.146.0 | Apache-2.0 |
+| cargo:codex-prompts | 0.146.0 | Apache-2.0 |
+| cargo:codex-protocol | 0.146.0 | Apache-2.0 |
+| cargo:codex-response-debug-context | 0.146.0 | Apache-2.0 |
+| cargo:codex-rmcp-client | 0.146.0 | Apache-2.0 |
+| cargo:codex-rollout | 0.146.0 | Apache-2.0 |
+| cargo:codex-rollout-trace | 0.146.0 | Apache-2.0 |
+| cargo:codex-sandboxing | 0.146.0 | Apache-2.0 |
+| cargo:codex-secrets | 0.146.0 | Apache-2.0 |
+| cargo:codex-shell-command | 0.146.0 | Apache-2.0 |
+| cargo:codex-shell-escalation | 0.146.0 | Apache-2.0 |
+| cargo:codex-skills | 0.146.0 | Apache-2.0 |
+| cargo:codex-state | 0.146.0 | Apache-2.0 |
+| cargo:codex-terminal-detection | 0.146.0 | Apache-2.0 |
+| cargo:codex-thread-store | 0.146.0 | Apache-2.0 |
+| cargo:codex-tools | 0.146.0 | Apache-2.0 |
+| cargo:codex-uds | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-absolute-path | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-cache | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-home-dir | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-image | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-output-truncation | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-path | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-path-uri | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-plugins | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-pty | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-rustls-provider | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-stream-parser | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-string | 0.146.0 | Apache-2.0 |
+| cargo:codex-utils-template | 0.146.0 | Apache-2.0 |
+| cargo:codex-websocket-client | 0.146.0 | Apache-2.0 |
+| cargo:codex-windows-sandbox | 0.146.0 | Apache-2.0 |
 | cargo:color_quant | 1.1.0 | MIT |
 | cargo:colorchoice | 1.0.5 | MIT OR Apache-2.0 |
 | cargo:combine | 4.6.7 | MIT |
@@ -259,7 +259,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:crypto_secretbox | 0.1.1 | Apache-2.0 OR MIT |
 | cargo:csv | 1.4.0 | Unlicense/MIT |
 | cargo:csv-core | 0.1.13 | Unlicense/MIT |
-| cargo:ctor | 1.0.11 | Apache-2.0 OR MIT |
+| cargo:ctor | 1.0.12 | Apache-2.0 OR MIT |
 | cargo:ctr | 0.9.2 | MIT OR Apache-2.0 |
 | cargo:ctutils | 0.4.2 | Apache-2.0 OR MIT |
 | cargo:curve25519-dalek | 4.1.3 | BSD-3-Clause |
@@ -303,7 +303,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:dirs-sys-next | 0.1.2 | MIT OR Apache-2.0 |
 | cargo:dispatch2 | 0.3.1 | Zlib OR Apache-2.0 OR MIT |
 | cargo:display_container | 0.9.0 | MIT OR Apache-2.0 |
-| cargo:displaydoc | 0.2.6 | MIT OR Apache-2.0 |
+| cargo:displaydoc | 0.2.7 | MIT OR Apache-2.0 |
 | cargo:dns-lookup | 3.0.1 | MIT/Apache-2.0 |
 | cargo:document-features | 0.2.12 | MIT OR Apache-2.0 |
 | cargo:dotenvy | 0.15.7 | MIT |
@@ -469,7 +469,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:home | 0.5.12 | MIT OR Apache-2.0 |
 | cargo:hostname | 0.4.2 | MIT |
 | cargo:http | 0.2.12 | MIT OR Apache-2.0 |
-| cargo:http | 1.4.2 | MIT OR Apache-2.0 |
+| cargo:http | 1.5.0 | MIT OR Apache-2.0 |
 | cargo:http-body | 0.4.6 | MIT |
 | cargo:http-body | 1.1.0 | MIT |
 | cargo:http-body-util | 0.1.4 | MIT |
@@ -477,7 +477,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:httparse | 1.10.1 | MIT OR Apache-2.0 |
 | cargo:httpdate | 1.0.3 | MIT OR Apache-2.0 |
 | cargo:hybrid-array | 0.2.3 | MIT OR Apache-2.0 |
-| cargo:hybrid-array | 0.4.13 | MIT OR Apache-2.0 |
+| cargo:hybrid-array | 0.4.14 | MIT OR Apache-2.0 |
 | cargo:hyper | 1.11.0 | MIT |
 | cargo:hyper-rustls | 0.27.9 | Apache-2.0 OR ISC OR MIT |
 | cargo:hyper-timeout | 0.5.2 | MIT OR Apache-2.0 |
@@ -563,8 +563,8 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:libredox | 0.1.18 | MIT |
 | cargo:libsqlite3-sys | 0.37.0 | MIT |
 | cargo:libz-sys | 1.1.29 | MIT OR Apache-2.0 |
-| cargo:link-section | 0.19.1 | Apache-2.0 OR MIT |
-| cargo:linktime-proc-macro | 0.2.0 | Apache-2.0 OR MIT |
+| cargo:link-section | 0.19.2 | Apache-2.0 OR MIT |
+| cargo:linktime-proc-macro | 0.2.2 | Apache-2.0 OR MIT |
 | cargo:linux-keyutils | 0.2.5 | Apache-2.0 OR MIT |
 | cargo:linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | cargo:linux-raw-sys | 0.4.15 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
@@ -625,6 +625,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:num_threads | 0.1.7 | MIT OR Apache-2.0 |
 | cargo:oauth2 | 5.0.0 | MIT OR Apache-2.0 |
 | cargo:objc2 | 0.6.4 | MIT |
+| cargo:objc2-app-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | cargo:objc2-cloud-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | cargo:objc2-core-data | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | cargo:objc2-core-foundation | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
@@ -749,7 +750,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:rayon-core | 1.13.0 | MIT OR Apache-2.0 |
 | cargo:rcgen | 0.14.8 | MIT OR Apache-2.0 |
 | cargo:redox_syscall | 0.5.18 | MIT |
-| cargo:redox_syscall | 0.9.0 | MIT |
+| cargo:redox_syscall | 0.9.1 | MIT |
 | cargo:redox_users | 0.4.6 | MIT |
 | cargo:redox_users | 0.5.2 | MIT |
 | cargo:ref-cast | 1.0.26 | MIT OR Apache-2.0 |
@@ -777,7 +778,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:rusticata-macros | 4.1.0 | MIT/Apache-2.0 |
 | cargo:rustix | 0.38.44 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | cargo:rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
-| cargo:rustls | 0.23.42 | Apache-2.0 OR ISC OR MIT |
+| cargo:rustls | 0.23.43 | Apache-2.0 OR ISC OR MIT |
 | cargo:rustls-native-certs | 0.8.4 | Apache-2.0 OR ISC OR MIT |
 | cargo:rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 |
 | cargo:rustls-platform-verifier | 0.7.0 | MIT OR Apache-2.0 |
@@ -835,7 +836,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:serde_with | 3.21.0 | MIT OR Apache-2.0 |
 | cargo:serde_with_macros | 3.21.0 | MIT OR Apache-2.0 |
 | cargo:serde_yaml | 0.9.34+deprecated | MIT OR Apache-2.0 |
-| cargo:serial2 | 0.2.37 | BSD-2-Clause OR Apache-2.0 |
+| cargo:serial2 | 0.2.38 | BSD-2-Clause OR Apache-2.0 |
 | cargo:sha1 | 0.10.7 | MIT OR Apache-2.0 |
 | cargo:sha1 | 0.11.0 | MIT OR Apache-2.0 |
 | cargo:sha1-checked | 0.10.0 | MIT OR Apache-2.0 |
@@ -925,7 +926,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:thiserror-impl-no-std | 2.0.2 | MIT OR Apache-2.0 |
 | cargo:thiserror-no-std | 2.0.2 | MIT OR Apache-2.0 |
 | cargo:thread_local | 1.1.10 | MIT OR Apache-2.0 |
-| cargo:time | 0.3.54 | MIT OR Apache-2.0 |
+| cargo:time | 0.3.55 | MIT OR Apache-2.0 |
 | cargo:time-core | 0.1.9 | MIT OR Apache-2.0 |
 | cargo:time-macros | 0.2.32 | MIT OR Apache-2.0 |
 | cargo:timezone_provider | 0.2.4 | MIT OR Apache-2.0 |
@@ -935,7 +936,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:tinyvec_macros | 0.1.1 | MIT OR Apache-2.0 OR Zlib |
 | cargo:tokio | 1.53.1 | MIT |
 | cargo:tokio-graceful | 0.2.2 | MIT OR Apache-2.0 |
-| cargo:tokio-macros | 2.7.1 | MIT |
+| cargo:tokio-macros | 2.7.2 | MIT |
 | cargo:tokio-native-tls | 0.3.1 | MIT |
 | cargo:tokio-rustls | 0.26.4 | MIT OR Apache-2.0 |
 | cargo:tokio-stream | 0.1.19 | MIT |
@@ -1022,7 +1023,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:wasm-streams | 0.5.0 | MIT OR Apache-2.0 |
 | cargo:web-sys | 0.3.103 | MIT OR Apache-2.0 |
 | cargo:web-time | 1.1.0 | MIT OR Apache-2.0 |
-| cargo:webbrowser | 1.2.1 | MIT OR Apache-2.0 |
+| cargo:webbrowser | 1.2.2 | MIT OR Apache-2.0 |
 | cargo:webpki-root-certs | 1.0.9 | CDLA-Permissive-2.0 |
 | cargo:webpki-roots | 1.0.9 | CDLA-Permissive-2.0 |
 | cargo:weezl | 0.1.12 | MIT OR Apache-2.0 |
@@ -1160,13 +1161,13 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | npm:@jridgewell/sourcemap-codec | 1.5.5 | MIT |
 | npm:@modelcontextprotocol/sdk | 1.29.0 | MIT |
 | npm:@napi-rs/wasm-runtime | 1.1.6 | MIT |
-| npm:@openai/codex | 0.145.0 | Apache-2.0 |
-| npm:@openai/codex-darwin-arm64 | 0.145.0-darwin-arm64 | Apache-2.0 |
-| npm:@openai/codex-darwin-x64 | 0.145.0-darwin-x64 | Apache-2.0 |
-| npm:@openai/codex-linux-arm64 | 0.145.0-linux-arm64 | Apache-2.0 |
-| npm:@openai/codex-linux-x64 | 0.145.0-linux-x64 | Apache-2.0 |
-| npm:@openai/codex-win32-arm64 | 0.145.0-win32-arm64 | Apache-2.0 |
-| npm:@openai/codex-win32-x64 | 0.145.0-win32-x64 | Apache-2.0 |
+| npm:@openai/codex | 0.146.0 | Apache-2.0 |
+| npm:@openai/codex-darwin-arm64 | 0.146.0-darwin-arm64 | Apache-2.0 |
+| npm:@openai/codex-darwin-x64 | 0.146.0-darwin-x64 | Apache-2.0 |
+| npm:@openai/codex-linux-arm64 | 0.146.0-linux-arm64 | Apache-2.0 |
+| npm:@openai/codex-linux-x64 | 0.146.0-linux-x64 | Apache-2.0 |
+| npm:@openai/codex-win32-arm64 | 0.146.0-win32-arm64 | Apache-2.0 |
+| npm:@openai/codex-win32-x64 | 0.146.0-win32-x64 | Apache-2.0 |
 | npm:@oxc-project/types | 0.139.0 | MIT |
 | npm:@rolldown/binding-android-arm64 | 1.1.5 | MIT |
 | npm:@rolldown/binding-darwin-arm64 | 1.1.5 | MIT |

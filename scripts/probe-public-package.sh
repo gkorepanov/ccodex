@@ -122,7 +122,7 @@ remote_version=$(PATH="$WORK/upstream/bin:$tool_path" node -e '
   if(r.error||r.status!==0){process.stderr.write(r.stderr||String(r.error));process.exit(1)}
   process.stdout.write(r.stdout.trim());
 ')
-test "$remote_version" = 'codex-cli 0.145.0'
+test "$remote_version" = 'codex-cli 0.146.0'
 PATH="$WORK/upstream/bin:$tool_path" node -e '
   const {spawnSync}=require("node:child_process");
   const r=spawnSync("/bin/sh",["-c","PATH=\"$HOME/.local/bin:$PATH\"; codex app-server daemon start"],{env:process.env,encoding:"utf8",timeout:90000});
@@ -154,7 +154,7 @@ touch "$CCODEX_HOME/state/preserved.sqlite"
 test -f "$CCODEX_HOME/state/preserved.sqlite"
 test "$(cat "$HOME/.config/fish/config.fish")" = 'set -gx PATH /usr/bin /bin'
 test ! -e "$HOME/Library/LaunchAgents/dev.ccodex.codex-cli-path.plist"
-test "$(PATH="$WORK/upstream/bin:$tool_path" /bin/sh -c 'PATH="$HOME/.local/bin:$PATH"; codex --version')" = 'codex-cli 0.145.0'
+test "$(PATH="$WORK/upstream/bin:$tool_path" /bin/sh -c 'PATH="$HOME/.local/bin:$PATH"; codex --version')" = 'codex-cli 0.146.0'
 
 mkdir -p "$WORK/warn-stage" "$WORK/warn-home"
 npm install --prefix "$WORK/warn-stage" --omit=optional --ignore-scripts --save=false "$main" "$platform" >/dev/null

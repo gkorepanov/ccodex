@@ -38,6 +38,7 @@ function thread(id: string): Thread {
     canAcceptDirectInput: true,
     preview: "PRIVATE PROVIDER PREVIEW",
     ephemeral: false,
+    isPinned: false,
     historyMode: "legacy",
     modelProvider: "openai",
     createdAt: 1,
@@ -46,7 +47,7 @@ function thread(id: string): Thread {
     status: { type: "idle" },
     path: "/private/provider/thread.jsonl",
     cwd: "/private/workspace",
-    cliVersion: "0.145.0",
+    cliVersion: "0.146.0",
     source: "appServer",
     threadSource: "user",
     agentNickname: null,
@@ -62,6 +63,26 @@ afterEach(() => {
 });
 
 describe("LineageStore", () => {
+  it("keeps logical pinning across provider epochs and defaults independent forks to unpinned", () => {
+    const store = new LineageStore(databasePath());
+    store.createTask({
+      publicThreadId: "public", currentEpochId: "stock", sessionId: "public", createdAt: 1,
+    }, { epochId: "stock", provider: "stock", backendThreadId: "stock-backend" });
+    expect(store.getTask("public")?.isPinned).toBe(false);
+    expect(store.updateTaskPinned("public", true)).toBe(true);
+    expect(store.commitEpoch(
+      "public", "stock", 2,
+      { startTurnId: "turn-1", endTurnId: "turn-1" },
+      { epochId: "claude", provider: "claude", backendThreadId: "claude-backend" },
+    )).toMatchObject({ currentEpochId: "claude", isPinned: true });
+    expect(store.createForkTask({
+      publicThreadId: "fork", currentEpochId: "fork-epoch", sessionId: "fork", createdAt: 2,
+      forkedFromId: "public",
+    }, { epochId: "fork-epoch", provider: "claude", backendThreadId: "fork-backend" }, []))
+      .toMatchObject({ isPinned: false });
+    store.close();
+  });
+
   it("repairs duplicated catalog identities only for top-level tasks", () => {
     const path = databasePath();
     const store = new LineageStore(path);
@@ -92,6 +113,7 @@ describe("LineageStore", () => {
       currentEpochId: "stock-epoch",
       sessionId: "public",
       createdAt: 1,
+      isPinned: false,
       forkedFromId: "parent-public",
     }, {
       epochId: "stock-epoch",
@@ -218,6 +240,7 @@ describe("LineageStore", () => {
       revision: 7,
       sessionId: "public",
       createdAt: 1,
+      isPinned: false,
       forkedFromId: "parent-public",
     });
     expect(store.listSegments("public")).toMatchObject([
@@ -237,7 +260,7 @@ describe("LineageStore", () => {
 
     const migrated = new DatabaseSync(path, { readOnly: true });
     expect((migrated.prepare("PRAGMA user_version").get() as unknown as { user_version: number }).user_version)
-      .toBe(3);
+      .toBe(4);
     const minimal = JSON.stringify({
       tasks: migrated.prepare("SELECT * FROM lineage_tasks").all(),
       epochs: migrated.prepare("SELECT * FROM lineage_epochs").all(),

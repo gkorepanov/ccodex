@@ -29,6 +29,7 @@ export interface GoalUsageInput {
 
 export interface ClaudeThreadRecord {
   readonly thread: Thread;
+  readonly runtimeWorkspaceRoots?: readonly string[];
   readonly claudeSessionId: string;
   readonly modelPickerId: string;
   readonly claudeModelValue: string;
@@ -58,6 +59,10 @@ export function settingsGeneration(record: ClaudeThreadRecord): number {
   return record.settingsGeneration ?? 0;
 }
 
+export function runtimeWorkspaceRoots(record: ClaudeThreadRecord): readonly string[] {
+  return record.runtimeWorkspaceRoots ?? [record.thread.cwd];
+}
+
 export function withSettingsFrom(
   base: ClaudeThreadRecord,
   settings: ClaudeThreadRecord,
@@ -65,6 +70,7 @@ export function withSettingsFrom(
   return {
     ...base,
     thread: { ...base.thread, cwd: settings.thread.cwd },
+    runtimeWorkspaceRoots: runtimeWorkspaceRoots(settings),
     modelPickerId: settings.modelPickerId,
     claudeModelValue: settings.claudeModelValue,
     serviceTier: settings.serviceTier,

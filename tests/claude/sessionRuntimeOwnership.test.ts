@@ -13,6 +13,7 @@ const startup: RuntimeStartup = {
   providerSessionId: "provider-session",
   resume: false,
   cwd: "/workspace",
+  runtimeWorkspaceRoots: ["/workspace"],
   ephemeral: false,
   persistSession: true,
   claudeBinary: "/bin/false",

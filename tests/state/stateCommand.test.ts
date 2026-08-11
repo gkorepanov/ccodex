@@ -11,7 +11,7 @@ function thread(): Thread {
   return {
     id: "thread-1", extra: null, sessionId: "session-1", forkedFromId: null, parentThreadId: null,
     canAcceptDirectInput: true,
-    preview: "hello", ephemeral: false, historyMode: "paginated", modelProvider: "openai",
+    preview: "hello", ephemeral: false, isPinned: false, historyMode: "paginated", modelProvider: "openai",
     createdAt: 1_700_000_000, updatedAt: 1_700_007_200, recencyAt: 1_700_007_200,
     status: { type: "idle" }, path: null, cwd: "/tmp", cliVersion: "0.144.4",
     source: "appServer", threadSource: "user", agentNickname: null, agentRole: null,
@@ -25,13 +25,15 @@ function thread(): Thread {
             content: [{ type: "text", text: "inspect", text_elements: [] }],
           },
           {
-            type: "commandExecution", id: "read-1", command: "Read /tmp/a", cwd: "/tmp",
+            type: "commandExecution", id: "read-1", pluginId: null, scriptPath: null,
+            command: "Read /tmp/a", cwd: "/tmp",
             processId: null, source: "agent", status: "completed",
             commandActions: [{ type: "read", command: "Read /tmp/a", name: "a", path: "/tmp/a" }],
             aggregatedOutput: "a", exitCode: 0, durationMs: 10,
           },
           {
-            type: "commandExecution", id: "bash-1", command: "pwd", cwd: "/tmp",
+            type: "commandExecution", id: "bash-1", pluginId: null, scriptPath: null,
+            command: "pwd", cwd: "/tmp",
             processId: null, source: "agent", status: "completed",
             commandActions: [{ type: "unknown", command: "pwd" }],
             aggregatedOutput: "/tmp", exitCode: 0, durationMs: 10,

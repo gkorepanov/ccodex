@@ -2,6 +2,17 @@ import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { ThreadListParams } from "../codex/generated/v2/ThreadListParams.js";
 import type { ThreadSourceKind } from "../codex/generated/v2/ThreadSourceKind.js";
 import { invalidParams } from "../protocol/errors.js";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
+
+export function cwdIdentity(value: string): string {
+  const absolute = resolve(value);
+  try {
+    return realpathSync.native(absolute);
+  } catch {
+    return absolute;
+  }
+}
 
 function sourceKind(thread: Thread): ThreadSourceKind {
   if (typeof thread.source === "string") return thread.source;
@@ -16,7 +27,9 @@ function sourceKind(thread: Thread): ThreadSourceKind {
 
 export function filterSortThreads(threads: Thread[], params: ThreadListParams): Thread[] {
   if (params.parentThreadId && params.ancestorThreadId) throw invalidParams("parentThreadId and ancestorThreadId are mutually exclusive.");
-  const cwd = params.cwd == null ? undefined : new Set(Array.isArray(params.cwd) ? params.cwd : [params.cwd]);
+  const cwd = params.cwd == null ? undefined : new Set(
+    (Array.isArray(params.cwd) ? params.cwd : [params.cwd]).map(cwdIdentity),
+  );
   const providers = params.modelProviders?.length ? new Set(params.modelProviders) : undefined;
   const sources = params.sourceKinds?.length ? new Set(params.sourceKinds) : undefined;
   const search = params.searchTerm?.toLocaleLowerCase();
@@ -34,7 +47,8 @@ export function filterSortThreads(threads: Thread[], params: ThreadListParams): 
   return threads
     .filter((thread) => !providers || providers.has(thread.modelProvider))
     .filter((thread) => !sources || sources.has(sourceKind(thread)))
-    .filter((thread) => !cwd || cwd.has(thread.cwd))
+    .filter((thread) => params.isPinned == null || (thread.isPinned ?? false) === params.isPinned)
+    .filter((thread) => !cwd || cwd.has(cwdIdentity(thread.cwd)))
     .filter((thread) => !search || `${thread.name ?? ""}\n${thread.preview}`.toLocaleLowerCase().includes(search))
     .filter((thread) => !params.parentThreadId || thread.parentThreadId === params.parentThreadId)
     .filter((thread) => !params.ancestorThreadId || isDescendant(thread))

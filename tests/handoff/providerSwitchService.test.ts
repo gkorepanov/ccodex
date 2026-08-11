@@ -26,7 +26,7 @@ function turn(id: string, text: string): Turn {
 function thread(id: string, provider: string, turns: Turn[] = []): Thread {
   return {
     id, extra: null, sessionId: id, forkedFromId: null, parentThreadId: null, canAcceptDirectInput: true,
-    preview: "hello", ephemeral: false, historyMode: "legacy", modelProvider: provider,
+    preview: "hello", ephemeral: false, isPinned: false, historyMode: "legacy", modelProvider: provider,
     createdAt: 1, updatedAt: 2, recencyAt: 2, status: { type: "idle" }, path: null,
     cwd: "/tmp/project", cliVersion: "test", source: "cli", threadSource: "user",
     agentNickname: null, agentRole: null, gitInfo: null, name: "Migrated", turns,
@@ -884,7 +884,7 @@ describe("provider switch service", () => {
 
   it("switches stock to Claude and commits only after starting the untouched input", async () => {
     const sourceTurn = turn("stock-source-turn", "stock answer");
-    const source = thread("stock-public", "openai", [sourceTurn]);
+    const source = { ...thread("stock-public", "openai", [sourceTurn]), isPinned: true };
     const target = thread("claude-target", "claude");
     const targetTurn = turn("claude-target-turn", "claude answer");
     const order: string[] = [];
@@ -937,7 +937,7 @@ describe("provider switch service", () => {
           approvalsReviewer: "user", sandbox: { type: "dangerFullAccess" },
           activePermissionProfile: { id: ":danger-full-access", extends: null },
           reasoningEffort: "high", multiAgentMode: "explicitRequestOnly",
-          runtimeWorkspaceRoots: [], instructionSources: [], initialTurnsPage: null,
+          runtimeWorkspaceRoots: [source.cwd, "/tmp/extra"], instructionSources: [], initialTurnsPage: null,
         };
         return {};
       }),
@@ -965,6 +965,10 @@ describe("provider switch service", () => {
       permissions: ":danger-full-access",
     };
     expect(claude.startHiddenThread).toHaveBeenCalledWith(expect.objectContaining(explicitFullAccess));
+    expect(claude.startHiddenThread).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: source.cwd,
+      runtimeWorkspaceRoots: [source.cwd, "/tmp/extra"],
+    }));
     expect(claude.updateThreadSettings).toHaveBeenCalledWith(expect.objectContaining(explicitFullAccess));
     expect(claude.prepareTurn).toHaveBeenCalledWith(expect.objectContaining({
       threadId: target.id,
@@ -983,7 +987,7 @@ describe("provider switch service", () => {
       params: expect.objectContaining({ threadId: source.id }),
     });
     expect(service.projectThreadCatalog([], [{ ...target, turns: [targetTurn] }])).toMatchObject([{
-      id: source.id,
+      id: source.id, isPinned: true,
     }]);
     expect(service.logical(source.id)?.epoch).toMatchObject({
       provider: "claude", backendThreadId: target.id,

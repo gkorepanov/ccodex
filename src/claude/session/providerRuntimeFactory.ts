@@ -73,6 +73,7 @@ export function providerPermissionMode(
 export function runtimeTransportSettings(startup: RuntimeStartup): RuntimeTransportSettings {
   return {
     cwd: startup.cwd,
+    runtimeWorkspaceRoots: startup.runtimeWorkspaceRoots,
     model: startup.model,
     settingsGeneration: startup.settingsGeneration,
     approvalPolicy: startup.approvalPolicy,
@@ -112,6 +113,7 @@ export interface RuntimeStartup {
   readonly providerSessionId: string;
   readonly resume: boolean;
   readonly cwd: string;
+  readonly runtimeWorkspaceRoots: readonly string[];
   readonly ephemeral: boolean;
   readonly persistSession: boolean;
   readonly claudeBinary: string;
@@ -147,10 +149,14 @@ export function createProviderRuntime(
   const selectedEffort = effort(startup.reasoningEffort);
   if (startup.reasoningEffort && !selectedEffort) throw new Error(`Unsupported Claude effort '${startup.reasoningEffort}'.`);
   const outputSchema = claudeOutputSchema(startup.outputSchema);
+  const additionalDirectories = startup.runtimeWorkspaceRoots.filter((root) => root !== startup.cwd);
   return new ProviderRuntime(
     startup.runtimeGeneration,
     {
         cwd: startup.cwd,
+        ...(additionalDirectories.length
+          ? { additionalDirectories }
+          : {}),
         model: normalizeClaudeModelIdentifier(startup.model),
         ...(startup.resume ? { resume: startup.providerSessionId } : { sessionId: startup.providerSessionId }),
         pathToClaudeCodeExecutable: startup.claudeBinary,

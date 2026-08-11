@@ -75,6 +75,7 @@ export interface RuntimeInputAction {
 
 export interface RuntimeTransportSettings {
   readonly cwd: string;
+  readonly runtimeWorkspaceRoots: readonly string[];
   readonly model: string;
   readonly settingsGeneration: number;
   readonly approvalPolicy: unknown;
@@ -272,7 +273,11 @@ export type ThreadAdminCommand =
     readonly operationId: string;
     readonly providerAttempted: boolean;
   }
-  | { readonly kind: "metadata"; readonly gitInfo: ThreadMetadataUpdateParams["gitInfo"] }
+  | {
+    readonly kind: "metadata";
+    readonly gitInfo: ThreadMetadataUpdateParams["gitInfo"];
+    readonly isPinned: ThreadMetadataUpdateParams["isPinned"];
+  }
   | { readonly kind: "unarchive" };
 
 export interface StartedShellCommand {

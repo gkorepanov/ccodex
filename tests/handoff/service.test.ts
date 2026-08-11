@@ -25,7 +25,7 @@ function turn(id: string, text: string): Turn {
 function thread(id: string, turns: Turn[] = []): Thread {
   return {
     id, extra: null, sessionId: id, forkedFromId: null, parentThreadId: null, canAcceptDirectInput: true, preview: "source preview",
-    ephemeral: false, historyMode: "legacy", modelProvider: "openai", createdAt: 1, updatedAt: 1, recencyAt: 1,
+    ephemeral: false, isPinned: false, historyMode: "legacy", modelProvider: "openai", createdAt: 1, updatedAt: 1, recencyAt: 1,
     status: { type: "idle" }, path: null, cwd: "/tmp", cliVersion: "0.144.4", source: "appServer",
     threadSource: null, agentNickname: null, agentRole: null, gitInfo: null, name: "source", turns,
   };

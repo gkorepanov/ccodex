@@ -190,13 +190,14 @@ function permissionSandbox(
   permissions: string,
   cwd: string,
   fallback: unknown,
+  runtimeWorkspaceRoots: readonly string[] = [cwd],
 ): unknown {
   if (permissions === ":danger-full-access") return { type: "dangerFullAccess" };
   if (permissions === ":read-only") return { type: "readOnly", networkAccess: false };
   if (permissions === ":workspace") {
     return {
       type: "workspaceWrite",
-      writableRoots: [cwd],
+      writableRoots: [...new Set([cwd, ...runtimeWorkspaceRoots])],
       networkAccess: false,
       excludeTmpdirEnvVar: false,
       excludeSlashTmp: false,
@@ -210,6 +211,7 @@ function canonicalSettings(
   staged: ThreadSettingsUpdateParams,
   turn: TurnStartParams,
   cwd: string,
+  runtimeWorkspaceRoots: readonly string[],
 ): Record<string, unknown> {
   const permissions = explicitPermissions(source, staged, turn);
   const { threadId: _threadId, ...merged } = { ...source, ...staged };
@@ -217,10 +219,13 @@ function canonicalSettings(
     permissions.permissions,
     cwd,
     turn.sandboxPolicy ?? staged.sandboxPolicy ?? source.sandboxPolicy ?? source.sandbox,
+    runtimeWorkspaceRoots,
   );
   return {
     ...merged,
     ...permissions,
+    cwd,
+    runtimeWorkspaceRoots,
     sandbox,
     sandboxPolicy: sandbox,
     activePermissionProfile: { id: permissions.permissions, extends: null },
@@ -563,6 +568,18 @@ export class CrossProviderForks {
         const result = await this.withAdminLock(publicThreadId, () => stock.request(method, params));
         return { provider: "stock", result: projectRpcToPublicThread({ result }, owner).result };
       }
+      if (method === "thread/metadata/update") {
+        const metadata = publicParams as unknown as ThreadMetadataUpdateParams;
+        const result = await this.withAdminLock(publicThreadId, async () => {
+          const response = await stock.request(method, params);
+          if (metadata.isPinned !== undefined && metadata.isPinned !== null
+            && !this.lineage.updateTaskPinned(publicThreadId, metadata.isPinned)) {
+            throw new Error(`Unknown logical thread '${publicThreadId}'.`);
+          }
+          return response;
+        });
+        return { provider: "stock", result: projectRpcToPublicThread({ result }, owner).result };
+      }
       if (method === "thread/read" || method === "thread/resume") {
         const result = await stock.request(method, params) as ThreadReadResponse | ThreadResumeResponse;
         const resume = method === "thread/resume" ? params as unknown as ThreadResumeParams : undefined;
@@ -707,9 +724,17 @@ export class CrossProviderForks {
       }
     }
     if (method === "thread/metadata/update") {
+      const metadata = publicParams as unknown as ThreadMetadataUpdateParams;
       return {
         provider: "claude",
-        result: await this.claude.updateThreadMetadata(params as unknown as ThreadMetadataUpdateParams),
+        result: await this.withAdminLock(publicThreadId, async () => {
+          const result = await this.claude.updateThreadMetadata(params as unknown as ThreadMetadataUpdateParams);
+          if (metadata.isPinned !== undefined && metadata.isPinned !== null
+            && !this.lineage.updateTaskPinned(publicThreadId, metadata.isPinned)) {
+            throw new Error(`Unknown logical thread '${publicThreadId}'.`);
+          }
+          return result;
+        }),
       };
     }
     if (method === "thread/archive") {
@@ -1242,7 +1267,7 @@ export class CrossProviderForks {
 
       if (job.targetProvider === "claude") {
         const started = await this.claude.startHiddenThread(this.targetThreadStart(
-          job, source.thread, developerInstructions, permissionSettings,
+          job, source.thread, developerInstructions, permissionSettings, targetSettings,
         ));
         target = { provider: "claude", threadId: started.thread.id };
         if (!this.store.checkpointProviderSwitchTarget(job.id, {
@@ -1286,7 +1311,7 @@ export class CrossProviderForks {
       };
       this.stockTargetBuilds.set(workerConnectionId, build);
       const started = await stock.request("thread/start", {
-        ...this.targetThreadStart(job, source.thread, developerInstructions, permissionSettings),
+        ...this.targetThreadStart(job, source.thread, developerInstructions, permissionSettings, targetSettings),
         threadSource: build.expectedThreadSource,
       }) as ThreadStartResponse;
       target = { provider: "stock", threadId: started.thread.id };
@@ -1499,7 +1524,7 @@ export class CrossProviderForks {
       model: params.model,
       modelProvider: params.modelProvider ?? "openai",
       cwd: params.cwd ?? source.thread.cwd,
-      ...(params.runtimeWorkspaceRoots !== undefined ? { runtimeWorkspaceRoots: params.runtimeWorkspaceRoots } : {}),
+      runtimeWorkspaceRoots: [...(params.runtimeWorkspaceRoots ?? source.runtimeWorkspaceRoots)],
       ...(params.serviceTier !== undefined ? { serviceTier: params.serviceTier } : {}),
       ...(params.approvalPolicy !== undefined ? { approvalPolicy: params.approvalPolicy } : {}),
       ...(params.approvalsReviewer !== undefined ? { approvalsReviewer: params.approvalsReviewer } : {}),
@@ -2074,7 +2099,10 @@ export class CrossProviderForks {
         thread: source.thread,
         backendTurns: source.turns,
         turns: await this.visibleTurns(job.publicThreadId, source.turns, stock),
-        settings: source.settings as unknown as Record<string, unknown>,
+        settings: {
+          ...source.settings as unknown as Record<string, unknown>,
+          runtimeWorkspaceRoots: source.runtimeWorkspaceRoots,
+        },
       };
     }
     const [read, resume] = await Promise.all([
@@ -2111,6 +2139,13 @@ export class CrossProviderForks {
     const summary = job.summary
       ?? await this.providerSwitchSummary(job, source.turns, stock, connectionId);
     const cwd = job.turnParams.cwd ?? job.settings.cwd ?? source.thread.cwd;
+    const sourceRoots = Array.isArray(source.settings.runtimeWorkspaceRoots)
+      ? source.settings.runtimeWorkspaceRoots as string[]
+      : [source.thread.cwd];
+    const runtimeWorkspaceRoots = job.turnParams.runtimeWorkspaceRoots !== undefined
+      && job.turnParams.runtimeWorkspaceRoots !== null
+      ? [...new Set(job.turnParams.runtimeWorkspaceRoots)]
+      : [...new Set(sourceRoots.map((root) => root === source.thread.cwd ? cwd : root))];
     const permissionSettings = explicitPermissions(source.settings, job.settings, job.turnParams);
     const completedAt = Math.floor(Date.now() / 1_000);
     const compactTurn: Turn = {
@@ -2130,7 +2165,7 @@ export class CrossProviderForks {
       ],
       developerInstructions: handoffInstructions(source.developerInstructions, summary),
       targetSettings: {
-        ...canonicalSettings(source.settings, job.settings, job.turnParams, cwd),
+        ...canonicalSettings(source.settings, job.settings, job.turnParams, cwd, runtimeWorkspaceRoots),
         model: job.targetModel,
         modelProvider: job.targetProvider === "claude" ? "claude" : "openai",
       },
@@ -2185,13 +2220,19 @@ export class CrossProviderForks {
     source: Thread,
     developerInstructions: string,
     permissionSettings: ExplicitPermissions,
+    targetSettings: Record<string, unknown>,
   ): ThreadStartParams {
     const turn = job.turnParams;
     const settings = job.settings;
     return {
       model: job.targetModel,
       modelProvider: job.targetProvider === "claude" ? "claude" : "openai",
-      cwd: turn.cwd ?? settings.cwd ?? source.cwd,
+      cwd: typeof targetSettings.cwd === "string"
+        ? targetSettings.cwd
+        : turn.cwd ?? settings.cwd ?? source.cwd,
+      runtimeWorkspaceRoots: Array.isArray(targetSettings.runtimeWorkspaceRoots)
+        ? targetSettings.runtimeWorkspaceRoots as string[]
+        : [source.cwd],
       developerInstructions,
       ...permissionSettings,
       ...(turn.serviceTier !== undefined

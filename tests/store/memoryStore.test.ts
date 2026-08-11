@@ -14,6 +14,7 @@ function record(): ClaudeThreadRecord {
     canAcceptDirectInput: true,
     preview: "",
     ephemeral: false,
+    isPinned: false,
     historyMode: "legacy",
     modelProvider: "claude",
     createdAt: 1,

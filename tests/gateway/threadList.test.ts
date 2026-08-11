@@ -7,7 +7,7 @@ import { filterSortThreads } from "../../src/store/threadFilter.js";
 function thread(id: string, createdAt: number, parentThreadId: string | null = null): Thread {
   return {
     id, extra: null, sessionId: id, forkedFromId: null, parentThreadId,
-    canAcceptDirectInput: parentThreadId === null, preview: id, ephemeral: false,
+    canAcceptDirectInput: parentThreadId === null, preview: id, ephemeral: false, isPinned: false,
     historyMode: "legacy", modelProvider: "claude", createdAt, updatedAt: createdAt, recencyAt: createdAt,
     status: { type: "idle" }, path: null, cwd: "/repo", cliVersion: "test", source: "appServer",
     threadSource: null, agentNickname: null, agentRole: null, gitInfo: null, name: id, turns: [],
@@ -27,6 +27,14 @@ describe("merged thread listing", () => {
     Reflect.deleteProperty(legacy, "source");
     expect(filterSortThreads([legacy], { sourceKinds: ["unknown"] })).toEqual([legacy]);
     expect(filterSortThreads([legacy], { sourceKinds: ["subAgentThreadSpawn"] })).toEqual([]);
+  });
+
+  it("filters pinned tasks and canonicalizes cwd aliases", () => {
+    const pinned = { ...thread("pinned", 2), isPinned: true };
+    const regular = thread("regular", 1);
+    expect(filterSortThreads([regular, pinned], { isPinned: true })).toEqual([pinned]);
+    expect(filterSortThreads([regular, pinned], { cwd: "/repo/../repo" }).map((item) => item.id))
+      .toEqual(["pinned", "regular"]);
   });
 
   it("uses stable signed keyset cursors in both directions", async () => {

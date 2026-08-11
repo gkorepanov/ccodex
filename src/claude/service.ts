@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { statSync } from "node:fs";
 import {
   deleteSession, listSessions, renameSession, type SDKSessionInfo, type SDKUserMessage,
@@ -52,7 +52,7 @@ import type { Logger } from "../observability/logger.js";
 import type {
   ClaudeThreadRecord, HybridStore, InternalGoal, PendingThreadRemoval, TurnProviderBoundary,
 } from "../store/HybridStore.js";
-import { settingsGeneration, withSettingsFrom } from "../store/HybridStore.js";
+import { runtimeWorkspaceRoots as storedWorkspaceRoots, settingsGeneration, withSettingsFrom } from "../store/HybridStore.js";
 import { SqliteHybridStore } from "../store/sqliteStore.js";
 import { LayeredHybridStore } from "../store/memoryStore.js";
 import { createClaudeQuery, type ClaudeQueryFactory } from "./queryFactory.js";
@@ -128,6 +128,7 @@ export interface ClaudeHandoffSource {
   readonly thread: Thread;
   readonly turns: Turn[];
   readonly settings: ThreadSettings;
+  readonly runtimeWorkspaceRoots: readonly string[];
 }
 
 export interface ClaudeThreadAdminEffects {
@@ -159,23 +160,101 @@ function turnReasoningEffort(params: TurnStartParams): TurnStartParams["effort"]
   return params.collaborationMode?.settings.reasoning_effort ?? params.effort ?? undefined;
 }
 
-function sandboxPolicy(mode: SandboxMode | null | undefined, cwd: string): SandboxPolicy {
+type WorkspaceParams = {
+  readonly cwd?: string | null;
+  readonly runtimeWorkspaceRoots?: readonly string[] | null;
+  readonly environments?: readonly {
+    readonly environmentId: string;
+    readonly cwd: string;
+    readonly runtimeWorkspaceRoots?: readonly string[] | null;
+  }[] | null;
+};
+type ClaudeSettingsParams = ThreadSettingsUpdateParams & WorkspaceParams;
+
+function workspaceRoots(value: readonly string[]): string[] {
+  const roots: string[] = [];
+  const seen = new Set<string>();
+  for (const root of value) {
+    if (!isAbsolute(root)) throw invalidParams(`Claude runtime workspace root '${root}' must be absolute.`);
+    if (!seen.has(root)) {
+      seen.add(root);
+      roots.push(root);
+    }
+  }
+  return roots;
+}
+
+function workspaceSelection(
+  params: WorkspaceParams,
+  previous?: { readonly cwd: string; readonly runtimeWorkspaceRoots: readonly string[] },
+): { cwd: string; runtimeWorkspaceRoots: string[] } {
+  const environments = params.environments;
+  if (environments?.some((environment) => environment.environmentId !== "local")) {
+    throw invalidParams("Claude threads only support the local Codex environment.");
+  }
+  if (environments && environments.length > 1) {
+    throw invalidParams("Claude threads support at most one local Codex environment.");
+  }
+  const environment = environments?.[0];
+  const requestedCwd = environment?.cwd ?? params.cwd ?? previous?.cwd ?? process.cwd();
+  const cwd = existingThreadCwd(requestedCwd);
+  const explicitRoots = environment
+    ? environment.runtimeWorkspaceRoots
+    : params.runtimeWorkspaceRoots;
+  if (explicitRoots !== undefined && explicitRoots !== null) {
+    return { cwd, runtimeWorkspaceRoots: workspaceRoots(explicitRoots) };
+  }
+  if (!previous) return { cwd, runtimeWorkspaceRoots: [cwd] };
+  if (cwd === previous.cwd) return { cwd, runtimeWorkspaceRoots: [...previous.runtimeWorkspaceRoots] };
+  return {
+    cwd,
+    runtimeWorkspaceRoots: workspaceRoots(previous.runtimeWorkspaceRoots.map(
+      (root) => root === previous.cwd ? cwd : root,
+    )),
+  };
+}
+
+function writableRoots(cwd: string, runtimeWorkspaceRoots: readonly string[]): string[] {
+  return workspaceRoots([cwd, ...runtimeWorkspaceRoots]);
+}
+
+function sandboxPolicy(
+  mode: SandboxMode | null | undefined,
+  cwd: string,
+  runtimeWorkspaceRoots: readonly string[] = [cwd],
+): SandboxPolicy {
   if (mode === "read-only") return { type: "readOnly", networkAccess: false };
   if (mode === "danger-full-access") return { type: "dangerFullAccess" };
   return {
     type: "workspaceWrite",
-    writableRoots: [cwd],
+    writableRoots: writableRoots(cwd, runtimeWorkspaceRoots),
     networkAccess: false,
     excludeTmpdirEnvVar: false,
     excludeSlashTmp: false,
   };
 }
 
-function permissionProfileSandboxPolicy(profile: string, cwd: string): SandboxPolicy {
-  if (profile === ":read-only") return sandboxPolicy("read-only", cwd);
-  if (profile === ":workspace") return sandboxPolicy("workspace-write", cwd);
-  if (profile === ":danger-full-access") return sandboxPolicy("danger-full-access", cwd);
+function permissionProfileSandboxPolicy(
+  profile: string,
+  cwd: string,
+  runtimeWorkspaceRoots: readonly string[] = [cwd],
+): SandboxPolicy {
+  if (profile === ":read-only") return sandboxPolicy("read-only", cwd, runtimeWorkspaceRoots);
+  if (profile === ":workspace") return sandboxPolicy("workspace-write", cwd, runtimeWorkspaceRoots);
+  if (profile === ":danger-full-access") return sandboxPolicy("danger-full-access", cwd, runtimeWorkspaceRoots);
   throw invalidParams(`Claude threads do not support Codex permission profile '${profile}'.`);
+}
+
+function inheritedSandboxPolicy(
+  policy: unknown,
+  cwd: string,
+  runtimeWorkspaceRoots: readonly string[],
+): unknown {
+  if (policy && typeof policy === "object" && "type" in policy
+    && (policy as { type: unknown }).type === "workspaceWrite") {
+    return { ...(policy as object), writableRoots: writableRoots(cwd, runtimeWorkspaceRoots) };
+  }
+  return policy;
 }
 
 function approvalsReviewer(value: ApprovalsReviewer | null | undefined, fallback: ApprovalsReviewer = "user"): ApprovalsReviewer {
@@ -191,10 +270,11 @@ function threadResponse(record: ClaudeThreadRecord, includeTurns: boolean): Thre
     ...settings,
     thread: {
       ...record.thread,
+      isPinned: record.thread.isPinned ?? false,
       canAcceptDirectInput: record.thread.parentThreadId ? false : true,
       turns: includeTurns ? record.thread.turns : [],
     },
-    runtimeWorkspaceRoots: [record.thread.cwd],
+    runtimeWorkspaceRoots: [...storedWorkspaceRoots(record)],
     instructionSources: [],
     sandbox,
     reasoningEffort,
@@ -460,6 +540,7 @@ export class ClaudeService {
       thread: { ...this.withNativeMetadata(snapshot.record), turns },
       turns,
       settings: threadSettings(snapshot.record),
+      runtimeWorkspaceRoots: storedWorkspaceRoots(snapshot.record),
     };
   }
 
@@ -582,6 +663,15 @@ export class ClaudeService {
           })
           : null,
       };
+    }
+    if (resume.cwd !== undefined || resume.runtimeWorkspaceRoots !== undefined) {
+      await this.applySettings({
+        threadId,
+        ...(resume.cwd !== undefined ? { cwd: resume.cwd } : {}),
+        ...(resume.runtimeWorkspaceRoots !== undefined
+          ? { runtimeWorkspaceRoots: resume.runtimeWorkspaceRoots }
+          : {}),
+      });
     }
     await (await this.sessions.getOrCreate(threadId)).materializeRuntime();
     record = await this.sessions.submit<ClaudeThreadRecord>(
@@ -1047,7 +1137,7 @@ export class ClaudeService {
     this.requireIndependentThread(params.threadId, "update metadata for");
     return this.sessions.submit(params.threadId, {
       type: "threadAdmin",
-      command: { kind: "metadata", gitInfo: params.gitInfo },
+      command: { kind: "metadata", gitInfo: params.gitInfo, isPinned: params.isPinned },
     });
   }
 
@@ -1288,10 +1378,13 @@ export class ClaudeService {
       throw error;
     }
     const createdAt = nowSeconds();
-    const cwd = existingThreadCwd(params.cwd ?? sourceRecord.thread.cwd);
+    const { cwd, runtimeWorkspaceRoots } = workspaceSelection(params, {
+      cwd: sourceRecord.thread.cwd,
+      runtimeWorkspaceRoots: storedWorkspaceRoots(sourceRecord),
+    });
     const threadId = uuidv7();
     const thread: Thread = {
-      ...sourceRecord.thread, id: threadId, ephemeral: params.ephemeral ?? false,
+      ...sourceRecord.thread, id: threadId, ephemeral: params.ephemeral ?? false, isPinned: false,
       sessionId: threadId, forkedFromId: visibleForkedFromId,
       cwd, modelProvider: "claude", createdAt, updatedAt: createdAt, recencyAt: createdAt,
       status: params.ephemeral ? { type: "idle" } : { type: "notLoaded" },
@@ -1303,12 +1396,15 @@ export class ClaudeService {
     };
     const copiedTurns = sourceTurns.map((turn) => forkProjection(turn, thread.id));
     const record: ClaudeThreadRecord = {
-      ...sourceRecord, thread, claudeSessionId: branch.sessionId, modelPickerId, claudeModelValue, serviceTier,
+      ...sourceRecord, thread, runtimeWorkspaceRoots,
+      claudeSessionId: branch.sessionId, modelPickerId, claudeModelValue, serviceTier,
       approvalPolicy: params.approvalPolicy ?? sourceRecord.approvalPolicy,
       approvalsReviewer: approvalsReviewer(params.approvalsReviewer, sourceRecord.approvalsReviewer),
       sandboxPolicy: params.permissions
-        ? permissionProfileSandboxPolicy(params.permissions, cwd)
-        : params.sandbox ? sandboxPolicy(params.sandbox, cwd) : sourceRecord.sandboxPolicy,
+        ? permissionProfileSandboxPolicy(params.permissions, cwd, runtimeWorkspaceRoots)
+        : params.sandbox
+          ? sandboxPolicy(params.sandbox, cwd, runtimeWorkspaceRoots)
+          : inheritedSandboxPolicy(sourceRecord.sandboxPolicy, cwd, runtimeWorkspaceRoots),
       baseInstructions: params.baseInstructions === undefined ? sourceRecord.baseInstructions : params.baseInstructions,
       developerInstructions: params.developerInstructions === undefined
         ? sourceRecord.developerInstructions : params.developerInstructions,
@@ -1734,6 +1830,7 @@ export class ClaudeService {
     const native = this.nativeMetadata.get(record.claudeSessionId);
     if (!native) return {
       ...record.thread,
+      isPinned: record.thread.isPinned ?? false,
       canAcceptDirectInput: record.thread.parentThreadId ? false : true,
     };
     const createdAt = native.createdAt === undefined
@@ -1742,8 +1839,9 @@ export class ClaudeService {
     const updatedAt = Math.floor(native.lastModified / 1_000);
     return {
       ...record.thread,
+      isPinned: record.thread.isPinned ?? false,
       canAcceptDirectInput: record.thread.parentThreadId ? false : true,
-      name: (native.customTitle ?? native.summary) || record.thread.name,
+      name: record.thread.name || native.customTitle || native.summary,
       preview: native.firstPrompt ?? record.thread.preview,
       cwd: native.cwd ?? record.thread.cwd,
       createdAt,
@@ -1817,7 +1915,8 @@ export class ClaudeService {
     const reasoningEffort = settings?.effort ?? null;
     const serviceTier = await this.validatedServiceTier(modelPickerId, reasoningEffort, requestedServiceTier);
     const createdAt = nowSeconds();
-    const cwd = existingThreadCwd(params.cwd ?? process.cwd());
+    const workspace = workspaceSelection(params);
+    const { cwd, runtimeWorkspaceRoots } = workspace;
     return {
       thread: {
         id: uuidv7(),
@@ -1827,6 +1926,7 @@ export class ClaudeService {
         parentThreadId: null,
         preview: "",
         ephemeral: params.ephemeral ?? false,
+        isPinned: false,
         historyMode: params.historyMode ?? "legacy",
         modelProvider: "claude",
         createdAt,
@@ -1845,6 +1945,7 @@ export class ClaudeService {
         name: null,
         turns: [],
       },
+      runtimeWorkspaceRoots,
       claudeSessionId: uuidv7(),
       modelPickerId,
       claudeModelValue,
@@ -1852,8 +1953,8 @@ export class ClaudeService {
       approvalPolicy: params.approvalPolicy ?? "on-request",
       approvalsReviewer: approvalsReviewer(params.approvalsReviewer),
       sandboxPolicy: params.permissions
-        ? permissionProfileSandboxPolicy(params.permissions, cwd)
-        : sandboxPolicy(params.sandbox, cwd),
+        ? permissionProfileSandboxPolicy(params.permissions, cwd, runtimeWorkspaceRoots)
+        : sandboxPolicy(params.sandbox, cwd, runtimeWorkspaceRoots),
       baseInstructions: params.baseInstructions ?? null,
       developerInstructions: params.developerInstructions ?? null,
       personality: settings?.personality ?? params.personality ?? null,
@@ -1882,12 +1983,12 @@ export class ClaudeService {
   }
 
   private async applyTurnOverrides(params: TurnStartParams): Promise<void> {
-    await this.applySettings({ ...params, effort: turnReasoningEffort(params) } as ThreadSettingsUpdateParams,
+    await this.applySettings({ ...params, effort: turnReasoningEffort(params) } as ClaudeSettingsParams,
       params.outputSchema ?? null);
   }
 
   private async applySettings(
-    params: ThreadSettingsUpdateParams,
+    params: ClaudeSettingsParams,
     outputSchema?: unknown,
   ): Promise<void> {
     const previous = this.settingsUpdates.get(params.threadId) ?? Promise.resolve();
@@ -1901,7 +2002,7 @@ export class ClaudeService {
   }
 
   private async applySettingsNow(
-    params: ThreadSettingsUpdateParams,
+    params: ClaudeSettingsParams,
     outputSchema?: unknown,
   ): Promise<void> {
     if (params.permissions && params.sandboxPolicy)
@@ -1926,7 +2027,13 @@ export class ClaudeService {
       );
       if (requestedServiceTier !== null && requestedServiceTier !== "default" && requestedServiceTier !== "fast")
         throw invalidParams(`Unsupported Claude service tier '${requestedServiceTier}'.`);
-      const cwd = existingThreadCwd(params.cwd ?? before.thread.cwd);
+      const { cwd, runtimeWorkspaceRoots } = workspaceSelection(params, {
+        cwd: before.thread.cwd,
+        runtimeWorkspaceRoots: storedWorkspaceRoots(before),
+      });
+      const workspaceChanged = cwd !== before.thread.cwd
+        || runtimeWorkspaceRoots.length !== storedWorkspaceRoots(before).length
+        || runtimeWorkspaceRoots.some((root, index) => root !== storedWorkspaceRoots(before)[index]);
       const reasoningEffort = params.effort === undefined ? before.reasoningEffort : params.effort;
       const serviceTier = await this.validatedServiceTier(
         modelPickerId,
@@ -1940,14 +2047,17 @@ export class ClaudeService {
       const candidate: ClaudeThreadRecord = {
         ...before,
         thread: { ...before.thread, cwd },
+        runtimeWorkspaceRoots,
         modelPickerId,
         claudeModelValue,
         serviceTier,
         approvalPolicy: params.approvalPolicy ?? before.approvalPolicy,
         approvalsReviewer: approvalsReviewer(params.approvalsReviewer, before.approvalsReviewer),
         sandboxPolicy: params.permissions
-          ? permissionProfileSandboxPolicy(params.permissions, cwd)
-          : params.sandboxPolicy ?? before.sandboxPolicy,
+          ? permissionProfileSandboxPolicy(params.permissions, cwd, runtimeWorkspaceRoots)
+          : params.sandboxPolicy ?? (workspaceChanged
+            ? inheritedSandboxPolicy(before.sandboxPolicy, cwd, runtimeWorkspaceRoots)
+            : before.sandboxPolicy),
         reasoningEffort,
         reasoningSummary: params.summary === undefined ? before.reasoningSummary : params.summary,
         collaborationMode: collaborationMode === null ? null : syncedCollaborationMode(

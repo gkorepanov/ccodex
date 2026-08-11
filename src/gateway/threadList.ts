@@ -9,7 +9,7 @@ import type { StockRpc } from "./stockRpc.js";
 import { CursorCodec, queryFingerprint } from "../protocol/cursor.js";
 import { invalidParams } from "../protocol/errors.js";
 import type { StockSideThreads } from "./stockSideThreads.js";
-import { filterSortThreads } from "../store/threadFilter.js";
+import { cwdIdentity, filterSortThreads } from "../store/threadFilter.js";
 
 export interface ThreadCatalogProjection {
   projectThreadCatalog(stock: Thread[], claude: Thread[], params?: ThreadListParams): Thread[];
@@ -45,9 +45,13 @@ function threadKey(params: ThreadListParams): ThreadCursor["key"] {
 }
 
 function threadQuery(params: ThreadListParams): string {
+  const cwd = params.cwd == null
+    ? null
+    : (Array.isArray(params.cwd) ? params.cwd : [params.cwd]).map(cwdIdentity);
   return queryFingerprint({
     sortKey: params.sortKey ?? "created_at", modelProviders: params.modelProviders ?? null,
-    sourceKinds: params.sourceKinds ?? null, archived: params.archived ?? false, cwd: params.cwd ?? null,
+    sourceKinds: params.sourceKinds ?? null, archived: params.archived ?? false, cwd,
+    isPinned: params.isPinned ?? null,
     useStateDbOnly: params.useStateDbOnly ?? false, searchTerm: params.searchTerm ?? null,
     parentThreadId: params.parentThreadId ?? null, ancestorThreadId: params.ancestorThreadId ?? null,
   });

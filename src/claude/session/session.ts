@@ -61,7 +61,7 @@ import type {
   ThreadRemovalKind,
   SessionInteractionRequest,
 } from "./commands.js";
-import { settingsGeneration, withSettingsFrom } from "../../store/HybridStore.js";
+import { runtimeWorkspaceRoots, settingsGeneration, withSettingsFrom } from "../../store/HybridStore.js";
 import { addUsage } from "./usage.js";
 import {
   ClaudeMailbox,
@@ -1027,6 +1027,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       providerSessionId: record.claudeSessionId,
       resume: resumeOverride ?? record.lastClaudeMessageUuid !== null,
       cwd: record.thread.cwd,
+      runtimeWorkspaceRoots: runtimeWorkspaceRoots(record),
       ephemeral: record.thread.ephemeral,
       persistSession: !record.thread.ephemeral || Boolean(
         this.runtimeDependencies!.persistUserSideSessions
@@ -5086,6 +5087,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
             reason: command.runtimeGeneration === this.runtimeGeneration ? "settings" : "runtime",
             settings: {
               cwd: record.thread.cwd,
+              runtimeWorkspaceRoots: runtimeWorkspaceRoots(record),
               model: record.claudeModelValue,
               settingsGeneration: settingsGeneration(record),
               approvalPolicy: record.approvalPolicy,
@@ -5560,6 +5562,8 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     const item: Extract<ThreadItem, { type: "commandExecution" }> = {
       type: "commandExecution",
       id: uuidv7(),
+      pluginId: null,
+      scriptPath: null,
       command,
       cwd: record.thread.cwd,
       processId: null,
@@ -6793,6 +6797,9 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         throw invalidParams(`Claude thread '${this.threadId}' has an active ${this.adminOperation.kind} operation.`);
       }
       const record = this.requireRecord(false);
+      if (record.thread.ephemeral && command.isPinned !== undefined && command.isPinned !== null) {
+        throw invalidParams("Ephemeral Claude side chats cannot be pinned.");
+      }
       const previous = record.thread.gitInfo ?? { sha: null, branch: null, originUrl: null };
       const patch = command.gitInfo;
       const gitInfo = patch === null ? null : patch === undefined ? record.thread.gitInfo : {
@@ -6802,7 +6809,12 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       };
       const updated = {
         ...record,
-        thread: { ...record.thread, gitInfo, updatedAt: Math.floor(Date.now() / 1_000) },
+        thread: {
+          ...record.thread,
+          gitInfo,
+          isPinned: command.isPinned ?? record.thread.isPinned,
+          updatedAt: Math.floor(Date.now() / 1_000),
+        },
       };
       this.repository.update(updated);
       this.record = updated;
