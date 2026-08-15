@@ -3192,6 +3192,69 @@ describe("ClaudeService", () => {
     await service.close();
   });
 
+  it("streams Claude Write input as native fileChange patch snapshots before tool completion", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-streamed-file-change-"));
+    directories.push(directory);
+    const path = join(directory, "report.md");
+    writeFileSync(path, "before\n");
+    const base = { session_id: "streamed-write-session" };
+    const toolId = "streamed-write";
+    const input = JSON.stringify({ file_path: path, content: "first line\nsecond line\n" });
+    const split = input.indexOf("second line");
+    const messages = [
+      { type: "stream_event", event: { type: "message_start", message: {} }, parent_tool_use_id: null, uuid: randomUUID(), ...base },
+      {
+        type: "stream_event", parent_tool_use_id: null, uuid: randomUUID(), ...base,
+        event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: toolId, name: "Write", input: {} } },
+      },
+      {
+        type: "stream_event", parent_tool_use_id: null, uuid: randomUUID(), ...base,
+        event: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: input.slice(0, split) } },
+      },
+      {
+        type: "stream_event", parent_tool_use_id: null, uuid: randomUUID(), ...base,
+        event: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: input.slice(split) } },
+      },
+      { type: "stream_event", event: { type: "content_block_stop", index: 0 }, parent_tool_use_id: null, uuid: randomUUID(), ...base },
+    ] as unknown as SDKMessage[];
+    const hub = new SubscriptionHub();
+    const service = new ClaudeService(
+      config(directory), hub, new Logger("error"), new SqliteHybridStore(join(directory, "state.sqlite")),
+      new FakeClaudeQuery(undefined, undefined, [], false, undefined, undefined, undefined, messages).factory,
+    );
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const events: Array<{ method: string; params: unknown }> = [];
+    hub.subscribe(started.thread.id, "test", (method, params) => events.push({ method, params }));
+    const prepared = await service.prepareTurn({
+      threadId: started.thread.id,
+      input: [{ type: "text", text: "write the report", text_elements: [] }],
+    });
+    prepared.announce();
+    prepared.start();
+    await waitFor(() => events.some((event) => event.method === "turn/completed"), "streamed Write completion");
+
+    const patches = events.filter((event) => event.method === "item/fileChange/patchUpdated");
+    expect(patches).toHaveLength(2);
+    expect(patches[0]?.params).toMatchObject({
+      itemId: toolId,
+      changes: [{ path, diff: expect.stringContaining("+first line") }],
+    });
+    expect(patches[1]?.params).toMatchObject({
+      itemId: toolId,
+      changes: [{ path, diff: expect.stringContaining("+second line") }],
+    });
+    const toolStarted = events.findIndex((event) => event.method === "item/started"
+      && (event.params as { item?: { id?: string } }).item?.id === toolId);
+    const toolCompleted = events.findIndex((event) => event.method === "item/completed"
+      && (event.params as { item?: { id?: string } }).item?.id === toolId);
+    expect(toolStarted).toBeGreaterThanOrEqual(0);
+    expect(toolStarted).toBeLessThan(events.findIndex((event) => event.method === "item/fileChange/patchUpdated"));
+    expect(events.findIndex((event) => event.method === "item/fileChange/patchUpdated"))
+      .toBeLessThan(toolCompleted);
+    expect(events.some((event) => event.method === "item/fileChange/outputDelta")).toBe(false);
+    await service.close();
+  });
+
   it("keeps background continuation and its final answer in the originating logical turn", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-background-"));
     directories.push(directory);

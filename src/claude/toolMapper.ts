@@ -8,6 +8,7 @@ export interface ActiveTool {
   readonly providerId: string;
   readonly itemId: string;
   readonly name: string;
+  readonly cwd: string;
   input: Record<string, unknown>;
   partialInput: string;
   started: boolean;
@@ -137,7 +138,7 @@ export function startTool(
   const name = text(block.name) || "unknown";
   const providerId = text(block.id) || `claude-tool-${index}`;
   const input = block.input && typeof block.input === "object" ? block.input as Record<string, unknown> : {};
-  const state: ActiveTool = { index, providerId, itemId: providerId, name, input, partialInput: "", started: false, startedAtMs: Date.now() };
+  const state: ActiveTool = { index, providerId, itemId: providerId, name, cwd, input, partialInput: "", started: false, startedAtMs: Date.now() };
 
   if (commandTools.has(name)) {
     const native = nativeCommand(name, input, cwd)!;

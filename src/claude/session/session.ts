@@ -131,6 +131,7 @@ import {
   type RuntimeFactContext,
 } from "./providerFacts.js";
 import { normalizeClaudeModelIdentifier } from "../modelSelection.js";
+import { StreamingFileChangePreview } from "../streamingFilePreview.js";
 
 const nullSource = { providerEventId: null, providerEventType: null } as const;
 const providerJournalMaxEvents = 20_000;
@@ -301,6 +302,7 @@ interface StagedClaudeTurn {
 interface ProviderProjectionState {
   readonly context: AsyncLocalStorage<RuntimeFactContext>;
   readonly processEpoch: string;
+  readonly filePreviews: Map<string, { readonly providerId: string; readonly preview: StreamingFileChangePreview }>;
   providerSequence: number;
   runtime?: ProviderRuntime;
 }
@@ -1060,6 +1062,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     const projection: ProviderProjectionState = {
       context: new AsyncLocalStorage<RuntimeFactContext>(),
       processEpoch: uuidv7(),
+      filePreviews: new Map(),
       providerSequence: 0,
     };
     try {
@@ -2545,6 +2548,46 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     });
   }
 
+  private async applyProviderToolInput(
+    projection: ProviderProjectionState,
+    runtimeGeneration: number,
+    index: number,
+    delta: string,
+    ownerThreadId = this.threadId,
+  ): Promise<void> {
+    const projected = await this.applyProviderMainStream(projection, runtimeGeneration, {
+      kind: "toolInput", index, delta,
+    }, ownerThreadId);
+    const tool = projected?.tool;
+    if (tool?.name !== "Write" && tool?.name !== "Edit") return;
+    const key = `${ownerThreadId}\0${index}`;
+    let state = projection.filePreviews.get(key);
+    if (!state) {
+      state = { providerId: tool.providerId, preview: new StreamingFileChangePreview(tool.name, tool.cwd) };
+      projection.filePreviews.set(key, state);
+    }
+    const change = await state.preview.push(delta);
+    if (change) await this.applyProviderMainStream(projection, runtimeGeneration, {
+      kind: "toolFiles", providerId: state.providerId, changes: [change],
+    }, ownerThreadId);
+  }
+
+  private async finishProviderToolInput(
+    projection: ProviderProjectionState,
+    runtimeGeneration: number,
+    index: number,
+    ownerThreadId = this.threadId,
+  ): Promise<void> {
+    const key = `${ownerThreadId}\0${index}`;
+    const state = projection.filePreviews.get(key);
+    if (!state) return;
+    projection.filePreviews.delete(key);
+    const change = await state.preview.finish();
+    if (change) await this.applyProviderMainStream(projection, runtimeGeneration, {
+      kind: "toolFiles", providerId: state.providerId, changes: [change],
+    }, ownerThreadId);
+  }
+
   private async canUseProviderTool(
     projection: ProviderProjectionState,
     runtimeGeneration: number,
@@ -3048,15 +3091,14 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           delta: event.delta.thinking,
         }, childThreadId);
       } else if (event.delta.type === "input_json_delta") {
-        await this.applyProviderMainStream(projection, runtimeGeneration, {
-          kind: "toolInput",
-          index: event.index,
-          delta: event.delta.partial_json,
-        }, childThreadId);
+        await this.applyProviderToolInput(
+          projection, runtimeGeneration, event.index, event.delta.partial_json, childThreadId,
+        );
       }
       return;
     }
     if (event.type === "content_block_stop") {
+      await this.finishProviderToolInput(projection, runtimeGeneration, event.index, childThreadId);
       await this.applyProviderMainStream(
         projection,
         runtimeGeneration,
@@ -3524,15 +3566,14 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           delta: event.delta.thinking,
         });
       } else if (event.delta.type === "input_json_delta") {
-        await this.applyProviderMainStream(projection, runtimeGeneration, {
-          kind: "toolInput",
-          index: event.index,
-          delta: event.delta.partial_json,
-        });
+        await this.applyProviderToolInput(
+          projection, runtimeGeneration, event.index, event.delta.partial_json,
+        );
       }
       return;
     }
     if (event.type === "content_block_stop") {
+      await this.finishProviderToolInput(projection, runtimeGeneration, event.index);
       await this.applyProviderMainStream(
         projection,
         runtimeGeneration,
