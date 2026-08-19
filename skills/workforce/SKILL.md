@@ -6,7 +6,8 @@ description: "Delegation policy and model rankings for subagents: which model (g
 # Subagents and token usage
 
 Be very careful with token usage: be an orchestrator and manager over subagents. Do not dive into huge repositories, read whole huge docs/files, or write routine code/configs/migrations/plots yourself — delegate all token-heavy dirty work to subagents. Spend your own context only on planning, architecture, research taste, code design, reading tough places where less capable agents struggle, and reviewing (or writing) production/good code.
-Especially avoid baby-sitting long runs (e.g. training or feature collection) yourself, let gpt-5.6-sol do it for you.
+Especially avoid (!!!) baby-sitting long runs (e.g. training or feature collection) yourself — let gpt-5.6-sol do it for you.
+One more time: NEVER spend your own time/tokens on manual labour such as writing a well-scoped, verifiable, non-production module with clearly defined inputs and outputs.
 
 ## Rankings
 
@@ -19,12 +20,13 @@ Axes 0–10: INT = intelligence (how hard a well-defined problem it handles unsu
 | fable-5 (high)     | $$$$ | 9   | 9  | 9   | 8  | 8   |
 
 How to apply:
-- Pick the cheapest model whose scores meet the task's bar; when axes conflict for anything that ships, intelligence > taste > cost.
-- NEVER delegate open-ended / not-well-specified tasks that require independent research and research taste to gpt-5.6-sol or opus-5 (e.g. "research why strategy X has a quality drawdown"). Do them yourself or delegate to a fable-5 subagent. Delegate to gpt-5.6-sol/opus-5 only engineering or well-specified tasks where the spec fully defines the result: "implement a strategy with such-and-such logic" — ok; "build such-and-such plot with such-and-such math" — ok; open-ended investigation — not ok.
+- Pick the cheapest model whose scores meet the task's bar; when axes conflict for anything that ships, INT & RT >> cost.
+- NEVER delegate open-ended / not-well-specified tasks that require independent research and research taste to gpt-5.6-sol (e.g. "research why strategy X has a quality drawdown"). Do them yourself or delegate to a fable-5/opus-5 subagent. Delegate to gpt-5.6-sol only engineering or well-specified tasks where the spec fully defines the result: "implement a strategy with such-and-such logic" — ok; "build such-and-such plot with such-and-such math" — ok; open-ended investigation — not ok.
+  - Though: you can always run gpt-5.6-sol on any research in parallel — never trust its _research_ conclusions blindly, but it can spot details that e.g. fable-5 might miss.
 - If a cheaper model's output doesn't meet the bar, redo the work with a smarter model without asking me (model choice is yours; the autonomy rules still gate *what* work is allowed). Judge the output, not the price tag: escalating costs less than shipping mediocre work.
-- Bulk/mechanical work (explore current codebase, clear-spec implementation, straightforward data analysis, migrations): gpt-5.6-sol — its IF/ATD are top, but PCQ 4 means its production code needs review.
+- Bulk/mechanical work (explore current codebase, clear-spec implementation, straightforward data analysis, migrations): gpt-5.6-sol — its IF/ATD are top, but PCQ 4 means never ask it to write production code.
 - Anything user-facing (UI, copywriting, API design) needs RT ≥ 7.
-- Reviews of plans/implementations: fable-5 or opus-5, optionally gpt-5.6-sol as an extra independent perspective.
+- Reviews of plans/implementations: fable-5. Optionally gpt-5.6-sol as an extra independent perspective.
 - Never use models below the table (Haiku, bare Sonnet, etc.) for actual work.
 - Do not use Explore subagent for codebase exploration, use gpt-5.6-sol instead.
 
