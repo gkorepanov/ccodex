@@ -31,3 +31,4 @@ lab/apple-container/.build/
 !vendor/codex/continuation.md
 !assets/ccodex/goals/continuation.md
 !skills/**/*.md
+!agents/*.md

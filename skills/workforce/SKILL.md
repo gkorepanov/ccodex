@@ -1,6 +1,6 @@
 ---
 name: workforce
-description: "Delegation policy and model rankings for subagents: which model (gpt-5.6-sol / opus-4.8 / fable-5) to pick for which task, how to be an orchestrator instead of burning your own context, and how to run gpt-5.6-sol via codex-wrapper. Use BEFORE delegating any work to subagents, spawning agents/workflows, or choosing a model for a subtask."
+description: "Delegation policy and model rankings for subagents: which model (gpt-5.6-sol / opus-5 / fable-5) to pick for which task, how to be an orchestrator instead of burning your own context, and how to run gpt-5.6-sol via codex-wrapper. Use BEFORE delegating any work to subagents, spawning agents/workflows, or choosing a model for a subtask."
 ---
 
 # Subagents and token usage
@@ -10,23 +10,23 @@ Especially avoid baby-sitting long runs (e.g. training or feature collection) yo
 
 ## Rankings
 
-| model           | cost | intelligence | taste |
-|-----------------|------|--------------|-------|
-| gpt-5.6-sol     | $    | 8            | 5     |
-| opus-4.8 (high) | $$$  | 6            | 7     |
-| fable-5 (high)  | $$$$ | 10           | 10    |
+Axes 0–10: INT = intelligence (how hard a well-defined problem it handles unsupervised), RT = research taste, PCQ = production code quality, IF = exact instruction following, ATD = attention to detail. Cost = what I actually pay (OpenAI limits are generous).
 
-Cost reflects what I actually pay (OpenAI has really generous limits). Intelligence is how hard a well-defined problem the model can handle unsupervised. Taste covers research taste, UI/UX, code quality, API design, and copywriting.
+| model              | cost | INT | RT | PCQ | IF | ATD |
+|--------------------|------|-----|----|-----|----|-----|
+| gpt-5.6-sol (high) | $    | 8   | 5  | 4   | 10 | 10  |
+| opus-5 (high)      | $$   | 8   | 8  | 6   | 8  | 7   |
+| fable-5 (high)     | $$$$ | 9   | 9  | 9   | 8  | 8   |
 
 How to apply:
-- Pick the cheapest model whose intelligence/taste meet the task's bar; when axes conflict for anything that ships, intelligence > taste > cost.
-- NEVER delegate open-ended / not-well-specified tasks that require independent research and research taste to gpt-5.6-sol or opus-4.8 (e.g. "research why strategy X has a quality drawdown"). Do them yourself or delegate to a fable-5 subagent. Delegate to gpt-5.6-sol/opus-4.8 only engineering or well-specified tasks where the spec fully defines the result: "implement a strategy with such-and-such logic" — ok; "build such-and-such plot with such-and-such math" — ok; open-ended investigation — not ok.
+- Pick the cheapest model whose scores meet the task's bar; when axes conflict for anything that ships, intelligence > taste > cost.
+- NEVER delegate open-ended / not-well-specified tasks that require independent research and research taste to gpt-5.6-sol or opus-5 (e.g. "research why strategy X has a quality drawdown"). Do them yourself or delegate to a fable-5 subagent. Delegate to gpt-5.6-sol/opus-5 only engineering or well-specified tasks where the spec fully defines the result: "implement a strategy with such-and-such logic" — ok; "build such-and-such plot with such-and-such math" — ok; open-ended investigation — not ok.
 - If a cheaper model's output doesn't meet the bar, redo the work with a smarter model without asking me (model choice is yours; the autonomy rules still gate *what* work is allowed). Judge the output, not the price tag: escalating costs less than shipping mediocre work.
-- Bulk/mechanical work (explore current codebase, clear-spec implementation, straightforward data analysis, migrations): gpt-5.6-sol.
-- Anything user-facing (UI, copywriting, API design) needs taste ≥ 7.
-- Reviews of plans/implementations: fable-5 or opus-4.8, optionally gpt-5.6-sol as an extra independent perspective.
+- Bulk/mechanical work (explore current codebase, clear-spec implementation, straightforward data analysis, migrations): gpt-5.6-sol — its IF/ATD are top, but PCQ 4 means its production code needs review.
+- Anything user-facing (UI, copywriting, API design) needs RT ≥ 7.
+- Reviews of plans/implementations: fable-5 or opus-5, optionally gpt-5.6-sol as an extra independent perspective.
 - Never use models below the table (Haiku, bare Sonnet, etc.) for actual work.
 - Do not use Explore subagent for codebase exploration, use gpt-5.6-sol instead.
 
 ## Using gpt-5.6-sol
-Claude models (opus-4.8, fable-5) run via the Agent/Workflow `model` parameter; that parameter only takes Claude models, so for gpt-5.6-sol use a `codex-wrapper` subagent (`model: 'sonnet', effort: 'low'`) which is instructed to communicate with gpt-5.6-sol and return the result.
+Claude models (opus-5, fable-5) run via the Agent/Workflow `model` parameter; that parameter only takes Claude models, so for gpt-5.6-sol use a `codex-wrapper` subagent (`model: 'sonnet', effort: 'low'`) which is instructed to communicate with gpt-5.6-sol and return the result.
