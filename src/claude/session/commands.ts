@@ -745,6 +745,8 @@ export type ClaudeSessionCommand =
       readonly runtimeGeneration: number; readonly sent: boolean; readonly errorMessage?: string;
       readonly codexErrorInfo?: CodexErrorInfo | null }
   | { readonly type: "admitCompactBoundary"; readonly runtimeGeneration: number; readonly trigger: string }
+  | { readonly type: "autoCompactStarted"; readonly runtimeGeneration: number;
+      readonly source: RuntimeFactSource }
   | { readonly type: "compactBoundary"; readonly runtimeGeneration: number; readonly trigger: string;
       readonly boundary: string; readonly source: RuntimeFactSource }
   | { readonly type: "compactFailed"; readonly runtimeGeneration: number; readonly message: string;

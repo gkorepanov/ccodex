@@ -12,6 +12,11 @@ export interface ForkedTranscript {
   readonly uuidMap: ReadonlyMap<string, string>;
 }
 
+export interface TranscriptBoundaryCorrelation {
+  readonly requestId?: string;
+  readonly messageId?: string;
+}
+
 export interface CompactionBoundary {
   readonly uuid: string;
   readonly compact_metadata: {
@@ -26,6 +31,7 @@ export interface TranscriptBrancher {
     boundaryUuid: string,
     cwd: string,
     expectedBoundaries: readonly string[],
+    correlations?: ReadonlyMap<string, TranscriptBoundaryCorrelation>,
   ): Promise<ForkedTranscript>;
   resolveCompactionBoundary(sessionId: string, cwd: string, boundary: CompactionBoundary): Promise<string>;
   delete(sessionId: string, cwd: string): Promise<void>;
@@ -69,6 +75,30 @@ function provenance(entry: SessionStoreEntry): {
   return { sessionId: stringField(fields.sessionId), messageUuid: stringField(fields.messageUuid) };
 }
 
+function apiMessageId(entry: SessionStoreEntry): string | undefined {
+  const message = entry.message;
+  if (!message || typeof message !== "object") return undefined;
+  return stringField((message as Record<string, unknown>).id);
+}
+
+function canonicalBoundary(
+  uuid: string,
+  correlation: TranscriptBoundaryCorrelation | undefined,
+  entries: readonly SessionStoreEntry[],
+): string {
+  if (entries.some((entry) => entry.uuid === uuid)) return uuid;
+  if (!correlation?.requestId) return uuid;
+  const matches = entries.filter((entry) =>
+    entry.type === "assistant"
+    && entry.requestId === correlation.requestId
+    && (!correlation.messageId || apiMessageId(entry) === correlation.messageId),
+  );
+  if (matches.length !== 1 || typeof matches[0]!.uuid !== "string") {
+    throw new Error(`Claude transcript cannot resolve canonical boundary for SDK message '${uuid}'.`);
+  }
+  return matches[0]!.uuid;
+}
+
 export class SdkTranscriptBrancher implements TranscriptBrancher {
   public constructor(
     private readonly sdk: TranscriptSdk = { forkSession, importSessionToStore, deleteSession },
@@ -80,10 +110,25 @@ export class SdkTranscriptBrancher implements TranscriptBrancher {
     boundaryUuid: string,
     cwd: string,
     expectedBoundaries: readonly string[],
+    correlations: ReadonlyMap<string, TranscriptBoundaryCorrelation> = new Map(),
   ): Promise<ForkedTranscript> {
     let forkedSessionId: string | undefined;
     try {
-      const fork = await this.sdk.forkSession(sourceSessionId, { dir: cwd, upToMessageId: boundaryUuid });
+      const canonical = new Map<string, string>();
+      const required = new Set([boundaryUuid, ...expectedBoundaries]);
+      if (correlations.size > 0) {
+        const source = new RecordingSessionStore(sourceSessionId);
+        await this.sdk.importSessionToStore(sourceSessionId, source, { dir: cwd, includeSubagents: false });
+        for (const uuid of required) {
+          canonical.set(uuid, canonicalBoundary(uuid, correlations.get(uuid), source.entries()));
+        }
+      } else {
+        for (const uuid of required) canonical.set(uuid, uuid);
+      }
+      const fork = await this.sdk.forkSession(sourceSessionId, {
+        dir: cwd,
+        upToMessageId: canonical.get(boundaryUuid)!,
+      });
       forkedSessionId = fork.sessionId;
       const recording = new RecordingSessionStore(fork.sessionId);
       await this.sdk.importSessionToStore(fork.sessionId, recording, { dir: cwd, includeSubagents: false });
@@ -98,12 +143,14 @@ export class SdkTranscriptBrancher implements TranscriptBrancher {
         }
         uuidMap.set(copiedFrom.messageUuid, newUuid);
       }
-      const required = new Set([boundaryUuid, ...expectedBoundaries]);
-      const missing = [...required].filter((uuid) => !uuidMap.has(uuid));
+      const missing = [...required].filter((uuid) => !uuidMap.has(canonical.get(uuid)!));
       if (missing.length > 0) {
         throw new Error(`Claude fork is missing provenance for retained boundary '${missing[0]}'.`);
       }
-      return { sessionId: fork.sessionId, uuidMap };
+      return {
+        sessionId: fork.sessionId,
+        uuidMap: new Map([...required].map((uuid) => [uuid, uuidMap.get(canonical.get(uuid)!)!])),
+      };
     } catch (error) {
       if (forkedSessionId) await this.delete(forkedSessionId, cwd).catch(() => undefined);
       throw error;

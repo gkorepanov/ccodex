@@ -97,6 +97,39 @@ describe("SdkTranscriptBrancher", () => {
     }
   });
 
+  it("maps a normalized multi-block SDK uuid to the canonical Claude transcript boundary", async () => {
+    const sdk = new FakeTranscriptSdk();
+    const sourceSessionId = randomUUID();
+    const normalizedUuid = "615c5536-95e6-424f-ab9c-000000000001";
+    const canonicalUuid = "615c5536-95e6-424f-ab9c-b58dfadd4e58";
+    const latestUuid = randomUUID();
+    sdk.sessions.set(sourceSessionId, [
+      {
+        type: "assistant", uuid: canonicalUuid, parentUuid: null, sessionId: sourceSessionId,
+        requestId: "req-multiblock", message: { id: "msg-multiblock" },
+      } as SessionStoreEntry,
+      {
+        type: "assistant", uuid: latestUuid, parentUuid: canonicalUuid, sessionId: sourceSessionId,
+        requestId: "req-latest", message: { id: "msg-latest" },
+      } as SessionStoreEntry,
+    ]);
+    const brancher = new SdkTranscriptBrancher(sdk.api);
+
+    const fork = await brancher.forkWithProvenance(
+      sourceSessionId,
+      latestUuid,
+      "/fixture/project",
+      [normalizedUuid, latestUuid],
+      new Map([[normalizedUuid, { requestId: "req-multiblock", messageId: "msg-multiblock" }]]),
+    );
+
+    expect(fork.uuidMap.get(normalizedUuid)).toBeDefined();
+    expect(sdk.sessions.get(fork.sessionId)).toContainEqual(expect.objectContaining({
+      uuid: fork.uuidMap.get(normalizedUuid),
+      forkedFrom: { sessionId: sourceSessionId, messageUuid: canonicalUuid },
+    }));
+  });
+
   it("resolves the generated post-compaction summary rather than an older or later assistant", async () => {
     const sdk = new FakeTranscriptSdk();
     sdk.sessions.set(fixture.sessionId, structuredClone(fixture.entries));

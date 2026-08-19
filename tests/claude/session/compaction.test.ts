@@ -462,7 +462,7 @@ describe("ClaudeSession manual compaction", () => {
     await watchdog.registry.close();
   });
 
-  it("projects automatic boundaries onto the normal turn without a manual operation", async () => {
+  it("shows automatic compaction on the normal turn until its provider boundary", async () => {
     const state = harness();
     await state.registry.submit(state.threadId, {
       type: "createThread",
@@ -479,6 +479,20 @@ describe("ClaudeSession manual compaction", () => {
         input: [{ type: "text", text: "work", text_elements: [] }],
       },
     });
+    await state.registry.submit(state.threadId, {
+      type: "autoCompactStarted",
+      runtimeGeneration: 2,
+      source: { providerEventId: "compact-status", providerEventType: "system/status" },
+    });
+    await state.registry.submit(state.threadId, {
+      type: "autoCompactStarted",
+      runtimeGeneration: 2,
+      source: { providerEventId: "compact-status-duplicate", providerEventType: "system/status" },
+    });
+
+    expect(state.store.getTurn(state.threadId, prepared.turn.id)?.items)
+      .toContainEqual(expect.objectContaining({ type: "contextCompaction" }));
+    expect(state.events.filter((event) => event === "item/started")).toHaveLength(1);
 
     await expect(state.registry.submit<CompactionProjection | undefined>(state.threadId, {
       type: "compactBoundary",
@@ -495,7 +509,8 @@ describe("ClaudeSession manual compaction", () => {
     expect(state.store.getThreadRecord(state.threadId, false)?.lastClaudeMessageUuid)
       .toBe("auto-boundary");
     expect(state.store.listTurns(state.threadId).flatMap((turn) => turn.items))
-      .not.toContainEqual(expect.objectContaining({ type: "contextCompaction" }));
+      .toContainEqual(expect.objectContaining({ type: "contextCompaction" }));
+    expect(state.events.filter((event) => event === "item/completed")).toHaveLength(1);
     expect(state.events.filter((event) => event === "thread/compacted")).toHaveLength(1);
     await state.registry.submit(state.threadId, {
       type: "lifecycle",
@@ -503,6 +518,73 @@ describe("ClaudeSession manual compaction", () => {
       fact: { type: "result", status: "completed", codexErrorInfo: null, origin: null },
       source,
     });
+    await state.registry.close();
+  });
+
+  it("closes an unfinished automatic-compaction item when the turn terminates", async () => {
+    const state = harness("auto-terminal");
+    await state.registry.submit(state.threadId, {
+      type: "createThread",
+      record: record(state.threadId),
+    });
+    await state.registry.submit(state.threadId, {
+      type: "attachRuntime",
+      runtimeGeneration: 3,
+    });
+    await state.registry.submit(state.threadId, {
+      type: "prepareTurn",
+      params: {
+        threadId: state.threadId,
+        input: [{ type: "text", text: "work", text_elements: [] }],
+      },
+    });
+    await state.registry.submit(state.threadId, {
+      type: "autoCompactStarted",
+      runtimeGeneration: 3,
+      source: { providerEventId: "compact-status", providerEventType: "system/status" },
+    });
+    await state.registry.submit(state.threadId, {
+      type: "lifecycle",
+      runtimeGeneration: 3,
+      fact: { type: "result", status: "completed", codexErrorInfo: null, origin: null },
+      source,
+    });
+
+    const methods = state.store.listEventsAfter(state.threadId, 0).map((event) => event.method);
+    expect(methods.filter((method) => method === "item/started")).toHaveLength(1);
+    expect(methods.filter((method) => method === "item/completed")).toHaveLength(1);
+    expect(methods.indexOf("item/completed")).toBeLessThan(methods.indexOf("turn/completed"));
+    expect(methods).not.toContain("thread/compacted");
+    await state.registry.close();
+  });
+
+  it("closes automatic-compaction UI on provider failure without completing the active turn", async () => {
+    const state = harness("auto-failure");
+    await state.registry.submit(state.threadId, { type: "createThread", record: record(state.threadId) });
+    await state.registry.submit(state.threadId, { type: "attachRuntime", runtimeGeneration: 4 });
+    const prepared = await state.registry.submit<{ turn: Turn }>(state.threadId, {
+      type: "prepareTurn",
+      params: {
+        threadId: state.threadId,
+        input: [{ type: "text", text: "work", text_elements: [] }],
+      },
+    });
+    await state.registry.submit(state.threadId, {
+      type: "autoCompactStarted",
+      runtimeGeneration: 4,
+      source: { providerEventId: "compact-status", providerEventType: "system/status" },
+    });
+    await state.registry.submit(state.threadId, {
+      type: "compactFailed",
+      runtimeGeneration: 4,
+      message: "provider compact failed",
+      codexErrorInfo: "other",
+      source: { providerEventId: "compact-failed", providerEventType: "system/status" },
+    });
+
+    expect(state.store.getTurn(state.threadId, prepared.turn.id)?.status).toBe("inProgress");
+    expect(state.events.filter((method) => method === "item/completed")).toHaveLength(1);
+    expect(state.events).not.toContain("thread/compacted");
     await state.registry.close();
   });
 

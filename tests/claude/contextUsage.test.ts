@@ -288,13 +288,19 @@ describe("Claude context usage", () => {
   it("keeps an automatic compact boundary at 11k across a later >1M aggregate result", async () => {
     const directory = mkdtempSync(join(tmpdir(), "ccodex-context-auto-compact-"));
     directories.push(directory);
+    const compacting = {
+      type: "system", subtype: "status", status: "compacting", permissionMode: "default",
+      uuid: randomUUID(), session_id: "session",
+    } as unknown as SDKMessage;
     const compact = {
       type: "system", subtype: "compact_boundary", compact_metadata: {
         trigger: "auto", pre_tokens: 367_463, post_tokens: 11_076,
       },
       uuid: randomUUID(), session_id: "session",
     } as unknown as SDKMessage;
-    const fake = new FakeClaudeQuery(undefined, undefined, [], false, undefined, capturedResult(false), undefined, [compact]);
+    const fake = new FakeClaudeQuery(
+      undefined, undefined, [], false, undefined, capturedResult(false), undefined, [compacting, compact],
+    );
     fake.contextUsage = { totalTokens: 11_076, maxTokens: 1_000_000 };
     const hub = new SubscriptionHub();
     const store = new SqliteHybridStore(join(directory, "state.sqlite"));
@@ -309,6 +315,11 @@ describe("Claude context usage", () => {
     await runTurn(service, started.thread.id);
     await waitFor(() => usageEvents(events).length === 2);
 
+    const compactItemEvents = events.filter((event) => {
+      if (event.method !== "item/started" && event.method !== "item/completed") return false;
+      return (event.params as { item?: { type?: string } }).item?.type === "contextCompaction";
+    });
+    expect(compactItemEvents.map((event) => event.method)).toEqual(["item/started", "item/completed"]);
     expect(events.filter((event) => event.method === "thread/compacted")).toHaveLength(1);
     expect(usageEvents(events)[0]?.params).toMatchObject({ tokenUsage: { total: { totalTokens: 0 }, last: { totalTokens: 11_076 } } });
     expect(usageEvents(events)[1]?.params).toMatchObject({

@@ -6,7 +6,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { SDKMessage, SessionStoreEntry } from "@anthropic-ai/claude-agent-sdk";
 import { compactedTranscript as fixture } from "../fixtures/compactedTranscript.js";
 import { ClaudeService } from "../../src/claude/service.js";
-import type { TranscriptBrancher, CompactionBoundary, ForkedTranscript } from "../../src/claude/transcriptBrancher.js";
+import type {
+  TranscriptBoundaryCorrelation,
+  TranscriptBrancher,
+  CompactionBoundary,
+  ForkedTranscript,
+} from "../../src/claude/transcriptBrancher.js";
 import type { HybridConfig } from "../../src/config/config.js";
 import type { Turn } from "../../src/codex/generated/v2/Turn.js";
 import type { ClaudeThreadRecord, TurnProviderBoundary } from "../../src/store/HybridStore.js";
@@ -73,13 +78,16 @@ class FixtureBrancher implements TranscriptBrancher {
   public fail: "fork" | "import" | "mapping" | undefined;
   public failDeleteSession: string | undefined;
   public afterForkValidated: (() => void | Promise<void>) | undefined;
+  public correlations: ReadonlyMap<string, TranscriptBoundaryCorrelation> | undefined;
 
   public async forkWithProvenance(
     sourceSessionId: string,
     boundaryUuid: string,
     _cwd: string,
     expectedBoundaries: readonly string[],
+    correlations?: ReadonlyMap<string, TranscriptBoundaryCorrelation>,
   ): Promise<ForkedTranscript> {
+    this.correlations = correlations;
     if (this.fail === "fork") throw new Error("native fork failed");
     const source = this.sessions.get(sourceSessionId)!;
     const boundaryIndex = source.findIndex((entry) => entry.uuid === boundaryUuid);
@@ -171,6 +179,31 @@ afterEach(() => {
 });
 
 describe("compacted transcript rollback boundary", () => {
+  it("passes durable SDK request identity needed to resolve normalized transcript boundaries", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ccodex-boundary-correlation-"));
+    directories.push(directory);
+    const store = new ObservingStore(join(directory, "state.sqlite"));
+    seed(store, directory);
+    const boundary = fixture.appTurns[0]!.boundary!;
+    store.appendProviderEvent({
+      threadId: "rollback-thread", processEpoch: "epoch", providerSequence: 1,
+      providerEventType: "assistant", providerEventId: boundary, createdAt: Date.now(),
+      payload: { type: "assistant", request_id: "req-boundary", message: { id: "msg-boundary" } },
+    });
+    const brancher = new FixtureBrancher();
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), store,
+      new FakeClaudeQuery().factory, undefined, undefined, brancher,
+    );
+
+    await service.rollbackThread({ threadId: "rollback-thread", numTurns: 1 });
+
+    expect(brancher.correlations?.get(boundary)).toEqual({
+      requestId: "req-boundary", messageId: "msg-boundary",
+    });
+    await service.close();
+  });
+
   it("replaces the retired runtime's rate-limit source exactly once on rollback and lazy resume", async () => {
     const directory = mkdtempSync(join(tmpdir(), "ccodex-rollback-rate-source-"));
     directories.push(directory);

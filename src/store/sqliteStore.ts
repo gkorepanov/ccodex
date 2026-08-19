@@ -608,6 +608,10 @@ export class SqliteHybridStore implements HybridStore {
             FROM provider_events
             WHERE thread_id = ?
               AND disposition IN ('projected', 'stateOnly', 'retainedOnly', 'unsupportedVisible')
+              AND (provider_event_id IS NULL OR NOT EXISTS (
+                SELECT 1 FROM turns
+                WHERE last_claude_message_uuid = provider_events.provider_event_id
+              ))
           )
           WHERE ordinal > ? OR (ordinal > 1 AND retained_bytes > ?)
         )

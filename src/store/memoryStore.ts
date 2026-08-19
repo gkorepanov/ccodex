@@ -293,7 +293,11 @@ export class MemoryHybridStore implements HybridStore {
   public pruneProviderEvents(threadId: string, maxEvents: number, maxBytes: number): number {
     if (maxEvents < 1) throw new Error("Provider event retention must keep at least one event.");
     const ordinary = new Set<ProviderEventDisposition>(["projected", "stateOnly", "retainedOnly", "unsupportedVisible"]);
-    const candidates = this.providerJournal.filter((event) => event.threadId === threadId && ordinary.has(event.disposition));
+    const boundaries = new Set(this.turnMessages.values());
+    const candidates = this.providerJournal.filter((event) =>
+      event.threadId === threadId
+      && ordinary.has(event.disposition)
+      && (!event.providerEventId || !boundaries.has(event.providerEventId)));
     const retained = new Set<number>();
     let bytes = 0;
     for (const event of [...candidates].reverse()) {
@@ -305,7 +309,9 @@ export class MemoryHybridStore implements HybridStore {
     const before = this.providerJournal.length;
     for (let index = this.providerJournal.length - 1; index >= 0; index -= 1) {
       const event = this.providerJournal[index]!;
-      if (event.threadId === threadId && ordinary.has(event.disposition) && !retained.has(event.sequence)) {
+      if (event.threadId === threadId && ordinary.has(event.disposition)
+        && (!event.providerEventId || !boundaries.has(event.providerEventId))
+        && !retained.has(event.sequence)) {
         this.providerJournal.splice(index, 1);
       }
     }

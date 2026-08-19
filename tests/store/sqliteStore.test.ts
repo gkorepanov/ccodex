@@ -888,6 +888,30 @@ describe("SqliteHybridStore", () => {
     store.close();
   });
 
+  it("retains provider payloads referenced by durable transcript boundaries", () => {
+    const store = createStore();
+    store.createThread(record());
+    store.createTurn("thread-1", {
+      id: "turn-1", items: [], itemsView: "full", status: "completed", error: null,
+      startedAt: 1, completedAt: 2, durationMs: 1_000,
+    });
+    store.setTurnClaudeMessageUuid("thread-1", "turn-1", "event-1");
+    for (let index = 1; index <= 3; index += 1) {
+      const event = store.appendProviderEvent({
+        threadId: "thread-1", processEpoch: "epoch-1", providerSequence: index,
+        providerEventType: "assistant", providerEventId: `event-${index}`,
+        payload: { request_id: `req-${index}` }, createdAt: index,
+      }).record;
+      store.completeProviderEvent("thread-1", event.sequence, "projected");
+    }
+
+    store.pruneProviderEvents("thread-1", 1, 1_000_000);
+
+    expect(store.listProviderEvents("thread-1").map((event) => event.providerEventId))
+      .toEqual(["event-1", "event-3"]);
+    store.close();
+  });
+
   it("persists provider message to projected item correlations", () => {
     const store = createStore();
     store.createThread(record());

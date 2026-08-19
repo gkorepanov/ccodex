@@ -1843,9 +1843,23 @@ describe("ClaudeService", () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-ephemeral-fork-"));
     directories.push(directory);
     const hub = new SubscriptionHub();
-    const fake = new FakeClaudeQuery();
+    const providerEvents = [
+      {
+        type: "system", subtype: "status", status: "compacting", permissionMode: "default",
+        uuid: randomUUID(), session_id: "session",
+      },
+      {
+        type: "system", subtype: "compact_boundary",
+        compact_metadata: { trigger: "auto", pre_tokens: 100, post_tokens: 25 },
+        uuid: randomUUID(), session_id: "session",
+      },
+    ] as unknown as SDKMessage[];
+    const fake = new FakeClaudeQuery(
+      undefined, undefined, [], false, undefined, undefined, undefined, providerEvents,
+    );
     const service = new ClaudeService(
       config(directory), hub, new Logger("error"), new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory,
+      undefined, undefined, immediateCompactionBoundary,
     );
     const source = await service.startThread({ model: "claude:haiku", cwd: directory });
     const fork = await service.forkThread({ threadId: source.thread.id, ephemeral: true, excludeTurns: true });
@@ -1858,8 +1872,8 @@ describe("ClaudeService", () => {
       threadId: fork.thread.id,
       items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "injected context" }] }],
     });
-    const events: string[] = [];
-    hub.subscribe(fork.thread.id, "test", (method) => events.push(method));
+    const events: Array<{ method: string; params: unknown }> = [];
+    hub.subscribe(fork.thread.id, "test", (method, params) => events.push({ method, params }));
     const prepared = await service.prepareTurn({
       threadId: fork.thread.id,
       input: [{ type: "text", text: "continue", text_elements: [] }],
@@ -1867,9 +1881,14 @@ describe("ClaudeService", () => {
     prepared.announce();
     prepared.start();
     await new Promise<void>((resolve) => {
-      const poll = () => events.includes("turn/completed") ? resolve() : setTimeout(poll, 5);
+      const poll = () => events.some((event) => event.method === "turn/completed") ? resolve() : setTimeout(poll, 5);
       poll();
     });
+    const compactLifecycle = events.filter((event) => event.method === "thread/compacted"
+      || ((event.method === "item/started" || event.method === "item/completed")
+        && (event.params as { item?: { type?: string } }).item?.type === "contextCompaction"))
+      .map((event) => event.method);
+    expect(compactLifecycle.slice(-3)).toEqual(["item/started", "item/completed", "thread/compacted"]);
     expect(service.readThread(fork.thread.id, true).thread.turns.at(-1)?.status).toBe("completed");
     await service.close();
   });

@@ -62,7 +62,11 @@ import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
 import { invalidParams } from "../protocol/errors.js";
 import { paginateTurns, turnCursor } from "../protocol/turnPagination.js";
 import { MetricsRegistry } from "../observability/metrics.js";
-import { SdkTranscriptBrancher, type TranscriptBrancher } from "./transcriptBrancher.js";
+import {
+  SdkTranscriptBrancher,
+  type TranscriptBoundaryCorrelation,
+  type TranscriptBrancher,
+} from "./transcriptBrancher.js";
 import {
   ClaudeRateLimitCoordinator,
   type ClaudeRateLimitTransition,
@@ -118,6 +122,36 @@ type PreparedResume = {
   readonly response: ThreadResumeResponse;
   notifyGoalSnapshot(notify: (method: string, params: unknown) => void): Promise<void>;
 };
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+}
+
+function boundaryCorrelations(
+  store: HybridStore,
+  source: ClaudeThreadRecord,
+  boundaries: readonly TurnProviderBoundary[],
+): ReadonlyMap<string, TranscriptBoundaryCorrelation> {
+  let owner = source;
+  const seen = new Set<string>();
+  while (owner.thread.parentThreadId && !seen.has(owner.thread.id)) {
+    seen.add(owner.thread.id);
+    const parent = store.getThreadRecord(owner.thread.parentThreadId, false);
+    if (!parent) break;
+    owner = parent;
+  }
+  const wanted = new Set(boundaries.map((boundary) => boundary.messageUuid));
+  const correlations = new Map<string, TranscriptBoundaryCorrelation>();
+  for (const event of store.listProviderEvents(owner.thread.id)) {
+    if (!event.providerEventId || !wanted.has(event.providerEventId)) continue;
+    const payload = recordValue(event.payload);
+    const message = recordValue(payload?.message);
+    const requestId = typeof payload?.request_id === "string" ? payload.request_id : undefined;
+    const messageId = typeof message?.id === "string" ? message.id : undefined;
+    if (requestId) correlations.set(event.providerEventId, { requestId, ...(messageId ? { messageId } : {}) });
+  }
+  return correlations;
+}
 
 async function* idleUsagePrompt(signal: AbortSignal): AsyncGenerator<SDKUserMessage> {
   if (signal.aborted) return;
@@ -1364,7 +1398,8 @@ export class ClaudeService {
     const boundary = selectedBoundary?.messageUuid ?? sourceBoundaries.at(-1)?.messageUuid;
     const branch = boundary
       ? await this.transcripts.forkWithProvenance(sourceRecord.claudeSessionId, boundary, sourceRecord.thread.cwd,
-        sourceBoundaries.map((entry) => entry.messageUuid))
+        sourceBoundaries.map((entry) => entry.messageUuid),
+        boundaryCorrelations(this.store, sourceRecord, sourceBoundaries))
       : { sessionId: uuidv7(), uuidMap: new Map<string, string>() };
     try {
       const current = await this.sessions.submit<SessionBranchSnapshot>(params.threadId, { type: "snapshotBranch" });
@@ -1460,7 +1495,8 @@ export class ClaudeService {
     const boundary = sourceBoundaries.at(-1)?.messageUuid;
     const branch = boundary
       ? await this.transcripts.forkWithProvenance(sourceRecord.claudeSessionId, boundary, sourceRecord.thread.cwd,
-        sourceBoundaries.map((entry) => entry.messageUuid))
+        sourceBoundaries.map((entry) => entry.messageUuid),
+        boundaryCorrelations(this.store, sourceRecord, sourceBoundaries))
       : { sessionId: uuidv7(), uuidMap: new Map<string, string>() };
     let committed: ClaudeThreadRecord;
     try {
