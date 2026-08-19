@@ -58,6 +58,17 @@ function packageVersion(): string {
   return compatibilityManifest().productVersion;
 }
 
+async function installClaudeStack(packageRoot: string): Promise<void> {
+  const script = join(packageRoot, "scripts", "install-claude-stack.sh");
+  if (!existsSync(script)) return;
+  try {
+    const { stdout } = await execute("sh", [script], { timeout: 60_000, maxBuffer: 512 * 1024 });
+    process.stdout.write(stdout);
+  } catch (error) {
+    process.stderr.write(`CCodex setup warning: Claude delegation stack install failed: ${String(error)}\n`);
+  }
+}
+
 async function npmStage(destination: string, version = packageVersion()): Promise<void> {
   const main = process.env.CCODEX_PACKAGE_SPEC ?? `@gkorepanov/ccodex@${version}`;
   const specs = [main, ...(process.env.CCODEX_RELAY_PACKAGE_SPEC ? [process.env.CCODEX_RELAY_PACKAGE_SPEC] : [])];
@@ -437,6 +448,7 @@ export async function setup(args: readonly string[]): Promise<number> {
     else rmSync(layout.manifest, { force: true });
     throw error;
   }
+  await installClaudeStack(join(versionPath, "node_modules", "@gkorepanov", "ccodex"));
   process.stdout.write(
     `CCodex ${requestedVersion} activated. Open a new shell or run: export PATH="${layout.bin}:$PATH"`
     + `${process.platform === "darwin" ? "\nReconnect Codex App to use this version." : ""}\n`,

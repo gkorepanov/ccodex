@@ -18,7 +18,9 @@ for skill in "$ROOT"/skills/*/; do
   echo "installed skill: $name -> $CLAUDE_DIR/skills/$name"
 done
 
-if claude mcp get codex >/dev/null 2>&1; then
+if ! command -v claude >/dev/null 2>&1; then
+  echo "codex MCP server: skipped (claude CLI not found)" >&2
+elif claude mcp get codex >/dev/null 2>&1; then
   echo "codex MCP server: already registered"
 else
   claude mcp add --scope user codex -- codex mcp-server

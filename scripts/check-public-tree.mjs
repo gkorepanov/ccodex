@@ -9,8 +9,10 @@ const allowedMarkdown = new Set([
   "assets/ccodex/goals/continuation.md",
 ]);
 const forbiddenCapture = /(^|\/)(captures?|fixtures\/protocol)(\/|$)|\.(?:capture|gateway|lab)\.json$|\.jsonl(?:\.gz)?$/u;
+const allowedMarkdownPattern = /^(?:agents|skills)\/.+\.md$/u;
 const violations = files.filter((path) =>
-  (path.endsWith(".md") && !allowedMarkdown.has(path)) || forbiddenCapture.test(path));
+  (path.endsWith(".md") && !allowedMarkdown.has(path) && !allowedMarkdownPattern.test(path))
+  || forbiddenCapture.test(path));
 
 if (violations.length > 0) {
   throw new Error(`Private docs or captures are tracked:\n${violations.join("\n")}`);
