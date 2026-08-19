@@ -30,3 +30,4 @@ lab/apple-container/.build/
 !legal/THIRD_PARTY_NOTICES.md
 !vendor/codex/continuation.md
 !assets/ccodex/goals/continuation.md
+!skills/**/*.md

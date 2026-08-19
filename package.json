@@ -51,6 +51,7 @@
     "check:public-tree": "node scripts/check-public-tree.mjs",
     "architecture:baseline": "node scripts/check-one-writer-architecture.mjs --update-ledger",
     "dev": "tsx src/cli/main.ts",
+    "skills:install": "./scripts/install-skills.sh",
     "sync:codex-assets": "node scripts/codex-assets.mjs",
     "check:codex-assets": "node scripts/codex-assets.mjs --check",
     "update:codex-pin": "node scripts/update-codex-pin.mjs",
