@@ -26,6 +26,9 @@ export function probeAppServer(socketPath: string): Promise<ProbeInfo> {
     const finish = (error?: Error, info?: ProbeInfo) => {
       clearTimeout(timer);
       webSocket.removeAllListeners();
+      // terminate() during the handshake makes ws emit 'error'; without a
+      // listener that would crash the process.
+      webSocket.on("error", () => undefined);
       webSocket.terminate();
       error ? reject(error) : resolve(info!);
     };

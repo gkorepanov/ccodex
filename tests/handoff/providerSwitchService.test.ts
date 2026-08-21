@@ -34,6 +34,22 @@ function thread(id: string, provider: string, turns: Turn[] = []): Thread {
 }
 
 describe("provider switch service", () => {
+  it("drops incomplete provisional records from the app catalog", () => {
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    store.createLogicalThread({
+      thread: thread("provisional-public", "claude"),
+      epoch: {
+        id: "epoch-provisional", provider: "claude",
+        backendThreadId: "ccodex-provisional:pending-fork",
+        model: "sonnet", settings: {}, createdAt: 10,
+      },
+    });
+    const service = new CrossProviderForks(store, {} as never);
+    // createLogicalThread persists only the thread identity; a stalled fork
+    // leaves that stub as the only record, and serving it to the app crashes
+    // the thread list ("Cannot use 'in' operator...").
+    expect(service.projectThreadCatalog([], []).map((value) => value.id)).toEqual([]);
+  });
   it("continues overlay pagination from a stable turn anchor after live turns are appended", async () => {
     const inheritedTurns = Array.from({ length: 20 }, (_, index) => turn(`overlay-${index + 1}`, "history"));
     const target = thread("overlay-target", "openai");

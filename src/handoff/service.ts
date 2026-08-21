@@ -449,7 +449,11 @@ export class CrossProviderForks {
       if (mapping.backendThreadId.startsWith("ccodex-provisional:")) {
         const provisional = this.store.getLogicalThread(mapping.publicThreadId);
         const thread = provisional ? { ...provisional.thread, turns: [] } : undefined;
-        return thread && filterSortThreads([thread], params).length > 0 ? [thread] : [];
+        // Interrupted forks from older versions can leave a stub record that
+        // lacks required Thread fields; serving it crashes the app catalog.
+        if (!thread || thread.source === undefined || thread.modelProvider === undefined
+          || thread.status === undefined) return [];
+        return filterSortThreads([thread], params).length > 0 ? [thread] : [];
       }
       return [];
     });

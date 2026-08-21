@@ -87,7 +87,10 @@ export class ThreadCatalog {
     // projected to its public task. Only the archive partition is safe to
     // apply before projection; every public filter is evaluated exactly once
     // on the unified catalog.
-    await this.claude.refreshNativeMetadata?.();
+    // Never block the catalog on the Claude SDK: listSessions() can stall for
+    // minutes while a turn is active, and the app drops the connection after
+    // 30s. Refresh native metadata in the background; it applies next poll.
+    void this.claude.refreshNativeMetadata?.();
     const providerParams: ThreadListParams = {
       archived: params.archived ?? false,
       cursor: null,
