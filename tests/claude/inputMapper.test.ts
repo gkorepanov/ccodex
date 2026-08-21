@@ -32,6 +32,18 @@ describe("mapUserInput", () => {
     expect((mapped.message.content as Array<{ source?: { url?: string } }>)[0]?.source?.url).toBe("https://example.com/image.png");
   });
 
+  it("inlines pasted data-URL images and rejects types Claude cannot read", async () => {
+    const data = Buffer.from("pasted").toString("base64");
+    const mapped = await mapUserInput([{ type: "image", url: `data:image/png;base64,${data}` }], "uuid");
+    expect(mapped.message.content).toEqual([
+      { type: "image", source: { type: "base64", media_type: "image/png", data } },
+    ]);
+    await expect(mapUserInput([{ type: "image", url: `data:image/svg+xml;base64,${data}` }], "uuid"))
+      .rejects.toThrow("Unsupported Claude image type 'image/svg+xml'");
+    await expect(mapUserInput([{ type: "image", url: "data:image/png,%89PNG" }], "uuid"))
+      .rejects.toThrow("Unsupported Claude image URL scheme 'data:'");
+  });
+
   it("rejects audio explicitly instead of treating it as a local image", async () => {
     await expect(mapUserInput([{ type: "audio", url: "https://example.com/audio.wav" }]))
       .rejects.toThrow("Audio input is not supported by the pinned Claude runtime");

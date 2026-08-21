@@ -13,6 +13,8 @@ const mediaTypes: Record<string, string> = {
   ".webp": "image/webp",
 };
 
+const dataImageUrl = /^data:(image\/[a-z+.-]+);base64,([\s\S]*)$/i;
+
 interface InputContext {
   readonly cwd: string;
   readonly sandboxPolicy: unknown;
@@ -49,6 +51,13 @@ export async function mapUserInput(input: readonly UserInput[], uuid?: string, c
     } else if (item.type === "skill") {
       throw invalidParams("Codex skills are not available in Claude threads.");
     } else if (item.type === "image") {
+      const inline = dataImageUrl.exec(item.url);
+      if (inline) {
+        const mediaType = inline[1]!.toLocaleLowerCase();
+        if (!Object.values(mediaTypes).includes(mediaType)) throw invalidParams(`Unsupported Claude image type '${mediaType}'.`);
+        content.push({ type: "image", source: { type: "base64", media_type: mediaType, data: inline[2]!.replace(/\s+/g, "") } });
+        continue;
+      }
       const url = new URL(item.url);
       if (url.protocol !== "https:" && url.protocol !== "http:") throw invalidParams(`Unsupported Claude image URL scheme '${url.protocol}'.`);
       content.push({ type: "image", source: { type: "url", url: item.url } });
