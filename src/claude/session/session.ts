@@ -92,7 +92,12 @@ import {
 import { ShellRunner, type ShellProcess } from "./shellRunner.js";
 import { diffFile, snapshotFile } from "../fileSnapshots.js";
 import { appendHookProgress, completeHookRun, startHookRun, type ClaudeHookRun } from "../hookMapper.js";
+import { stat } from "node:fs/promises";
 import { readBackgroundOutput, type BackgroundOutputReader } from "./backgroundOutput.js";
+import {
+  CODEX_MCP_MESSAGE_LABEL, CODEX_MCP_PROMPT_LABEL, CODEX_MCP_REASONING_LABEL, CODEX_MCP_TOOLS,
+  defaultCodexRolloutLocator, parseRolloutChunk, type CodexRolloutLocator,
+} from "./codexRollout.js";
 import type { TurnStartParams } from "../../codex/generated/v2/TurnStartParams.js";
 import type { TurnSteerParams } from "../../codex/generated/v2/TurnSteerParams.js";
 import type { ThreadBackgroundTerminal } from "../../codex/generated/v2/ThreadBackgroundTerminal.js";
@@ -134,6 +139,21 @@ import { normalizeClaudeModelIdentifier } from "../modelSelection.js";
 import { StreamingFileChangePreview } from "../streamingFilePreview.js";
 
 const nullSource = { providerEventId: null, providerEventType: null } as const;
+
+interface CodexMcpTailer {
+  readonly runtimeGeneration: number;
+  readonly ownerThreadId: string;
+  readonly codexThreadId: string | undefined;
+  readonly notBeforeMs: number;
+  readonly decoder: TextDecoder;
+  readonly timer: ReturnType<typeof setInterval>;
+  file?: string;
+  offset: number;
+  buffer: string;
+  reading?: Promise<void> | undefined;
+  stopped: boolean;
+  sawTurnComplete: boolean;
+}
 const providerJournalMaxEvents = 20_000;
 const providerJournalMaxBytes = 256 * 1_024 * 1_024;
 const providerJournalPruneInterval = 1_024;
@@ -532,6 +552,8 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
   private runtimeGeneration: number | undefined;
   private readonly scopes = new Map<string, MainStreamState>();
   private readonly tasks = new Map<string, ScopeTask>();
+  private readonly codexMcpTailers = new Map<string, CodexMcpTailer>();
+  private readonly codexRolloutClaims = new Set<string>();
   private compaction: (Omit<StartedCompaction, "turn"> & {
     readonly messageUuid: string;
     readonly runtimeGeneration: number;
@@ -615,6 +637,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     private readonly shellRunner: ShellRunner = new ShellRunner(),
     private readonly backgroundOutputReader: BackgroundOutputReader = readBackgroundOutput,
     private readonly runtimeDependencies?: ClaudeSessionRuntimeDependencies,
+    private readonly codexRolloutLocator: CodexRolloutLocator = defaultCodexRolloutLocator(),
   ) {
     this.mailbox = new ClaudeMailbox(capacity);
     this.consumer = this.run();
@@ -2933,6 +2956,15 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         toolName: input.tool_name,
         input: toolInput,
       });
+      if (CODEX_MCP_TOOLS.has(input.tool_name)) {
+        await this.submitProviderProjection(runtimeGeneration, {
+          type: "codexMcpCallBegin",
+          runtimeGeneration,
+          providerId: toolUseId,
+          ...(input.agent_id ? { ownerProviderId: input.agent_id } : {}),
+          input: toolInput,
+        });
+      }
     }
     if (policy.decision === "defer" || policy.decision === "ask") return { continue: true };
     return {
@@ -3199,6 +3231,9 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     const backgroundId = backgroundTaskId(message);
     const itemIds: string[] = [];
     for (const result of toolResults(message)) {
+      if (this.codexMcpTailers.has(result.toolUseId)) {
+        await this.finishCodexRolloutTailer(result.toolUseId);
+      }
       const outputFile = backgroundOutputFile(result.output);
       const projected = backgroundId
         ? await this.applyProviderMainStream(projection, runtimeGeneration, {
@@ -5303,6 +5338,8 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         }
       case "captureToolFileBefore":
         return this.captureToolFileBefore(command);
+      case "codexMcpCallBegin":
+        return this.codexMcpCallBegin(command);
       case "captureToolFileAfter":
         return this.captureToolFileAfter(command.runtimeGeneration, command.providerId);
       case "hook":
@@ -7034,6 +7071,120 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     return true;
   }
 
+  private codexMcpCallBegin(
+    command: Extract<ClaudeSessionCommand, { type: "codexMcpCallBegin" }>,
+  ): boolean {
+    if (command.runtimeGeneration !== this.runtimeGeneration || this.interruptFence || this.dropLateFacts) return false;
+    let owner = this.toolOwner(command.providerId);
+    if (!owner && command.ownerProviderId) {
+      owner = this.toolOwner(command.ownerProviderId);
+      const task = [...this.tasks.values()].find((candidate) =>
+        taskUsesProvider(candidate, command.ownerProviderId!) || candidate.taskId === command.ownerProviderId);
+      if (task?.childThreadId) owner = this.scopes.get(task.childThreadId);
+    }
+    owner ??= this.scopes.get(this.threadId);
+    if (!owner) return false;
+    const prompt = typeof command.input.prompt === "string" ? command.input.prompt : "";
+    if (prompt) {
+      this.projectMainStream(owner.ownerThreadId, {
+        kind: "instantAgent",
+        text: `${CODEX_MCP_PROMPT_LABEL}\n\n${prompt}`,
+      }, nullSource);
+    }
+    this.ensureCodexRolloutTailer(
+      command.providerId,
+      owner.ownerThreadId,
+      typeof command.input.threadId === "string" ? command.input.threadId : undefined,
+    );
+    return true;
+  }
+
+  private ensureCodexRolloutTailer(providerId: string, ownerThreadId: string, codexThreadId?: string): void {
+    if (this.codexMcpTailers.has(providerId)) return;
+    const runtimeGeneration = this.runtimeGeneration;
+    if (runtimeGeneration === undefined) return;
+    const tailer: CodexMcpTailer = {
+      runtimeGeneration, ownerThreadId, codexThreadId,
+      notBeforeMs: Date.now(), offset: 0, buffer: "",
+      decoder: new TextDecoder(),
+      timer: setInterval(() => { void this.drainCodexRollout(providerId).catch(() => undefined); }, 250),
+      stopped: false, sawTurnComplete: false,
+    };
+    tailer.timer.unref();
+    this.codexMcpTailers.set(providerId, tailer);
+    void this.drainCodexRollout(providerId).catch(() => undefined);
+  }
+
+  private async drainCodexRollout(providerId: string, final = false): Promise<void> {
+    const tailer = this.codexMcpTailers.get(providerId);
+    if (!tailer || tailer.stopped) return;
+    if (tailer.reading) {
+      const reading = tailer.reading;
+      await reading;
+      if (tailer.reading === reading) tailer.reading = undefined;
+      if (final) await this.drainCodexRollout(providerId, true);
+      return;
+    }
+    const reading = (async () => {
+      if (!tailer.file) {
+        if (tailer.codexThreadId) {
+          // Continuation of an existing codex thread: the journal already holds
+          // prior turns, so start from its current end.
+          const file = this.codexRolloutLocator.byThreadId(tailer.codexThreadId);
+          if (!file) return;
+          tailer.offset = await stat(file).then((info) => info.size, () => 0);
+          tailer.file = file;
+        } else {
+          const file = this.codexRolloutLocator.freshMcpSession(tailer.notBeforeMs, this.codexRolloutClaims);
+          if (!file) return;
+          tailer.file = file;
+        }
+        this.codexRolloutClaims.add(tailer.file);
+      }
+      tailer.offset = await this.backgroundOutputReader(tailer.file, tailer.offset, async (bytes) => {
+        if (tailer.stopped) return;
+        const { rest, events } = parseRolloutChunk(tailer.buffer, tailer.decoder.decode(bytes, { stream: true }));
+        tailer.buffer = rest;
+        for (const event of events) {
+          if (event.kind === "turnComplete") { tailer.sawTurnComplete = true; continue; }
+          await this.submit({
+            type: "mainStream",
+            runtimeGeneration: tailer.runtimeGeneration,
+            ownerThreadId: tailer.ownerThreadId,
+            source: { providerEventId: null, providerEventType: "codex_rollout" },
+            fact: event.kind === "message"
+              ? { kind: "instantAgent", text: `${CODEX_MCP_MESSAGE_LABEL}\n\n${event.text}` }
+              : { kind: "instantReasoning", text: `${CODEX_MCP_REASONING_LABEL}\n\n${event.text}` },
+          });
+        }
+      });
+    })();
+    tailer.reading = reading;
+    try { await reading; } finally {
+      if (tailer.reading === reading) tailer.reading = undefined;
+    }
+  }
+
+  private async finishCodexRolloutTailer(providerId: string): Promise<void> {
+    const tailer = this.codexMcpTailers.get(providerId);
+    if (!tailer) return;
+    for (let attempt = 0; attempt < 3 && !tailer.stopped; attempt += 1) {
+      await this.drainCodexRollout(providerId, true).catch(() => undefined);
+      if (tailer.sawTurnComplete) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    this.stopCodexRolloutTailer(providerId);
+  }
+
+  private stopCodexRolloutTailer(providerId: string): void {
+    const tailer = this.codexMcpTailers.get(providerId);
+    if (!tailer) return;
+    tailer.stopped = true;
+    clearInterval(tailer.timer);
+    if (tailer.file) this.codexRolloutClaims.delete(tailer.file);
+    this.codexMcpTailers.delete(providerId);
+  }
+
   private async captureToolFileAfter(runtimeGeneration: number, providerId: string): Promise<boolean> {
     if (runtimeGeneration !== this.runtimeGeneration || this.interruptFence || this.dropLateFacts) return false;
     const owner = this.toolOwner(providerId);
@@ -7348,6 +7499,19 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         itemIds = [item.id];
         break;
       }
+      case "instantReasoning": {
+        const item: ThreadItem = { type: "reasoning", id: uuidv7(), summary: [fact.text], content: [] };
+        turn.items.push(item);
+        this.publishTurn(turn, "item/started", {
+          item, threadId: state.ownerThreadId, turnId: turn.id, startedAtMs: Date.now(),
+        }, source);
+        this.publishTurn(turn, "item/reasoning/summaryTextDelta", {
+          threadId: state.ownerThreadId, turnId: turn.id, itemId: item.id, delta: fact.text, summaryIndex: 0,
+        }, source);
+        this.completeStreamItem(turn, state, item.id, source);
+        itemIds = [item.id];
+        break;
+      }
       case "settle":
         this.settleAgentMessages(turn, state, fact.phase, source);
         break;
@@ -7456,7 +7620,10 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
 
   private evictProjectedItems(state: MainStreamState, itemIds: ReadonlySet<string>): void {
     for (const [index, id] of state.blockItems) if (itemIds.has(id)) state.blockItems.delete(index);
-    for (const [id, candidate] of state.tools) if (itemIds.has(candidate.itemId)) state.tools.delete(id);
+    for (const [id, candidate] of state.tools) if (itemIds.has(candidate.itemId)) {
+      state.tools.delete(id);
+      this.stopCodexRolloutTailer(id);
+    }
     for (const [id, task] of this.tasks) if (itemIds.has(task.itemId)) {
       this.stopBackgroundTailer(task);
       this.tasks.delete(id);
@@ -7554,6 +7721,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
 
   private disposeRuntimeOperations(): void {
     for (const task of this.tasks.values()) this.stopBackgroundTailer(task);
+    for (const providerId of [...this.codexMcpTailers.keys()]) this.stopCodexRolloutTailer(providerId);
     for (const state of this.scopes.values()) {
       for (const tool of state.tools.values()) delete tool.fileSnapshot;
     }

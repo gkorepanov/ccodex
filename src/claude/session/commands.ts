@@ -112,6 +112,7 @@ export type MainStreamFact =
     readonly completeAsCommentary: boolean;
   }
   | { readonly kind: "instantAgent"; readonly text: string }
+  | { readonly kind: "instantReasoning"; readonly text: string }
   | { readonly kind: "settle"; readonly phase: "commentary" | "final_answer" }
   | { readonly kind: "finish" }
   | { readonly kind: "toolStart"; readonly index: number; readonly block: Record<string, unknown> }
@@ -648,6 +649,13 @@ export type ClaudeSessionCommand =
     readonly type: "captureToolFileAfter";
     readonly runtimeGeneration: number;
     readonly providerId: string;
+  }
+  | {
+    readonly type: "codexMcpCallBegin";
+    readonly runtimeGeneration: number;
+    readonly providerId: string;
+    readonly ownerProviderId?: string;
+    readonly input: Record<string, unknown>;
   }
   | {
     readonly type: "hook";
