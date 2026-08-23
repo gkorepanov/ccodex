@@ -912,6 +912,8 @@ export class SqliteHybridStore implements HybridStore {
         last_claude_message_uuid TEXT,
         UNIQUE(thread_id, ordinal)
       );
+      CREATE INDEX IF NOT EXISTS turns_last_claude_message_uuid
+        ON turns (last_claude_message_uuid) WHERE last_claude_message_uuid IS NOT NULL;
       CREATE TABLE IF NOT EXISTS events (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
         event_id TEXT,
