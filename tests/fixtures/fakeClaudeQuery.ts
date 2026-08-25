@@ -55,6 +55,9 @@ export class FakeClaudeQuery {
   public experimentalUsageCalls = 0;
   public afterResultPause?: { afterIndex: number; wait: Promise<void> };
   public deferPermissionResultUntilAfterPrimaryResult = false;
+  /** Models SDK 0.3.245 reinitialize: abort the pending canUseTool and re-request the same tool use. */
+  public retryPermissionOnReinitialize = false;
+  private onReinitialize: (() => void) | undefined;
   public permissionSuggestions: PermissionUpdate[] | undefined;
   public permissionMatchedAskRule: Parameters<CanUseTool>[2]["matchedAskRule"];
   public permissionDecisionReason: string | undefined;
@@ -255,15 +258,41 @@ export class FakeClaudeQuery {
           } as unknown as SDKMessage);
           await new Promise<void>((resolve) => setImmediate(resolve));
         }
-        const permission = input.options.canUseTool(this.toolRequest.name, this.toolRequest.input, {
-          signal: new AbortController().signal,
-          ...(this.permissionSuggestions ? { suggestions: this.permissionSuggestions } : {}),
-          ...(this.permissionMatchedAskRule ? { matchedAskRule: this.permissionMatchedAskRule } : {}),
-          ...(this.permissionDecisionReason ? { decisionReason: this.permissionDecisionReason } : {}),
-          ...(this.permissionAgentID ? { agentID: this.permissionAgentID } : {}),
-          toolUseID: permissionToolId!,
-          requestId: `claude-permission-${this.permissionToolSequence}`,
-        });
+        const invokePermission = (requestId: string, signal: AbortSignal) => input.options.canUseTool!(
+          this.toolRequest!.name, this.toolRequest!.input, {
+            signal,
+            ...(this.permissionSuggestions ? { suggestions: this.permissionSuggestions } : {}),
+            ...(this.permissionMatchedAskRule ? { matchedAskRule: this.permissionMatchedAskRule } : {}),
+            ...(this.permissionDecisionReason ? { decisionReason: this.permissionDecisionReason } : {}),
+            ...(this.permissionAgentID ? { agentID: this.permissionAgentID } : {}),
+            toolUseID: permissionToolId!,
+            requestId,
+          },
+        );
+        let permission: Promise<unknown>;
+        if (this.retryPermissionOnReinitialize) {
+          const aborter = new AbortController();
+          const first = invokePermission(`claude-permission-${this.permissionToolSequence}`, aborter.signal);
+          const retried = new Promise<unknown>((resolve) => {
+            this.onReinitialize = () => {
+              this.onReinitialize = undefined;
+              aborter.abort();
+              resolve(invokePermission(
+                `claude-permission-retry-${this.permissionToolSequence}`,
+                new AbortController().signal,
+              ));
+            };
+          });
+          permission = first.then(async (aborted) => {
+            this.permissionResults.push(aborted);
+            return retried;
+          });
+        } else {
+          permission = invokePermission(
+            `claude-permission-${this.permissionToolSequence}`,
+            new AbortController().signal,
+          );
+        }
         if (this.deferPermissionResultUntilAfterPrimaryResult) {
           deferredPermission = permission;
           deferredPermissionToolId = permissionToolId;
@@ -280,9 +309,11 @@ export class FakeClaudeQuery {
         }
       }
       if (this.elicitationRequest && input.options.onElicitation) {
-        this.elicitationResults.push(await input.options.onElicitation(this.elicitationRequest, {
+        const elicited = await input.options.onElicitation(this.elicitationRequest, {
           signal: new AbortController().signal,
-        }));
+          requestId: "elicitation-1",
+        });
+        if (elicited !== null) this.elicitationResults.push(elicited);
       }
       if (this.toolExecution) {
         const toolUseId = "tool-execution-1";
@@ -439,7 +470,10 @@ export class FakeClaudeQuery {
         if (this.experimentalUsage instanceof Error) throw this.experimentalUsage;
         return this.experimentalUsage;
       },
-      reinitialize: async () => ({}),
+      reinitialize: async () => {
+        this.onReinitialize?.();
+        return {};
+      },
       setModel: async (model: Parameters<Query["setModel"]>[0]) => control("setModel", model),
       applyFlagSettings: async (settings: Parameters<Query["applyFlagSettings"]>[0]) =>
         control("applyFlagSettings", settings),

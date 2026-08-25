@@ -2118,6 +2118,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           });
           if (message.error === "authentication_failed"
             || message.error === "oauth_org_not_allowed"
+            || message.error === "account_on_hold"
             || message.error === "model_not_found") {
             void this.submitLineage({
               type: "runtimeLineage",
@@ -2337,13 +2338,17 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           message.retracted_message_uuids,
         );
       }
-      await this.submitProviderProjection(runtimeGeneration, {
-        type: "modelFallback",
-        runtimeGeneration,
-        model: message.fallback_model,
-        fromModel: message.original_model,
-        source,
-      });
+      // scope "local" means only one subagent/side-question response used the
+      // fallback; the session model is unchanged (absent scope means session).
+      if (message.scope !== "local") {
+        await this.submitProviderProjection(runtimeGeneration, {
+          type: "modelFallback",
+          runtimeGeneration,
+          model: message.fallback_model,
+          fromModel: message.original_model,
+          source,
+        });
+      }
       await this.providerSystemMessage(
         projection,
         runtimeGeneration,
@@ -2853,6 +2858,8 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         itemId: options.toolUseID,
         questions,
         autoResolutionMs: null,
+        // The Claude callback blocks until the user answers.
+        isBlocking: true,
       },
     }, options.signal);
     if (!response || typeof response !== "object" || "cancelled" in response) {
@@ -6192,6 +6199,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       items.push({
         type: "agentMessage",
         id: uuidv7(),
+        delivery: null,
         text: systemNoticeText(
           `Gateway restarted while the CCodex ${state ? "state" : "status"} request was active.`,
           "error",
@@ -6977,8 +6985,8 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         throw invalidParams(`Claude thread '${this.threadId}' has an active ${this.adminOperation.kind} operation.`);
       }
       const record = this.requireRecord(false);
-      if (record.thread.ephemeral && command.isPinned !== undefined && command.isPinned !== null) {
-        throw invalidParams("Ephemeral Claude side chats cannot be pinned.");
+      if (record.thread.ephemeral && command.section !== undefined) {
+        throw invalidParams("Ephemeral Claude side chats cannot be sectioned.");
       }
       const previous = record.thread.gitInfo ?? { sha: null, branch: null, originUrl: null };
       const patch = command.gitInfo;
@@ -6992,7 +7000,10 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         thread: {
           ...record.thread,
           gitInfo,
-          isPinned: command.isPinned ?? record.thread.isPinned,
+          ...(command.section === undefined ? {} : {
+            section: command.section,
+            sectionEnteredAt: command.section ? Math.floor(Date.now() / 1_000) : null,
+          }),
           updatedAt: Math.floor(Date.now() / 1_000),
         },
       };
@@ -7401,6 +7412,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       text: value,
       phase: null,
       memoryCitation: null,
+      delivery: null,
     };
     const turn: Turn = {
       id: uuidv7(),
@@ -7503,6 +7515,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           text: fact.text,
           phase: null,
           memoryCitation: null,
+          delivery: null,
         };
         turn.items.push(item);
         this.publishTurn(turn, "item/started", {
@@ -8247,7 +8260,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     state.blockItems.delete(index);
     if (block === "text") {
       const item: ThreadItem = {
-        type: "agentMessage", id: uuidv7(), text: "", phase: null, memoryCitation: null,
+        type: "agentMessage", id: uuidv7(), text: "", phase: null, memoryCitation: null, delivery: null,
       };
       state.blockItems.set(index, item.id);
       turn.items.push(item);

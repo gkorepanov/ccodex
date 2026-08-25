@@ -15,7 +15,7 @@ function thread(id: string, threadSource: string | null = STOCK_SIDE_THREAD_SOUR
   return {
     id, extra: null, sessionId: id, forkedFromId: "parent", parentThreadId: null,
     canAcceptDirectInput: true,
-    preview: "side", ephemeral: false, isPinned: false, historyMode: "legacy", modelProvider: "openai",
+    preview: "side", ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "legacy", modelProvider: "openai",
     createdAt: 1, updatedAt: Math.floor(Date.now() / 1_000), recencyAt: 1,
     status: { type: "idle" }, path: `/rollouts/${id}.jsonl`, cwd: "/repo", cliVersion: "test",
     source: "appServer", threadSource, agentNickname: null, agentRole: null,

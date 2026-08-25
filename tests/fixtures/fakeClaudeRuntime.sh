@@ -1,6 +1,6 @@
 #!/bin/sh
 case "${1:-}" in
-  --version) echo '2.1.219 (Claude Code)' ;;
+  --version) echo '2.1.245 (Claude Code)' ;;
   auth)
     [ "${2:-}" = status ] && printf '{"loggedIn":%s}\n' "${FAKE_CLAUDE_LOGGED_IN:-true}" || exit 2
     ;;

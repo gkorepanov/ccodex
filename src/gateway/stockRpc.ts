@@ -2,6 +2,9 @@ import { v7 as uuidv7 } from "uuid";
 import type WebSocket from "ws";
 import { WebSocket as WebSocketState } from "ws";
 import { isResponse, type RequestId, type RpcFailure, type RpcMessage, type RpcSuccess } from "../protocol/envelopes.js";
+import { invalidParams } from "../protocol/errors.js";
+import type { ThreadSection } from "../codex/generated/v2/ThreadSection.js";
+import type { ThreadSectionListResponse } from "../codex/generated/v2/ThreadSectionListResponse.js";
 
 interface PendingRequest {
   readonly resolve: (value: unknown) => void;
@@ -108,4 +111,16 @@ export class StockRpc {
     }
     this.pending.clear();
   }
+}
+
+// The section registry is stock-owned; Claude threads only reference it.
+export async function findStockSection(stock: StockRpc, sectionId: string): Promise<ThreadSection> {
+  let cursor: string | null = null;
+  do {
+    const page = await stock.request("threadSection/list", { cursor, limit: 100 }) as ThreadSectionListResponse;
+    const section = page.data.find((candidate) => candidate.id === sectionId);
+    if (section) return section;
+    cursor = page.nextCursor;
+  } while (cursor);
+  throw invalidParams(`Unknown thread section '${sectionId}'.`);
 }

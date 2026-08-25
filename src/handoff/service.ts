@@ -6,6 +6,7 @@ import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
 import type { ThreadItemsListParams } from "../codex/generated/v2/ThreadItemsListParams.js";
 import type { ThreadItemsListResponse } from "../codex/generated/v2/ThreadItemsListResponse.js";
+import type { ThreadSectionMoveParams } from "../codex/generated/v2/ThreadSectionMoveParams.js";
 import type { ThreadMetadataUpdateParams } from "../codex/generated/v2/ThreadMetadataUpdateParams.js";
 import type { ThreadSetNameParams } from "../codex/generated/v2/ThreadSetNameParams.js";
 import type { ThreadRollbackParams } from "../codex/generated/v2/ThreadRollbackParams.js";
@@ -33,7 +34,7 @@ import type { TurnStartParams } from "../codex/generated/v2/TurnStartParams.js";
 import type { TurnStartResponse } from "../codex/generated/v2/TurnStartResponse.js";
 import type { ClaudeService } from "../claude/service.js";
 import { DEFAULT_RENAME_PROMPT } from "../config/config.js";
-import type { StockRpc } from "../gateway/stockRpc.js";
+import { findStockSection, type StockRpc } from "../gateway/stockRpc.js";
 import type { SubscriptionHub } from "../gateway/subscriptions.js";
 import {
   projectItemIds,
@@ -572,16 +573,10 @@ export class CrossProviderForks {
         const result = await this.withAdminLock(publicThreadId, () => stock.request(method, params));
         return { provider: "stock", result: projectRpcToPublicThread({ result }, owner).result };
       }
-      if (method === "thread/metadata/update") {
-        const metadata = publicParams as unknown as ThreadMetadataUpdateParams;
-        const result = await this.withAdminLock(publicThreadId, async () => {
-          const response = await stock.request(method, params);
-          if (metadata.isPinned !== undefined && metadata.isPinned !== null
-            && !this.lineage.updateTaskPinned(publicThreadId, metadata.isPinned)) {
-            throw new Error(`Unknown logical thread '${publicThreadId}'.`);
-          }
-          return response;
-        });
+      if (method === "thread/metadata/update" || method === "thread/section/move") {
+        // Section membership lives on the current backend thread; it is not
+        // mirrored across provider switches.
+        const result = await this.withAdminLock(publicThreadId, () => stock.request(method, params));
         return { provider: "stock", result: projectRpcToPublicThread({ result }, owner).result };
       }
       if (method === "thread/read" || method === "thread/resume") {
@@ -728,18 +723,19 @@ export class CrossProviderForks {
       }
     }
     if (method === "thread/metadata/update") {
-      const metadata = publicParams as unknown as ThreadMetadataUpdateParams;
       return {
         provider: "claude",
-        result: await this.withAdminLock(publicThreadId, async () => {
-          const result = await this.claude.updateThreadMetadata(params as unknown as ThreadMetadataUpdateParams);
-          if (metadata.isPinned !== undefined && metadata.isPinned !== null
-            && !this.lineage.updateTaskPinned(publicThreadId, metadata.isPinned)) {
-            throw new Error(`Unknown logical thread '${publicThreadId}'.`);
-          }
-          return result;
-        }),
+        result: await this.withAdminLock(publicThreadId, () =>
+          this.claude.updateThreadMetadata(params as unknown as ThreadMetadataUpdateParams)),
       };
+    }
+    if (method === "thread/section/move") {
+      const move = params as unknown as ThreadSectionMoveParams;
+      const section = move.sectionId === null
+        ? null
+        : await findStockSection(this.daemonStock ?? clientStock, move.sectionId);
+      await this.withAdminLock(publicThreadId, () => this.claude.setThreadSection(move.threadId, section));
+      return { provider: "claude", result: {} };
     }
     if (method === "thread/archive") {
       const buffer = this.subscriptions?.bufferLifecycle(threadId, ["thread/archived"]);

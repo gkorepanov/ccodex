@@ -41,7 +41,20 @@ class FakeTranscriptSdk {
           ...(oldUuid === this.omitProvenanceFor ? {} : { forkedFrom: { sessionId, messageUuid: oldUuid } }),
         } as SessionStoreEntry];
       });
-      this.sessions.set(forkedSessionId, copied);
+      // 0.3.245 carries session-level markers into the fork regardless of the
+      // boundary and writes a fork title from the custom-title sidecar.
+      const markers = source.flatMap((entry) =>
+        entry.type === "history-suppression" || entry.type === "atis-latch"
+          ? [{ ...structuredClone(entry), sessionId: forkedSessionId } as SessionStoreEntry]
+          : []);
+      const title = source.find((entry) => entry.type === "custom-title");
+      this.sessions.set(forkedSessionId, [
+        ...copied,
+        ...markers,
+        ...(title
+          ? [{ ...structuredClone(title), sessionId: forkedSessionId, uuid: randomUUID() } as SessionStoreEntry]
+          : []),
+      ]);
       return { sessionId: forkedSessionId };
     },
     importSessionToStore: async (sessionId, store, _options = {}) => {
@@ -95,6 +108,17 @@ describe("SdkTranscriptBrancher", () => {
         uuid: fork.uuidMap.get(oldUuid), forkedFrom: { sessionId: fixture.sessionId, messageUuid: oldUuid },
       }));
     }
+    // Provenance validation ignores the preserved UUID-less fork markers and
+    // the sidecar-derived fork title.
+    expect(copied).toContainEqual(expect.objectContaining({
+      type: "history-suppression", sessionId: fork.sessionId,
+    }));
+    expect(copied).toContainEqual(expect.objectContaining({
+      type: "atis-latch", atis: "latch-token", sessionId: fork.sessionId,
+    }));
+    expect(copied).toContainEqual(expect.objectContaining({
+      type: "custom-title", customTitle: "Synthetic lighthouse", sessionId: fork.sessionId,
+    }));
   });
 
   it("maps a normalized multi-block SDK uuid to the canonical Claude transcript boundary", async () => {

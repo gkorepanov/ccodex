@@ -17,7 +17,7 @@ import type { CodexRolloutLocator } from "../../../src/claude/session/codexRollo
 function record(threadId: string): ClaudeThreadRecord {
   const thread: Thread = {
     id: threadId, extra: null, sessionId: `session-${threadId}`, forkedFromId: null, parentThreadId: null,
-    canAcceptDirectInput: true, preview: "", ephemeral: false, isPinned: false, historyMode: "legacy",
+    canAcceptDirectInput: true, preview: "", ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "legacy",
     modelProvider: "claude", createdAt: 1, updatedAt: 1, recencyAt: 1, status: { type: "idle" },
     path: null, cwd: "/workspace", cliVersion: "claude-code", source: "appServer", threadSource: null,
     agentNickname: null, agentRole: null, gitInfo: null, name: null, turns: [],

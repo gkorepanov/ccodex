@@ -1,6 +1,7 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { defaultCodexRolloutLocator, parseRolloutChunk } from "../../../src/claude/session/codexRollout.js";
 
@@ -57,6 +58,29 @@ describe("defaultCodexRolloutLocator", () => {
     const locator = defaultCodexRolloutLocator(root);
     expect(locator.byThreadId("thread-1")).toBe(path);
     expect(locator.byThreadId("missing")).toBeUndefined();
+  });
+
+  it("prefers the stock SQLite rollout pointer over the filename scan after thread/revert", () => {
+    const home = join(tmpdir(), `ccodex-rollout-home-${process.pid}`);
+    rmSync(home, { recursive: true, force: true });
+    const day = join(home, "sessions", "2026", "08", "19");
+    mkdirSync(day, { recursive: true });
+    // The original journal matches the thread-id filename scan; the revert
+    // replacement carries a different rollout id and is only reachable via the
+    // SQLite pointer.
+    const original = join(day, "rollout-2026-08-19T10-00-00-thread-1.jsonl");
+    const replacement = join(day, "rollout-2026-08-19T11-00-00-other-rollout-id.jsonl");
+    writeFileSync(original, meta("mcp", "2026-08-19T08:00:00.000Z"));
+    writeFileSync(replacement, meta("mcp", "2026-08-19T09:00:00.000Z"));
+    const database = new DatabaseSync(join(home, "state_5.sqlite"));
+    database.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)");
+    database.prepare("INSERT INTO threads (id, rollout_path) VALUES (?, ?)").run("thread-1", replacement);
+    database.prepare("INSERT INTO threads (id, rollout_path) VALUES (?, ?)").run("gone", join(day, "missing.jsonl"));
+    database.close();
+    const locator = defaultCodexRolloutLocator(join(home, "sessions"));
+    expect(locator.byThreadId("thread-1")).toBe(replacement);
+    // A dangling pointer falls back to the filename scan.
+    expect(locator.byThreadId("gone")).toBeUndefined();
   });
 
   it("picks the earliest unclaimed fresh mcp session, skipping stale and non-mcp journals", () => {

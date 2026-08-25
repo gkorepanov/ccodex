@@ -520,7 +520,7 @@ describe("Claude runtime lineage through public service and Query contracts", ()
         message: "stale request",
         requestedSchema: {},
       } as never,
-      { signal: new AbortController().signal },
+      { signal: new AbortController().signal, requestId: "elicitation-1" },
     )).resolves.toEqual({ action: "cancel" });
     await expect(oldOptions.hooks!.PreToolUse![0]!.hooks[0]!(
       {
@@ -681,7 +681,7 @@ describe("Claude runtime lineage through public service and Query contracts", ()
         message: "stopped request",
         requestedSchema: {},
       } as never,
-      { signal: new AbortController().signal },
+      { signal: new AbortController().signal, requestId: "elicitation-1" },
     )).resolves.toEqual({ action: "cancel" });
     await expect(options.hooks!.PreToolUse![0]!.hooks[0]!(
       {

@@ -11,7 +11,7 @@ function thread(): Thread {
   return {
     id: "thread-1", extra: null, sessionId: "session-1", forkedFromId: null, parentThreadId: null,
     canAcceptDirectInput: true,
-    preview: "hello", ephemeral: false, isPinned: false, historyMode: "paginated", modelProvider: "openai",
+    preview: "hello", ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "paginated", modelProvider: "openai",
     createdAt: 1_700_000_000, updatedAt: 1_700_007_200, recencyAt: 1_700_007_200,
     status: { type: "idle" }, path: null, cwd: "/tmp", cliVersion: "0.144.4",
     source: "appServer", threadSource: "user", agentNickname: null, agentRole: null,
@@ -43,7 +43,7 @@ function thread(): Thread {
           },
           {
             type: "agentMessage", id: "assistant-1", text: "done",
-            phase: "final_answer", memoryCitation: null,
+            phase: "final_answer", memoryCitation: null, delivery: null,
           },
         ],
       },

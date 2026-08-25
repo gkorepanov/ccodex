@@ -17,7 +17,7 @@ const directories: string[] = [];
 function turn(id: string, text: string): Turn {
   return {
     id,
-    items: [{ type: "agentMessage", id: `${id}-item`, text, phase: null, memoryCitation: null }],
+    items: [{ type: "agentMessage", id: `${id}-item`, text, phase: null, memoryCitation: null, delivery: null }],
     itemsView: "full", status: "completed", error: null, startedAt: 1, completedAt: 2, durationMs: 1000,
   };
 }
@@ -25,7 +25,7 @@ function turn(id: string, text: string): Turn {
 function thread(id: string, turns: Turn[] = []): Thread {
   return {
     id, extra: null, sessionId: id, forkedFromId: null, parentThreadId: null, canAcceptDirectInput: true, preview: "source preview",
-    ephemeral: false, isPinned: false, historyMode: "legacy", modelProvider: "openai", createdAt: 1, updatedAt: 1, recencyAt: 1,
+    ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "legacy", modelProvider: "openai", createdAt: 1, updatedAt: 1, recencyAt: 1,
     status: { type: "idle" }, path: null, cwd: "/tmp", cliVersion: "0.144.4", source: "appServer",
     threadSource: null, agentNickname: null, agentRole: null, gitInfo: null, name: "source", turns,
   };

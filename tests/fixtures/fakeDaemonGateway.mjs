@@ -86,7 +86,7 @@ server.on("upgrade", (request, socket, head) => {
     client.on("message", (bytes) => {
       const message = JSON.parse(bytes.toString());
       if (message.method === "initialize") {
-        client.send(JSON.stringify({ id: message.id, result: { userAgent: "codex_app_server_daemon/0.146.0 (test)" } }));
+        client.send(JSON.stringify({ id: message.id, result: { userAgent: "codex_app_server_daemon/0.149.1 (test)" } }));
       }
     });
   });

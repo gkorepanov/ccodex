@@ -23,8 +23,8 @@ function path(): string {
 function thread(id: string): Thread {
   return {
     id, extra: null, sessionId: id, forkedFromId: null, parentThreadId: null, canAcceptDirectInput: true, preview: "hello",
-    ephemeral: false, isPinned: false, historyMode: "legacy", modelProvider: "openai", createdAt: 1, updatedAt: 1,
-    recencyAt: 1, status: { type: "idle" }, path: null, cwd: "/tmp", cliVersion: "0.146.0",
+    ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "legacy", modelProvider: "openai", createdAt: 1, updatedAt: 1,
+    recencyAt: 1, status: { type: "idle" }, path: null, cwd: "/tmp", cliVersion: "0.149.1",
     source: "appServer", threadSource: null, agentNickname: null, agentRole: null, gitInfo: null,
     name: "logical", turns: [],
   };
@@ -32,7 +32,7 @@ function thread(id: string): Thread {
 
 function turn(id: string): Turn {
   return {
-    id, items: [{ type: "agentMessage", id: `${id}-item`, text: id, phase: "final_answer", memoryCitation: null }],
+    id, items: [{ type: "agentMessage", id: `${id}-item`, text: id, phase: "final_answer", memoryCitation: null, delivery: null }],
     itemsView: "full", status: "completed", error: null, startedAt: 1, completedAt: 2, durationMs: 1_000,
   };
 }

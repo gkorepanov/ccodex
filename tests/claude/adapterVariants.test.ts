@@ -146,6 +146,8 @@ describe("Claude adapter golden variants", () => {
     expect(fake.inputs[0]?.options.disallowedTools).toEqual([
       "SendFeedback",
       "ProposeSkills",
+      "ProposeGoal",
+      "ReadNotifications",
       "AskUserQuestion",
     ]);
     await service.close();

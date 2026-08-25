@@ -1,6 +1,7 @@
 import { closeSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 export const CODEX_MCP_TOOLS = new Set(["mcp__codex__codex", "mcp__codex__codex-reply"]);
 export const CODEX_MCP_PROMPT_LABEL = "◆ CCodex │ Codex MCP prompt";
@@ -65,9 +66,38 @@ function sessionMeta(path: string): { source?: string; timestampMs?: number } | 
   } catch { return undefined; }
 }
 
+// `thread/revert` replaces a thread's journal with a new immutable file whose
+// name carries a fresh rollout id; only the stock SQLite pointer identifies the
+// current one, so a filename scan alone can attach to an obsolete journal.
+function stockRolloutPointer(codexHome: string, threadId: string): string | undefined {
+  let latest: { version: number; path: string } | undefined;
+  try {
+    for (const entry of readdirSync(codexHome)) {
+      const match = /^state_(\d+)\.sqlite$/.exec(entry);
+      if (match && (!latest || Number(match[1]) > latest.version)) {
+        latest = { version: Number(match[1]), path: join(codexHome, entry) };
+      }
+    }
+  } catch { return undefined; }
+  if (!latest) return undefined;
+  try {
+    const database = new DatabaseSync(latest.path, { readOnly: true });
+    try {
+      const row = database.prepare("SELECT rollout_path FROM threads WHERE id = ?").get(threadId) as
+        | { rollout_path?: string | null }
+        | undefined;
+      if (typeof row?.rollout_path !== "string") return undefined;
+      statSync(row.rollout_path);
+      return row.rollout_path;
+    } finally { database.close(); }
+  } catch { return undefined; }
+}
+
 export function defaultCodexRolloutLocator(sessionsDir = codexSessionsDir()): CodexRolloutLocator {
   return {
     byThreadId(threadId) {
+      const pointed = stockRolloutPointer(dirname(sessionsDir), threadId);
+      if (pointed) return pointed;
       const suffix = `-${threadId}.jsonl`;
       for (const day of dayDirsNewestFirst(sessionsDir, 366)) {
         for (const entry of readdirSync(day)) {

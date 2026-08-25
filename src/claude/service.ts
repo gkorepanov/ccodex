@@ -8,6 +8,7 @@ import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { ThreadReadResponse } from "../codex/generated/v2/ThreadReadResponse.js";
 import type { ThreadSetNameParams } from "../codex/generated/v2/ThreadSetNameParams.js";
 import type { ThreadMetadataUpdateParams } from "../codex/generated/v2/ThreadMetadataUpdateParams.js";
+import type { ThreadSection } from "../codex/generated/v2/ThreadSection.js";
 import type { ThreadItemsListParams } from "../codex/generated/v2/ThreadItemsListParams.js";
 import type { ThreadItemsListResponse } from "../codex/generated/v2/ThreadItemsListResponse.js";
 import type { ThreadSearchOccurrencesParams } from "../codex/generated/v2/ThreadSearchOccurrencesParams.js";
@@ -305,7 +306,9 @@ function threadResponse(record: ClaudeThreadRecord, includeTurns: boolean): Thre
     ...settings,
     thread: {
       ...record.thread,
-      isPinned: record.thread.isPinned ?? false,
+      section: record.thread.section ?? null,
+      sectionEnteredAt: record.thread.sectionEnteredAt ?? null,
+      projectId: record.thread.projectId ?? null,
       canAcceptDirectInput: record.thread.parentThreadId ? false : true,
       turns: includeTurns ? record.thread.turns : [],
     },
@@ -1206,9 +1209,21 @@ export class ClaudeService {
 
   public updateThreadMetadata(params: ThreadMetadataUpdateParams): Promise<{ thread: Thread }> {
     this.requireIndependentThread(params.threadId, "update metadata for");
+    if (params.projectId !== undefined && params.projectId !== null && params.projectId !== "") {
+      throw invalidParams("Projects are not supported for Claude threads.");
+    }
     return this.sessions.submit(params.threadId, {
       type: "threadAdmin",
-      command: { kind: "metadata", gitInfo: params.gitInfo, isPinned: params.isPinned },
+      command: { kind: "metadata", gitInfo: params.gitInfo },
+    });
+  }
+
+  /** Section registry stays stock-owned; CCodex records only the membership. */
+  public setThreadSection(threadId: string, section: ThreadSection | null): Promise<{ thread: Thread }> {
+    this.requireIndependentThread(threadId, "move into a section");
+    return this.sessions.submit(threadId, {
+      type: "threadAdmin",
+      command: { kind: "metadata", gitInfo: undefined, section },
     });
   }
 
@@ -1456,7 +1471,8 @@ export class ClaudeService {
     });
     const threadId = uuidv7();
     const thread: Thread = {
-      ...sourceRecord.thread, id: threadId, ephemeral: params.ephemeral ?? false, isPinned: false,
+      ...sourceRecord.thread, id: threadId, ephemeral: params.ephemeral ?? false,
+      section: null, sectionEnteredAt: null, projectId: null,
       sessionId: threadId, forkedFromId: visibleForkedFromId,
       cwd, modelProvider: "claude", createdAt, updatedAt: createdAt, recencyAt: createdAt,
       status: params.ephemeral ? { type: "idle" } : { type: "notLoaded" },
@@ -1903,7 +1919,9 @@ export class ClaudeService {
     const native = this.nativeMetadata.get(record.claudeSessionId);
     if (!native) return {
       ...record.thread,
-      isPinned: record.thread.isPinned ?? false,
+      section: record.thread.section ?? null,
+      sectionEnteredAt: record.thread.sectionEnteredAt ?? null,
+      projectId: record.thread.projectId ?? null,
       canAcceptDirectInput: record.thread.parentThreadId ? false : true,
     };
     const createdAt = native.createdAt === undefined
@@ -1912,7 +1930,9 @@ export class ClaudeService {
     const updatedAt = Math.floor(native.lastModified / 1_000);
     return {
       ...record.thread,
-      isPinned: record.thread.isPinned ?? false,
+      section: record.thread.section ?? null,
+      sectionEnteredAt: record.thread.sectionEnteredAt ?? null,
+      projectId: record.thread.projectId ?? null,
       canAcceptDirectInput: record.thread.parentThreadId ? false : true,
       name: record.thread.name || native.customTitle || native.summary,
       preview: native.firstPrompt ?? record.thread.preview,
@@ -1999,7 +2019,9 @@ export class ClaudeService {
         parentThreadId: null,
         preview: "",
         ephemeral: params.ephemeral ?? false,
-        isPinned: false,
+        section: null,
+        sectionEnteredAt: null,
+        projectId: null,
         historyMode: params.historyMode ?? "legacy",
         modelProvider: "claude",
         createdAt,

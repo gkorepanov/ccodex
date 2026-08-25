@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const cli = process.env.CODEX_HYBRID_CLI;
-const expectedVersion = process.env.CODEX_HYBRID_EXPECT_CODEX_VERSION ?? "0.146.0";
+const expectedVersion = process.env.CODEX_HYBRID_EXPECT_CODEX_VERSION ?? "0.149.1";
 if (!cli) throw new Error("CODEX_HYBRID_CLI is required.");
 
 const invoke = async (...args) => {

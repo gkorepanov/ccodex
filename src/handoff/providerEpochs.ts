@@ -94,7 +94,6 @@ export class ProviderEpochs {
       ...(thread.forkedFromId ? { forkedFromId: thread.forkedFromId } : {}),
       ...(thread.parentThreadId ? { parentThreadId: thread.parentThreadId } : {}),
       createdAt: thread.createdAt,
-      isPinned: thread.isPinned ?? false,
     }, { epochId, provider, backendThreadId: thread.id });
     // Operational compatibility mirror: provider payloads are scrubbed by HandoffStore.
     this.legacyMirror?.createLogicalThread({
@@ -132,7 +131,6 @@ export class ProviderEpochs {
       ...(thread.forkedFromId ? { forkedFromId: thread.forkedFromId } : {}),
       ...(thread.parentThreadId ? { parentThreadId: thread.parentThreadId } : {}),
       createdAt: thread.createdAt,
-      isPinned: false,
     }, { epochId, provider, backendThreadId }, inheritedSegments);
     this.legacyMirror?.createLogicalThread({
       thread,
@@ -157,7 +155,6 @@ export class ProviderEpochs {
       sessionId: base.sessionId,
       forkedFromId: base.forkedFromId,
       parentThreadId: base.parentThreadId,
-      isPinned: base.isPinned,
       createdAt: base.createdAt,
       threadSource: publicThreadSource(backend.threadSource),
       turns: includeTurns ? [...historicalTurns, ...backend.turns] : [],
@@ -180,12 +177,14 @@ function logicalTask(task: PublicTaskIdentity, snapshot?: Thread): LogicalThread
     revision: task.revision,
     createdAt: task.createdAt * 1_000,
     updatedAt: task.createdAt * 1_000,
-    thread: snapshot ? { ...snapshot, id: task.publicThreadId, isPinned: task.isPinned, turns: [] } : {
+    thread: snapshot ? { ...snapshot, id: task.publicThreadId, turns: [] } : {
       id: task.publicThreadId,
       sessionId: task.sessionId,
       forkedFromId: task.forkedFromId ?? null,
       parentThreadId: task.parentThreadId ?? null,
-      isPinned: task.isPinned,
+      section: null,
+      sectionEnteredAt: null,
+      projectId: null,
       createdAt: task.createdAt,
       turns: [],
     } as unknown as Thread,

@@ -32,7 +32,7 @@ function harness(): { config: HybridConfig; home: string; record: string } {
   const root = mkdtempSync(join(process.platform === "darwin" ? "/private/tmp" : tmpdir(), "hdt-"));
   temporary.push(root);
   const realCodex = join(root, "codex-real");
-  writeFileSync(realCodex, "#!/bin/sh\nprintf '%s\\n' 'codex-cli 0.146.0'\n", { mode: 0o700 });
+  writeFileSync(realCodex, "#!/bin/sh\nprintf '%s\\n' 'codex-cli 0.149.1'\n", { mode: 0o700 });
   chmodSync(realCodex, 0o700);
   const home = join(root, "codex-home");
   const socket = join(home, "app-server-control", "app-server-control.sock");
@@ -98,7 +98,7 @@ async function startUnmanaged(config: HybridConfig, home: string, exitAfterProbe
 }
 
 describe("npm-backed hybrid daemon lifecycle", () => {
-  it("matches Codex 0.146.0 wire shapes and cleans the detached process group", async () => {
+  it("matches Codex 0.149.1 wire shapes and cleans the detached process group", async () => {
     const { config, home, record } = harness();
     const run = (command: Parameters<typeof runDaemonCommand>[1]["command"], remoteControl = false) =>
       runDaemonCommand(config, { command, remoteControl }, fixture);
@@ -108,20 +108,20 @@ describe("npm-backed hybrid daemon lifecycle", () => {
       status: "started",
       backend: "pid",
       managedCodexPath: fixture,
-      managedCodexVersion: "0.146.0",
+      managedCodexVersion: "0.149.1",
       socketPath: config.publicSocket,
-      cliVersion: "0.146.0",
-      appServerVersion: "0.146.0",
+      cliVersion: "0.149.1",
+      appServerVersion: "0.149.1",
     });
     expect(typeof started.pid).toBe("number");
     expect(wire(await run("start"))).toEqual({ ...started, status: "alreadyRunning", pid: undefined });
     expect(wire(await run("version"))).toEqual({ ...started, status: "running", pid: undefined });
     expect(wire(await run("enable-remote-control"))).toMatchObject({
-      status: "enabled", backend: "pid", remoteControlEnabled: true, cliVersion: "0.146.0", appServerVersion: "0.146.0",
+      status: "enabled", backend: "pid", remoteControlEnabled: true, cliVersion: "0.149.1", appServerVersion: "0.149.1",
     });
     expect(wire(await run("enable-remote-control"))).toMatchObject({ status: "alreadyEnabled", remoteControlEnabled: true });
     expect(wire(await run("disable-remote-control"))).toMatchObject({ status: "disabled", remoteControlEnabled: false });
-    expect(wire(await run("restart"))).toMatchObject({ status: "restarted", backend: "pid", appServerVersion: "0.146.0" });
+    expect(wire(await run("restart"))).toMatchObject({ status: "restarted", backend: "pid", appServerVersion: "0.149.1" });
     expect(wire(await run("stop"))).toMatchObject({ status: "stopped", backend: "pid" });
     expect(wire(await run("stop"))).toMatchObject({ status: "notRunning" });
 
@@ -131,8 +131,8 @@ describe("npm-backed hybrid daemon lifecycle", () => {
       backend: "pid",
       autoUpdateEnabled: false,
       remoteControlEnabled: true,
-      managedCodexVersion: "0.146.0",
-      appServerVersion: "0.146.0",
+      managedCodexVersion: "0.149.1",
+      appServerVersion: "0.149.1",
     });
     await run("stop");
 
@@ -184,7 +184,7 @@ describe("npm-backed hybrid daemon lifecycle", () => {
       pid: number; handoffPid?: number; childPid?: number;
     });
     const handoff = records.find((entry) => entry.handoffPid)!;
-    expect(result).toMatchObject({ status: "started", backend: "pid", appServerVersion: "0.146.0" });
+    expect(result).toMatchObject({ status: "started", backend: "pid", appServerVersion: "0.149.1" });
     expect(typeof result.pid).toBe("number");
     expect(alive(handoff.pid)).toBe(false);
     expect(alive(handoff.handoffPid!)).toBe(false);
@@ -196,7 +196,7 @@ describe("npm-backed hybrid daemon lifecycle", () => {
     const { config, home } = harness();
     const stockPid = await startUnmanaged(config, home);
     const result = wire(await runDaemonCommand(config, { command: "start", remoteControl: false }, fixture));
-    expect(result).toMatchObject({ status: "started", backend: "pid", appServerVersion: "0.146.0" });
+    expect(result).toMatchObject({ status: "started", backend: "pid", appServerVersion: "0.149.1" });
     expect(alive(stockPid)).toBe(false);
     expect(JSON.parse(readFileSync(join(home, "app-server-daemon", "app-server.pid"), "utf8"))).toMatchObject({ pid: result.pid });
     await runDaemonCommand(config, { command: "stop", remoteControl: false }, fixture);
@@ -206,7 +206,7 @@ describe("npm-backed hybrid daemon lifecycle", () => {
     const { config, home } = harness();
     const stockPid = await startUnmanaged(config, home, true);
     const result = wire(await runDaemonCommand(config, { command: "start", remoteControl: false }, fixture));
-    expect(result).toMatchObject({ status: "started", backend: "pid", appServerVersion: "0.146.0" });
+    expect(result).toMatchObject({ status: "started", backend: "pid", appServerVersion: "0.149.1" });
     expect(alive(stockPid)).toBe(false);
     expect(socketOwnerPids(config.publicSocket)).toEqual([result.pid]);
     await runDaemonCommand(config, { command: "stop", remoteControl: false }, fixture);
@@ -252,7 +252,7 @@ describe("npm-backed hybrid daemon lifecycle", () => {
     expect(alive(oldGroup.pid)).toBe(false);
     expect(alive(oldGroup.childPid)).toBe(false);
     expect(alive(replacementPid)).toBe(true);
-    await expect(probeAppServer(config.publicSocket)).resolves.toMatchObject({ appServerVersion: "0.146.0" });
+    await expect(probeAppServer(config.publicSocket)).resolves.toMatchObject({ appServerVersion: "0.149.1" });
     expect(first.pid).toBe(oldGroup.pid);
 
     const restarted = wire(await run("start"));

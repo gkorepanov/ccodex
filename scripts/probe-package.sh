@@ -48,11 +48,11 @@ UPDATE_RESULT="$WORK/update-version.txt"
 UPDATE_WAITER=$!
 "$ROOT/scripts/install-local.sh" "$PREFIX" >/dev/null
 wait "$UPDATE_WAITER"
-grep -q '^codex-cli 0\.146\.0$' "$UPDATE_RESULT"
+grep -q '^codex-cli 0\.149\.1$' "$UPDATE_RESULT"
 
 run_hybrid env \
   CODEX_HYBRID_CLI="$CLI" \
-  CODEX_HYBRID_EXPECT_CODEX_VERSION="0.146.0" \
+  CODEX_HYBRID_EXPECT_CODEX_VERSION="0.149.1" \
   node "$ROOT/scripts/probe-daemon.mjs"
 
 run_hybrid node "$ROOT/scripts/probe-claude-options.mjs"
@@ -82,4 +82,4 @@ INSTALLED=0
 test ! -e "$PREFIX/bin/codex-hybrid"
 test "$(realpath "$PREFIX/bin/codex")" = "$(realpath "$REAL_CODEX")"
 
-printf '%s\n' '{"packageGate":true,"codexVersion":"0.146.0"}'
+printf '%s\n' '{"packageGate":true,"codexVersion":"0.149.1"}'

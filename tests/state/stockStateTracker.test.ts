@@ -6,7 +6,7 @@ function thread(): Thread {
   return {
     id: "stock-1", extra: null, sessionId: "stock-1", forkedFromId: null, parentThreadId: null,
     canAcceptDirectInput: true,
-    preview: "", ephemeral: false, isPinned: false, historyMode: "paginated", modelProvider: "openai",
+    preview: "", ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "paginated", modelProvider: "openai",
     createdAt: 1, updatedAt: 1, recencyAt: 1, status: { type: "idle" }, path: null,
     cwd: "/tmp", cliVersion: "0.144.4", source: "appServer", threadSource: "user",
     agentNickname: null, agentRole: null, gitInfo: null, name: null, turns: [],

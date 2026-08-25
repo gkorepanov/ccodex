@@ -34,7 +34,7 @@ function record(threadId: string): ClaudeThreadRecord {
     canAcceptDirectInput: true,
     preview: "",
     ephemeral: false,
-    isPinned: false,
+    section: null, sectionEnteredAt: null, projectId: null,
     historyMode: "legacy",
     modelProvider: "claude",
     createdAt: 1,
@@ -1347,7 +1347,7 @@ describe("ClaudeSession Phase 3 slice", () => {
         runtimeGeneration: 5,
         providerSessionId: "wrong",
         model: "haiku",
-        cliVersion: "2.1.219",
+        cliVersion: "2.1.245",
       },
     )).rejects.toThrow("expected 'claude-thread-1'");
     await registry.submit("thread-1", {
@@ -1355,12 +1355,12 @@ describe("ClaudeSession Phase 3 slice", () => {
       runtimeGeneration: 5,
       providerSessionId: "claude-thread-1",
       model: "claude-haiku-4-5",
-      cliVersion: "2.1.219",
+      cliVersion: "2.1.245",
     });
     expect(store.getThreadRecord("thread-1")).toMatchObject({
       resolvedModel: "claude-haiku-4-5",
-      claudeCodeVersion: "2.1.219",
-      thread: { cliVersion: "2.1.219" },
+      claudeCodeVersion: "2.1.245",
+      thread: { cliVersion: "2.1.245" },
     });
     await registry.submit("thread-1", {
       type: "runtimeInitialized",
@@ -1387,7 +1387,7 @@ describe("ClaudeSession Phase 3 slice", () => {
       runtimeGeneration: 1,
       providerSessionId: "claude-thread-1",
       model: "claude-sonnet-5",
-      cliVersion: "2.1.219",
+      cliVersion: "2.1.245",
       fastModeState: "off",
       fastModeDisabledReason: "extra_usage_disabled",
     });
@@ -1418,7 +1418,7 @@ describe("ClaudeSession Phase 3 slice", () => {
       runtimeGeneration: 1,
       providerSessionId: "claude-thread-1",
       model: "claude-sonnet-5",
-      cliVersion: "2.1.219",
+      cliVersion: "2.1.245",
       fastModeState: "on",
     });
     expect(store.getThreadRecord("thread-1")?.serviceTier).toBe("fast");
@@ -2692,7 +2692,7 @@ describe("ClaudeSession Phase 3 slice", () => {
     const staleCandidate = { ...initial, reasoningEffort: "high" };
     await registry.submit("thread-1", {
       type: "threadAdmin",
-      command: { kind: "metadata", gitInfo: { branch: "main", sha: "abc123" }, isPinned: undefined },
+      command: { kind: "metadata", gitInfo: { branch: "main", sha: "abc123" } },
     });
     await registry.submit("thread-1", {
       type: "updateDesiredSettings",
@@ -3157,7 +3157,7 @@ describe("ClaudeSession Phase 3 slice", () => {
     store.createThread(child);
     store.createTurn("child", {
       id: "child-turn",
-      items: [{ type: "agentMessage", id: "child-item", text: "temporary", phase: null, memoryCitation: null }],
+      items: [{ type: "agentMessage", id: "child-item", text: "temporary", phase: null, memoryCitation: null, delivery: null }],
       itemsView: "full", status: "completed", error: null,
       startedAt: 1, completedAt: 2, durationMs: 1_000,
     });
@@ -3183,7 +3183,7 @@ describe("ClaudeSession Phase 3 slice", () => {
     await registry.submit("thread-1", { type: "createThread", record: root });
     store.createTurn("thread-1", {
       id: "older-turn",
-      items: [{ type: "agentMessage", id: "older-item", text: "old", phase: null, memoryCitation: null }],
+      items: [{ type: "agentMessage", id: "older-item", text: "old", phase: null, memoryCitation: null, delivery: null }],
       itemsView: "full", status: "completed", error: null,
       startedAt: 1, completedAt: 2, durationMs: 1_000,
     });

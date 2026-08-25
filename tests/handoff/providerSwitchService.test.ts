@@ -13,7 +13,7 @@ import { HandoffStore } from "../../src/handoff/store.js";
 function turn(id: string, text: string): Turn {
   return {
     id,
-    items: [{ type: "agentMessage", id: `${id}-item`, text, phase: "final_answer", memoryCitation: null }],
+    items: [{ type: "agentMessage", id: `${id}-item`, text, phase: "final_answer", memoryCitation: null, delivery: null }],
     itemsView: "full",
     status: "completed",
     error: null,
@@ -26,7 +26,7 @@ function turn(id: string, text: string): Turn {
 function thread(id: string, provider: string, turns: Turn[] = []): Thread {
   return {
     id, extra: null, sessionId: id, forkedFromId: null, parentThreadId: null, canAcceptDirectInput: true,
-    preview: "hello", ephemeral: false, isPinned: false, historyMode: "legacy", modelProvider: provider,
+    preview: "hello", ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "legacy", modelProvider: provider,
     createdAt: 1, updatedAt: 2, recencyAt: 2, status: { type: "idle" }, path: null,
     cwd: "/tmp/project", cliVersion: "test", source: "cli", threadSource: "user",
     agentNickname: null, agentRole: null, gitInfo: null, name: "Migrated", turns,
@@ -900,7 +900,7 @@ describe("provider switch service", () => {
 
   it("switches stock to Claude and commits only after starting the untouched input", async () => {
     const sourceTurn = turn("stock-source-turn", "stock answer");
-    const source = { ...thread("stock-public", "openai", [sourceTurn]), isPinned: true };
+    const source = { ...thread("stock-public", "openai", [sourceTurn]), section: { id: "01984de2-8f74-7c91-a3b2-5c5e937cf318", name: "Pinned", appearance: null }, sectionEnteredAt: 2 };
     const target = thread("claude-target", "claude");
     const targetTurn = turn("claude-target-turn", "claude answer");
     const order: string[] = [];
@@ -1002,8 +1002,10 @@ describe("provider switch service", () => {
       method: "turn/started",
       params: expect.objectContaining({ threadId: source.id }),
     });
+    // Section membership lives on the backend thread and is not mirrored
+    // across provider switches; the new Claude backend starts unsectioned.
     expect(service.projectThreadCatalog([], [{ ...target, turns: [targetTurn] }])).toMatchObject([{
-      id: source.id, isPinned: true,
+      id: source.id, section: null,
     }]);
     expect(service.logical(source.id)?.epoch).toMatchObject({
       provider: "claude", backendThreadId: target.id,

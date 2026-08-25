@@ -23,6 +23,7 @@ import { STOCK_SIDE_THREAD_SOURCE, StockSideThreads } from "../../src/gateway/st
 import { Logger } from "../../src/observability/logger.js";
 import { CursorCodec } from "../../src/protocol/cursor.js";
 import { OptimisticSideThreads } from "../../src/gateway/optimisticSideThreads.js";
+import { assertValidResponse } from "../fixtures/responseSchemas.js";
 
 const claudeSnapshot: ClaudeRateLimitsResponse = mapClaudeUsage({
   session: {
@@ -212,6 +213,12 @@ function fakeClaude() {
       };
     }),
     rollbackThread: vi.fn(async () => ({})),
+    setThreadSection: vi.fn(async (threadId: string, section: { id: string } | null) => ({
+      thread: {
+        ...stockThread(threadId), modelProvider: "claude",
+        section, sectionEnteredAt: section ? 1_700_000_200 : null, projectId: null,
+      },
+    })),
     compactThread: vi.fn(async () => ({})),
     injectItems: vi.fn(async () => ({})),
     getGoal: vi.fn(async () => ({ goal: null })),
@@ -322,6 +329,13 @@ async function makeHarness(
       else if (request.method === "thread/list") ws.send(JSON.stringify({
         id: request.id,
         result: { data: [], nextCursor: null, backwardsCursor: null },
+      }));
+      else if (request.method === "threadSection/list") ws.send(JSON.stringify({
+        id: request.id,
+        result: {
+          data: [{ id: "01984de2-8f74-7c91-a3b2-5c5e937cf318", name: "Pinned", appearance: null }],
+          nextCursor: null,
+        },
       }));
       else if (request.method === "thread/resume") {
         const threadId = (request.params as any).threadId;
@@ -684,9 +698,12 @@ describe("provider-aware rate-limit gateway routing", () => {
           currentStreakDays: null, longestStreakDays: null,
         },
         dailyUsageBuckets: null,
+        threadUsage: null,
       },
     });
     expect(harness.stockRequests.some((request) => request.method === "account/usage/read")).toBe(false);
+    assertValidResponse("GetAccountTokenUsageResponse", messages(harness, "usage")[0].result);
+    assertValidResponse("GetAccountRateLimitsResponse", messages(harness, "limits")[0].result);
 
     const before = harness.client.sent.length;
     for (const ws of harness.stockClients) ws.send(JSON.stringify({ method: "account/rateLimits/updated", params: { rateLimits: stockSnapshot.rateLimits } }));
@@ -699,6 +716,79 @@ describe("provider-aware rate-limit gateway routing", () => {
       method: "account/rateLimits/updated",
       params: { rateLimits: { limitId: "claude", limitName: "Claude" } },
     });
+  });
+
+  it("scopes account/usage/read by the requested thread's owner, not the foreground", async () => {
+    const claude = fakeClaude();
+    claude.threads.add("claude-existing");
+    const harness = await makeHarness(claude);
+    harness.client.request("start", "thread/start", { model: "gpt-5.6-sol" });
+    await settle();
+
+    harness.client.request("scoped-claude", "account/usage/read", { threadId: "claude-existing" });
+    await settle();
+    expect(messages(harness, "scoped-claude")[0]).toEqual({
+      id: "scoped-claude",
+      result: {
+        summary: {
+          lifetimeTokens: null, peakDailyTokens: null, longestRunningTurnSec: null,
+          currentStreakDays: null, longestStreakDays: null,
+        },
+        dailyUsageBuckets: null,
+        threadUsage: null,
+      },
+    });
+    expect(harness.stockRequests.some((request) => request.method === "account/usage/read")).toBe(false);
+    assertValidResponse("GetAccountTokenUsageResponse", messages(harness, "scoped-claude")[0].result);
+
+    harness.client.request("start-claude", "thread/start", { model: "claude:sonnet" });
+    await settle();
+    harness.client.request("scoped-stock", "account/usage/read", { threadId: "stock-thread" });
+    await settle();
+    expect(harness.stockRequests).toContainEqual(expect.objectContaining({
+      id: "scoped-stock", method: "account/usage/read",
+    }));
+  });
+
+  it("moves Claude threads between stock-registered sections and passes stock moves through", async () => {
+    const pinnedSectionId = "01984de2-8f74-7c91-a3b2-5c5e937cf318";
+    const claude = fakeClaude();
+    claude.threads.add("claude-existing");
+    const harness = await makeHarness(claude);
+
+    harness.client.request("pin", "thread/section/move", {
+      threadId: "claude-existing", sectionId: pinnedSectionId,
+    });
+    await settle();
+    expect(messages(harness, "pin")[0]).toEqual({ id: "pin", result: {} });
+    expect(claude.setThreadSection).toHaveBeenCalledWith(
+      "claude-existing",
+      { id: pinnedSectionId, name: "Pinned", appearance: null },
+    );
+    expect(harness.stockRequests.some((request) => request.method === "thread/section/move")).toBe(false);
+
+    harness.client.request("unpin", "thread/section/move", {
+      threadId: "claude-existing", sectionId: null,
+    });
+    await settle();
+    expect(messages(harness, "unpin")[0]).toEqual({ id: "unpin", result: {} });
+    expect(claude.setThreadSection).toHaveBeenLastCalledWith("claude-existing", null);
+
+    harness.client.request("bad-section", "thread/section/move", {
+      threadId: "claude-existing", sectionId: "not-a-registered-section",
+    });
+    await settle();
+    expect(messages(harness, "bad-section")[0]).toMatchObject({
+      error: { code: -32602, message: expect.stringContaining("Unknown thread section") },
+    });
+
+    harness.client.request("stock-move", "thread/section/move", {
+      threadId: "stock-existing", sectionId: pinnedSectionId,
+    });
+    await settle();
+    expect(harness.stockRequests).toContainEqual(expect.objectContaining({
+      id: "stock-move", method: "thread/section/move",
+    }));
   });
 
   it("shows a normalized transient Claude limit notice only for a foreground Claude thread", async () => {

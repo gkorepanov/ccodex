@@ -14,7 +14,6 @@ export interface PublicTaskIdentity {
   readonly revision: number;
   readonly sessionId: string;
   readonly createdAt: number;
-  readonly isPinned: boolean;
   readonly forkedFromId?: string;
   readonly parentThreadId?: string;
 }
@@ -159,7 +158,7 @@ export class LineageStore {
   public close(): void { this.database.close(); }
 
   public createTask(
-    identity: Omit<PublicTaskIdentity, "revision" | "isPinned"> & { readonly isPinned?: boolean },
+    identity: Omit<PublicTaskIdentity, "revision">,
     epoch: NewEpochBoundary,
   ): PublicTaskIdentity {
     return this.transaction(() => {
@@ -171,7 +170,7 @@ export class LineageStore {
       `).run(
         identity.publicThreadId, identity.currentEpochId,
         identity.parentThreadId ? identity.sessionId : identity.publicThreadId,
-        identity.createdAt, identity.isPinned ? 1 : 0,
+        identity.createdAt, 0,
         identity.forkedFromId ?? null, identity.parentThreadId ?? null,
       );
       this.database.prepare(`
@@ -198,12 +197,6 @@ export class LineageStore {
     return (this.database.prepare(`
       SELECT * FROM lineage_tasks ORDER BY public_thread_id ASC
     `).all() as unknown as TaskRow[]).map((row) => this.taskFromRow(row));
-  }
-
-  public updateTaskPinned(publicThreadId: string, isPinned: boolean): boolean {
-    return Number(this.database.prepare(`
-      UPDATE lineage_tasks SET is_pinned = ?, revision = revision + 1 WHERE public_thread_id = ?
-    `).run(isPinned ? 1 : 0, publicThreadId).changes) === 1;
   }
 
   public getEpoch(epochId: string): EpochBoundary | undefined {
@@ -294,7 +287,7 @@ export class LineageStore {
   }
 
   public createForkTask(
-    identity: Omit<PublicTaskIdentity, "revision" | "isPinned"> & { readonly isPinned?: boolean },
+    identity: Omit<PublicTaskIdentity, "revision">,
     epoch: NewEpochBoundary,
     inheritedSegments: readonly NewTranscriptSegment[],
   ): PublicTaskIdentity {
@@ -307,7 +300,7 @@ export class LineageStore {
       `).run(
         identity.publicThreadId, identity.currentEpochId,
         identity.parentThreadId ? identity.sessionId : identity.publicThreadId,
-        identity.createdAt, identity.isPinned ? 1 : 0,
+        identity.createdAt, 0,
         identity.forkedFromId ?? null, identity.parentThreadId ?? null,
       );
       this.database.prepare(`
@@ -557,7 +550,7 @@ export class LineageStore {
       `).run(
         row.public_thread_id, row.current_epoch_id, row.revision,
         thread.parentThreadId ? thread.sessionId || row.public_thread_id : row.public_thread_id, thread.createdAt,
-        thread.isPinned ? 1 : 0,
+        (thread as { isPinned?: boolean }).isPinned ? 1 : 0,
         thread.forkedFromId, thread.parentThreadId,
       );
     }
@@ -703,7 +696,6 @@ export class LineageStore {
       revision: row.revision,
       sessionId: row.session_id,
       createdAt: row.created_at,
-      isPinned: row.is_pinned === 1,
       ...(row.forked_from_id ? { forkedFromId: row.forked_from_id } : {}),
       ...(row.parent_thread_id ? { parentThreadId: row.parent_thread_id } : {}),
     };

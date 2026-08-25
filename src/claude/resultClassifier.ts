@@ -22,7 +22,10 @@ export interface ClaudeResultInput {
 }
 
 function providerErrorInfo(providerError: string | undefined, message: string | undefined): CodexErrorInfo | undefined {
-  if (providerError === "authentication_failed" || providerError === "oauth_org_not_allowed") return "unauthorized";
+  // account_on_hold is an account-state suspension requiring user action at
+  // the provider, so it renders as an authorization problem, not a limit.
+  if (providerError === "authentication_failed" || providerError === "oauth_org_not_allowed"
+    || providerError === "account_on_hold") return "unauthorized";
   if (providerError === "billing_error" || providerError === "rate_limit") return "usageLimitExceeded";
   if (providerError === "overloaded") return "serverOverloaded";
   if (providerError === "server_error") return "internalServerError";

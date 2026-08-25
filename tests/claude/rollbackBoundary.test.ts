@@ -34,7 +34,7 @@ function config(dataDir: string): HybridConfig {
 function turn(id: string, status: Turn["status"], compaction = false): Turn {
   const item = compaction
     ? { type: "contextCompaction" as const, id: `${id}-item` }
-    : { type: "agentMessage" as const, id: `${id}-item`, text: id, phase: null, memoryCitation: null };
+    : { type: "agentMessage" as const, id: `${id}-item`, text: id, phase: null, memoryCitation: null, delivery: null };
   return {
     id, items: [item], itemsView: "full", status, error: null,
     startedAt: 1, completedAt: status === "inProgress" ? null : 2, durationMs: status === "inProgress" ? null : 1_000,
@@ -46,7 +46,7 @@ function record(directory: string): ClaudeThreadRecord {
     thread: {
       id: "rollback-thread", extra: null, sessionId: randomUUID(), forkedFromId: null, parentThreadId: null,
       canAcceptDirectInput: true,
-      preview: "compacted branch", ephemeral: false, isPinned: false, historyMode: "legacy", modelProvider: "claude",
+      preview: "compacted branch", ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "legacy", modelProvider: "claude",
       createdAt: 1, updatedAt: 2, recencyAt: 2, status: { type: "idle" }, path: null, cwd: directory,
       cliVersion: "2.1.209", source: "appServer", threadSource: null, agentNickname: null, agentRole: null,
       gitInfo: null, name: "rollback fixture ✳️", turns: [],
@@ -493,7 +493,7 @@ describe("compacted transcript rollback boundary", () => {
         ...active,
         items: [{
           type: "agentMessage", id: "late-source-delta", text: "source kept streaming",
-          phase: null, memoryCitation: null,
+          phase: null, memoryCitation: null, delivery: null,
         }],
       });
     };
@@ -556,7 +556,7 @@ describe("compacted transcript rollback boundary", () => {
     brancher.afterForkValidated = () => {
       store.updateTurn("rollback-thread", {
         ...active,
-        items: [{ type: "agentMessage", id: "late-item", text: "late parent delta", phase: null, memoryCitation: null }],
+        items: [{ type: "agentMessage", id: "late-item", text: "late parent delta", phase: null, memoryCitation: null, delivery: null }],
       });
     };
     const service = new ClaudeService(

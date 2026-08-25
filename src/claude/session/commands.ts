@@ -8,6 +8,7 @@ import type { ThreadSettings } from "../../codex/generated/v2/ThreadSettings.js"
 import type { ThreadGoal } from "../../codex/generated/v2/ThreadGoal.js";
 import type { ThreadGoalSetParams } from "../../codex/generated/v2/ThreadGoalSetParams.js";
 import type { ThreadMetadataUpdateParams } from "../../codex/generated/v2/ThreadMetadataUpdateParams.js";
+import type { ThreadSection } from "../../codex/generated/v2/ThreadSection.js";
 import type { JsonValue } from "../../codex/generated/serde_json/JsonValue.js";
 import type {
   ClaudeThreadRecord,
@@ -277,7 +278,8 @@ export type ThreadAdminCommand =
   | {
     readonly kind: "metadata";
     readonly gitInfo: ThreadMetadataUpdateParams["gitInfo"];
-    readonly isPinned: ThreadMetadataUpdateParams["isPinned"];
+    /** undefined = untouched, null = unsection, object = enter the section now. */
+    readonly section?: ThreadSection | null;
   }
   | { readonly kind: "unarchive" };
 

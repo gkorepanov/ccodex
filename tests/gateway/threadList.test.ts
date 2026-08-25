@@ -7,7 +7,7 @@ import { filterSortThreads } from "../../src/store/threadFilter.js";
 function thread(id: string, createdAt: number, parentThreadId: string | null = null): Thread {
   return {
     id, extra: null, sessionId: id, forkedFromId: null, parentThreadId,
-    canAcceptDirectInput: parentThreadId === null, preview: id, ephemeral: false, isPinned: false,
+    canAcceptDirectInput: parentThreadId === null, preview: id, ephemeral: false, section: null, sectionEnteredAt: null, projectId: null,
     historyMode: "legacy", modelProvider: "claude", createdAt, updatedAt: createdAt, recencyAt: createdAt,
     status: { type: "idle" }, path: null, cwd: "/repo", cliVersion: "test", source: "appServer",
     threadSource: null, agentNickname: null, agentRole: null, gitInfo: null, name: id, turns: [],
@@ -29,10 +29,12 @@ describe("merged thread listing", () => {
     expect(filterSortThreads([legacy], { sourceKinds: ["subAgentThreadSpawn"] })).toEqual([]);
   });
 
-  it("filters pinned tasks and canonicalizes cwd aliases", () => {
-    const pinned = { ...thread("pinned", 2), isPinned: true };
+  it("filters sections tri-state and canonicalizes cwd aliases", () => {
+    const pinned = { ...thread("pinned", 2), section: { id: "01984de2-8f74-7c91-a3b2-5c5e937cf318", name: "Pinned", appearance: null }, sectionEnteredAt: 2 };
     const regular = thread("regular", 1);
-    expect(filterSortThreads([regular, pinned], { isPinned: true })).toEqual([pinned]);
+    expect(filterSortThreads([regular, pinned], { sectionId: "01984de2-8f74-7c91-a3b2-5c5e937cf318" })).toEqual([pinned]);
+    expect(filterSortThreads([regular, pinned], { sectionId: null })).toEqual([regular]);
+    expect(filterSortThreads([regular, pinned], {}).length).toBe(2);
     expect(filterSortThreads([regular, pinned], { cwd: "/repo/../repo" }).map((item) => item.id))
       .toEqual(["pinned", "regular"]);
   });

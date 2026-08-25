@@ -158,7 +158,9 @@ async fn run(args: Args) -> Result<()> {
     if policy == RemoteControlPolicy::DisabledByRequirements {
         bail!("remote control is disabled by managed requirements");
     }
-    let auth_manager = AuthManager::shared_from_config(&config, false).await;
+    let auth_manager = AuthManager::shared_from_config(&config, false)
+        .await
+        .context("initialize Codex auth manager")?;
     let shutdown = CancellationToken::new();
     let (transport_tx, mut transport_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (remote_task, remote_handle) = start_remote_control(
@@ -340,7 +342,7 @@ mod tests {
     #[test]
     fn parses_stock_capture_commands_into_native_actions() {
         let list_script =
-            "rg --files ~/.ccodex/current/node_modules/@gkorepanov/ccodex/dist | sed -n '1,240p'";
+            "rg --files /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist | sed -n '1,240p'";
         let list = codex_shell_command::parse_command::parse_command(&[
             "bash".to_string(),
             "-lc".to_string(),
@@ -350,12 +352,12 @@ mod tests {
             serde_json::to_value(list).unwrap(),
             serde_json::json!([{
                 "type": "list_files",
-                "cmd": "rg --files '~/.ccodex/current/node_modules/@gkorepanov/ccodex/dist'",
+                "cmd": "rg --files /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist",
                 "path": "ccodex"
             }])
         );
 
-        let search_script = "rg -n -C 2 'forkThread|async fork|shouldFork' ~/.ccodex/current/node_modules/@gkorepanov/ccodex/dist/handoff ~/.ccodex/current/node_modules/@gkorepanov/ccodex/dist/claude --glob '*.js' | sed -n '1,300p'";
+        let search_script = "rg -n -C 2 'forkThread|async fork|shouldFork' /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist/handoff /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist/claude --glob '*.js' | sed -n '1,300p'";
         let search = codex_shell_command::parse_command::parse_command(&[
             "bash".to_string(),
             "-lc".to_string(),
@@ -365,10 +367,24 @@ mod tests {
             serde_json::to_value(search).unwrap(),
             serde_json::json!([{
                 "type": "search",
-                "cmd": "rg -n -C 2 'forkThread|async fork|shouldFork' '~/.ccodex/current/node_modules/@gkorepanov/ccodex/dist/handoff' '~/.ccodex/current/node_modules/@gkorepanov/ccodex/dist/claude' --glob '*.js'",
+                "cmd": "rg -n -C 2 'forkThread|async fork|shouldFork' /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist/handoff /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist/claude --glob '*.js'",
                 "query": "forkThread|async fork|shouldFork",
                 "path": "handoff"
             }])
+        );
+
+        // Since 0.147 upstream treats `~` as a dynamic shell word, so
+        // tilde-path pipelines no longer classify into native actions.
+        let tilde_script =
+            "rg --files ~/.ccodex/current/node_modules/@gkorepanov/ccodex/dist | sed -n '1,240p'";
+        let tilde = codex_shell_command::parse_command::parse_command(&[
+            "bash".to_string(),
+            "-lc".to_string(),
+            tilde_script.to_string(),
+        ]);
+        assert_eq!(
+            serde_json::to_value(tilde).unwrap(),
+            serde_json::json!([{ "type": "unknown", "cmd": tilde_script }])
         );
     }
 

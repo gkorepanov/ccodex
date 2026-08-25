@@ -36,7 +36,10 @@ export interface ProviderRuntimeCallbacks {
   readonly afterCompact: (input: HookInput) => Promise<HookJSONOutput>;
 }
 
-const unsupportedProviderReviewTools = ["SendFeedback", "ProposeSkills"];
+// ProposeGoal would create upstream-owned goal state CCodex neither observes
+// nor reconciles (CCodex owns durable goals); ReadNotifications would drain
+// cross-session/backend ingress CCodex has no provenance or ownership for.
+const unsupportedProviderReviewTools = ["SendFeedback", "ProposeSkills", "ProposeGoal", "ReadNotifications"];
 
 export class StaleClaudeRuntimeSettingsError extends Error {
   public constructor(
@@ -198,7 +201,15 @@ export function createProviderRuntime(
           PostToolUseFailure: [{ matcher: "Edit|Write|NotebookEdit", hooks: [(input, toolUseId) => callbacks.captureFileAfter(input, toolUseId)] }],
           PostCompact: [{ hooks: [(input) => callbacks.afterCompact(input)] }],
         },
-        ...(startup.serviceTier === "fast" ? { settings: { fastMode: true } } : {}),
+        settings: {
+          ...(startup.serviceTier === "fast" ? { fastMode: true } : {}),
+          // A park-until-reset resume would outlive CCodex's bounded app turn
+          // and runtime ownership; planned as a first-class feature instead.
+          autoContinueAtUsageLimit: false,
+          // Refuse unsolicited cross-session ingress instead of the upstream
+          // default of accepting same-permission-class messages.
+          crossSessionInbound: "refuse",
+        },
         ...(selectedEffort ? { effort: selectedEffort } : {}),
         ...(startup.reasoningSummary === "none"
           ? { thinking: { type: "adaptive", display: "omitted" } as const }

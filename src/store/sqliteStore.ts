@@ -129,7 +129,9 @@ function parseRecord(row: ThreadRow, turns: Turn[]): ClaudeThreadRecord {
   return {
     thread: {
       ...thread,
-      isPinned: thread.isPinned ?? false,
+      section: thread.section ?? null,
+      sectionEnteredAt: thread.sectionEnteredAt ?? null,
+      projectId: thread.projectId ?? null,
       canAcceptDirectInput: thread.parentThreadId ? false : true,
       turns,
     },

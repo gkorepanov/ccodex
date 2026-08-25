@@ -29,7 +29,7 @@ export type CatalogNotificationSink = (method: string, params: unknown) => void;
 interface ThreadCursor {
   readonly query: string;
   readonly direction: "asc" | "desc";
-  readonly key: "createdAt" | "updatedAt" | "recencyAt";
+  readonly key: "createdAt" | "updatedAt" | "recencyAt" | "sectionEnteredAt";
   readonly value: number;
   readonly id: string;
 }
@@ -41,7 +41,10 @@ interface OffsetCursor {
 }
 
 function threadKey(params: ThreadListParams): ThreadCursor["key"] {
-  return params.sortKey === "updated_at" ? "updatedAt" : params.sortKey === "recency_at" ? "recencyAt" : "createdAt";
+  return params.sortKey === "updated_at" ? "updatedAt"
+    : params.sortKey === "recency_at" ? "recencyAt"
+    : params.sortKey === "section_position" ? "sectionEnteredAt"
+    : "createdAt";
 }
 
 function threadQuery(params: ThreadListParams): string {
@@ -51,7 +54,9 @@ function threadQuery(params: ThreadListParams): string {
   return queryFingerprint({
     sortKey: params.sortKey ?? "created_at", modelProviders: params.modelProviders ?? null,
     sourceKinds: params.sourceKinds ?? null, archived: params.archived ?? false, cwd,
-    isPinned: params.isPinned ?? null,
+    // Tri-state filters: omitted and null are distinct queries.
+    sectionId: params.sectionId === undefined ? null : [params.sectionId],
+    projectId: params.projectId === undefined ? null : [params.projectId],
     useStateDbOnly: params.useStateDbOnly ?? false, searchTerm: params.searchTerm ?? null,
     parentThreadId: params.parentThreadId ?? null, ancestorThreadId: params.ancestorThreadId ?? null,
   });

@@ -26,7 +26,7 @@ function thread(id: string): Thread {
     canAcceptDirectInput: true,
     preview: "hello",
     ephemeral: false,
-    isPinned: false,
+    section: null, sectionEnteredAt: null, projectId: null,
     historyMode: "legacy",
     modelProvider: "claude",
     createdAt: 10,
@@ -221,7 +221,7 @@ describe("SqliteHybridStore", () => {
     store.createThread(record("fork"));
     const sharedTurn: Turn = {
       id: "shared-turn",
-      items: [{ type: "agentMessage", id: "shared-item", text: "hello", phase: null, memoryCitation: null }],
+      items: [{ type: "agentMessage", id: "shared-item", text: "hello", phase: null, memoryCitation: null, delivery: null }],
       itemsView: "full",
       status: "completed",
       error: null,
@@ -268,7 +268,7 @@ describe("SqliteHybridStore", () => {
     store.createThread(record("source"));
     const shared: Turn = {
       id: "shared-turn", items: [{
-        type: "agentMessage", id: "shared-item", text: "shared history", phase: null, memoryCitation: null,
+        type: "agentMessage", id: "shared-item", text: "shared history", phase: null, memoryCitation: null, delivery: null,
       }],
       itemsView: "full", status: "completed", error: null,
       startedAt: 1, completedAt: 2, durationMs: 1_000,
@@ -338,14 +338,14 @@ describe("SqliteHybridStore", () => {
     first.createThread(root);
     const one: Turn = {
       id: "turn-1",
-      items: [{ type: "agentMessage", id: "item-1", text: "keep", phase: null, memoryCitation: null }],
+      items: [{ type: "agentMessage", id: "item-1", text: "keep", phase: null, memoryCitation: null, delivery: null }],
       itemsView: "full", status: "completed", error: null,
       startedAt: 1, completedAt: 2, durationMs: 1_000,
     };
     const two: Turn = {
       ...one,
       id: "turn-2",
-      items: [{ type: "agentMessage", id: "item-2", text: "retract", phase: null, memoryCitation: null }],
+      items: [{ type: "agentMessage", id: "item-2", text: "retract", phase: null, memoryCitation: null, delivery: null }],
     };
     first.createTurn("source", one);
     first.createTurn("source", two);
@@ -473,7 +473,7 @@ describe("SqliteHybridStore", () => {
     injector.close();
     const changed: Turn = {
       ...turn,
-      items: [{ type: "agentMessage", id: "item-1", text: "hello", phase: null, memoryCitation: null }],
+      items: [{ type: "agentMessage", id: "item-1", text: "hello", phase: null, memoryCitation: null, delivery: null }],
     };
     expect(() => store.appendEvent(stored.thread.id, turn.id, "item/completed", { item: changed.items[0] }, {
       turn: changed, dedupKey: "item/completed:item-1",

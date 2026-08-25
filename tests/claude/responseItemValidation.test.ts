@@ -11,7 +11,7 @@ describe("pinned ResponseItem validation", () => {
         type: "reasoning", summary: [{ type: "summary_text", text: "why" }],
         encrypted_content: null,
       },
-      { type: "function_call", name: "x", arguments: "{}", call_id: "call-1" },
+      { type: "function_call", name: "x", arguments: "{}", call_id: "call-1", encrypted_function_args: ["opaque"] },
       { type: "function_call_output", call_id: "call-1", output: "ok" },
       { type: "compaction_summary", encrypted_content: "opaque" },
       { type: "compaction_trigger" },
@@ -35,6 +35,7 @@ describe("pinned ResponseItem validation", () => {
 
     for (const item of [
       { type: "additional_tools", role: "system", tools: "not-an-array" },
+      { type: "function_call", name: "x", arguments: "{}", call_id: "call-1", encrypted_function_args: [42] },
       { type: "compaction_summary" },
       { type: "web_search_call", action: { type: "search", query: 42 } },
       { type: "message", role: "user", content: [{ type: "future_content" }] },

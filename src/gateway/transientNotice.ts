@@ -33,12 +33,13 @@ export function transientAgentNotice(threadId: string, text: string, nowMs = Dat
     completedAt: null,
     durationMs: null,
   };
-  const emptyItem: ThreadItem = {
+  const emptyItem: Extract<ThreadItem, { type: "agentMessage" }> = {
     type: "agentMessage",
     id: itemId,
     text: "",
     phase: null,
     memoryCitation: null,
+    delivery: null,
   };
   const item: ThreadItem = { ...emptyItem, text };
   const completed: Turn = {
@@ -78,12 +79,13 @@ export function transientSystemItemNotice(
   nowMs = Date.now(),
 ): Array<{ method: string; params: unknown }> {
   const itemId = uuidv7({ msecs: nowMs });
-  const emptyItem: ThreadItem = {
+  const emptyItem: Extract<ThreadItem, { type: "agentMessage" }> = {
     type: "agentMessage",
     id: itemId,
     text: "",
     phase: "commentary",
     memoryCitation: null,
+    delivery: null,
   };
   const item: ThreadItem = { ...emptyItem, text: systemNoticeText(text, kind) };
   return [
@@ -108,8 +110,8 @@ export function transientCommandNotice(
     type: "userMessage", id: uuidv7({ msecs: nowMs }), clientId, content,
   };
   const agentId = uuidv7({ msecs: nowMs });
-  const emptyAgent: ThreadItem = {
-    type: "agentMessage", id: agentId, text: "", phase: null, memoryCitation: null,
+  const emptyAgent: Extract<ThreadItem, { type: "agentMessage" }> = {
+    type: "agentMessage", id: agentId, text: "", phase: null, memoryCitation: null, delivery: null,
   };
   const agent: ThreadItem = { ...emptyAgent, text, phase: "final_answer" };
   const startedAt = Math.floor(nowMs / 1_000);

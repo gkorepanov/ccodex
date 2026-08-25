@@ -1335,7 +1335,7 @@ describe("Claude goal lifecycle", () => {
       thread: {
         id: "thread", extra: null, sessionId: "session", forkedFromId: null, parentThreadId: null,
         canAcceptDirectInput: true,
-        preview: "", ephemeral: false, isPinned: false, historyMode: "legacy", modelProvider: "claude", createdAt: now,
+        preview: "", ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "legacy", modelProvider: "claude", createdAt: now,
         updatedAt: now, recencyAt: now, status: { type: "idle" }, path: null, cwd: root,
         cliVersion: "test", source: "appServer", threadSource: null, agentNickname: null, agentRole: null,
         gitInfo: null, name: null, turns: [],

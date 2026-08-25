@@ -150,7 +150,7 @@ export function startTool(
     return { state, item: {
       type: "mcpToolCall", id: state.itemId, server: mcp?.server ?? (text(block.server_name) || "unknown"),
       tool: mcp?.tool ?? name, status: "inProgress", arguments: input as JsonValue, appContext: null,
-      pluginId: null, result: null, error: null, durationMs: null,
+      pluginId: null, result: null, error: null, durationMs: null, readOnlyHint: null,
     } };
   }
   if (name === "WebSearch" || name === "web_search") {

@@ -67,7 +67,7 @@ function config(dataDir: string): HybridConfig {
 function paginationTurn(id: string): Turn {
   return {
     id,
-    items: [{ type: "agentMessage", id: `${id}-item`, text: id, phase: "final_answer", memoryCitation: null }],
+    items: [{ type: "agentMessage", id: `${id}-item`, text: id, phase: "final_answer", memoryCitation: null, delivery: null }],
     itemsView: "full",
     status: "completed",
     error: null,
@@ -1002,7 +1002,9 @@ describe("ClaudeService", () => {
       preset: "claude_code",
       append: `${CCODEX_APP_UI_INSTRUCTIONS}\n\nBase contract.\n\nDeveloper contract.\n\nBe direct, pragmatic, and focused on concrete outcomes.`,
     });
-    expect(fake.inputs[0]?.options.disallowedTools).toEqual(["SendFeedback", "ProposeSkills"]);
+    expect(fake.inputs[0]?.options.disallowedTools).toEqual([
+      "SendFeedback", "ProposeSkills", "ProposeGoal", "ReadNotifications",
+    ]);
     await service.close();
   });
 
@@ -1275,7 +1277,7 @@ Keep this summary.
         id: "claude:haiku", model: "claude:haiku", upgrade: null, upgradeInfo: null, availabilityNux: null,
         displayName: "Haiku", description: "test", hidden: false, supportedReasoningEfforts: [],
         defaultReasoningEffort: "medium", inputModalities: ["text" as const], supportsPersonality: true,
-        additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: false,
+        additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: false, modelSpecialty: null, multiAgentVersion: null,
       }], invalidate: () => { invalidations += 1; } },
     );
     const started = await service.startThread({ model: "claude:haiku", cwd: directory });
@@ -1411,8 +1413,8 @@ Keep this summary.
       startedAt: 1, completedAt: 2, durationMs: 1_000,
       items: [
         { type: "userMessage", id: "user", clientId: null, content: [{ type: "text", text: "😀 Needle", text_elements: [] }] },
-        { type: "agentMessage", id: "commentary", text: "needle hidden", phase: "commentary", memoryCitation: null },
-        { type: "agentMessage", id: "answer", text: "second NEEDLE", phase: "final_answer", memoryCitation: null },
+        { type: "agentMessage", id: "commentary", text: "needle hidden", phase: "commentary", memoryCitation: null, delivery: null },
+        { type: "agentMessage", id: "answer", text: "second NEEDLE", phase: "final_answer", memoryCitation: null, delivery: null },
       ],
     });
 
@@ -1465,7 +1467,7 @@ Keep this summary.
       startedAt: 1, completedAt: 2, durationMs: 1_000,
     };
     const active: Turn = {
-      id: "turn-b", items: [{ type: "agentMessage", id: "partial", text: "partial", phase: "commentary", memoryCitation: null }],
+      id: "turn-b", items: [{ type: "agentMessage", id: "partial", text: "partial", phase: "commentary", memoryCitation: null, delivery: null }],
       itemsView: "full", status: "inProgress", error: null, startedAt: 3, completedAt: null, durationMs: null,
     };
     store.createTurn(started.thread.id, completed);
@@ -1492,7 +1494,7 @@ Keep this summary.
     const thread = {
       id: "crashed-thread", extra: null, sessionId: "codex-session", forkedFromId: null, parentThreadId: null,
       canAcceptDirectInput: true,
-      preview: "crash", ephemeral: false, isPinned: false, historyMode: "legacy" as const, modelProvider: "claude",
+      preview: "crash", ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "legacy" as const, modelProvider: "claude",
       createdAt: 1, updatedAt: 1, recencyAt: 1, status: { type: "active" as const, activeFlags: [] },
       path: null, cwd: directory, cliVersion: "test", source: "appServer" as const, threadSource: null,
       agentNickname: null, agentRole: null, gitInfo: null, name: null, turns: [],
@@ -1511,7 +1513,7 @@ Keep this summary.
       id: "crashed-turn", items: [
         { type: "enteredReviewMode", id: "review-entered", review: "current changes" },
         { type: "userMessage", id: "crashed-turn", clientId: null, content: [] },
-        { type: "agentMessage", id: "partial-review", text: "P1 persisted finding", phase: "commentary", memoryCitation: null },
+        { type: "agentMessage", id: "partial-review", text: "P1 persisted finding", phase: "commentary", memoryCitation: null, delivery: null },
         {
           type: "commandExecution", id: "crashed-command", pluginId: null, scriptPath: null,
           command: "sleep 10", cwd: directory,
@@ -2640,7 +2642,7 @@ You are in a side conversation, not the main thread.`,
     expect(finalEvents.some((event) => event.method === "error")).toBe(false);
     expect(service.readThread(source.thread.id, true).thread.status).toEqual({ type: "idle" });
     await service.close();
-  });
+  }, 15_000);
 
   it("publishes captured background Bash as running when task_started confirms execution", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-background-start-"));
@@ -2838,7 +2840,7 @@ You are in a side conversation, not the main thread.`,
     const source = await service.startThread({ model: "claude:haiku", cwd: directory });
     store.createTurn(source.thread.id, {
       id: "source-turn",
-      items: [{ type: "agentMessage", id: "source-item", text: "hello", phase: null, memoryCitation: null }],
+      items: [{ type: "agentMessage", id: "source-item", text: "hello", phase: null, memoryCitation: null, delivery: null }],
       itemsView: "full", status: "completed", error: null,
       startedAt: 11, completedAt: 12, durationMs: 1000,
     });
@@ -2873,7 +2875,7 @@ You are in a side conversation, not the main thread.`,
     store.createTurn(childId, {
       id: "child-turn", items: [{
         type: "agentMessage", id: "child-answer", text: "source child result",
-        phase: "final_answer", memoryCitation: null,
+        phase: "final_answer", memoryCitation: null, delivery: null,
       }],
       itemsView: "full", status: "completed", error: null,
       startedAt: 1, completedAt: 2, durationMs: 1_000,
@@ -3204,7 +3206,7 @@ You are in a side conversation, not the main thread.`,
         },
         {
           type: "agentMessage", id: "partial", text: "P1 partial finding",
-          phase: "commentary", memoryCitation: null,
+          phase: "commentary", memoryCitation: null, delivery: null,
         },
       ],
       itemsView: "full", status: "inProgress", error: null,
@@ -5178,6 +5180,101 @@ You are in a side conversation, not the main thread.`,
     await service.close();
   });
 
+  it("renders a local-scope refusal fallback without changing the session model", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-local-fallback-"));
+    directories.push(directory);
+    const session_id = "session";
+    const refusedUuid = randomUUID();
+    const before = [
+      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "REFUSED PARTIAL" }] }, parent_tool_use_id: null, uuid: refusedUuid, session_id },
+      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "SAFE REPLACEMENT" }] }, parent_tool_use_id: null, supersedes: [refusedUuid], uuid: randomUUID(), session_id },
+      {
+        type: "system", subtype: "model_refusal_fallback", trigger: "refusal", direction: "retry",
+        scope: "local",
+        original_model: "claude-fable-5", fallback_model: "claude-sonnet-4-6", request_id: "request-local",
+        retracted_message_uuids: [refusedUuid], refused_user_message_uuid: null,
+        content: "One side question used a fallback model.", uuid: randomUUID(), session_id,
+      },
+    ] as unknown as SDKMessage[];
+    const hub = new SubscriptionHub();
+    const events: Array<{ method: string; params: unknown }> = [];
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    const service = new ClaudeService(
+      config(directory), hub, new Logger("error"), store,
+      new FakeClaudeQuery(undefined, undefined, [], false, undefined, undefined, undefined, before).factory,
+    );
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    hub.subscribe(started.thread.id, "test", (method, params) => events.push({ method, params }));
+    const prepared = await service.prepareTurn({
+      threadId: started.thread.id, input: [{ type: "text", text: "local fallback", text_elements: [] }],
+    });
+    prepared.announce();
+    prepared.start();
+    await new Promise<void>((resolve) => {
+      const poll = () => service.readThread(started.thread.id, true).thread.turns[0]?.status === "completed" ? resolve() : setTimeout(poll, 5);
+      poll();
+    });
+    const record = store.getThreadRecord(started.thread.id, true)!;
+    const text = record.thread.turns[0]!.items.flatMap((item) => item.type === "agentMessage" ? [item.text] : []).join("\n");
+    expect(text).not.toContain("REFUSED PARTIAL");
+    expect(text).toContain("SAFE REPLACEMENT");
+    expect(text).toContain("◆ **CCodex** │ One side question used a fallback model.");
+    expect(record.resolvedModel).not.toBe("claude-sonnet-4-6");
+    expect(events.some((event) => event.method === "model/rerouted")).toBe(false);
+    await service.close();
+  });
+
+  it("survives a reinitialize that aborts and re-requests a pending tool approval", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-reinit-race-"));
+    directories.push(directory);
+    const fake = new FakeClaudeQuery({ name: "Bash", input: { command: "printf race" } });
+    fake.streamPermissionTool = true;
+    fake.retryPermissionOnReinitialize = true;
+    const hub = new SubscriptionHub();
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    const service = new ClaudeService(
+      config(directory), hub, new Logger("error"), store, fake.factory,
+    );
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const events: Array<{ method: string; params: unknown }> = [];
+    const approvals: Array<{ id: string; method: string }> = [];
+    hub.subscribe(started.thread.id, "test",
+      (method, params) => events.push({ method, params }),
+      (id, method) => approvals.push({ id, method }));
+    const prepared = await service.prepareTurn({
+      threadId: started.thread.id, input: [{ type: "text", text: "run it", text_elements: [] }],
+    });
+    prepared.announce();
+    prepared.start();
+    await waitFor(() => approvals.length === 1, "first approval request");
+
+    // 0.3.245 reinitialize denies the racing PreToolUse and re-requests it.
+    await service.resumeThread(started.thread.id);
+    await waitFor(() => approvals.length === 2, "re-requested approval");
+    expect(approvals.map((request) => request.method)).toEqual([
+      "item/commandExecution/requestApproval",
+      "item/commandExecution/requestApproval",
+    ]);
+    await service.resolveServerRequest(approvals[1]!.id, { decision: "accept" });
+    await waitFor(
+      () => events.some((event) => event.method === "turn/completed"),
+      "turn completion after retried approval",
+    );
+
+    expect(fake.permissionResults).toHaveLength(2);
+    expect(fake.permissionResults[0]).toMatchObject({ behavior: "deny" });
+    expect(fake.permissionResults[1]).toMatchObject({ behavior: "allow" });
+    // The retried tool use projects exactly one commandExecution item.
+    const commandStarts = events.filter((event) => event.method === "item/started"
+      && (event.params as { item?: { type?: string } }).item?.type === "commandExecution");
+    expect(commandStarts).toHaveLength(1);
+    const record = store.getThreadRecord(started.thread.id, true)!;
+    const commands = record.thread.turns.flatMap((turn) =>
+      turn.items.filter((item) => item.type === "commandExecution"));
+    expect(commands).toHaveLength(1);
+    await service.close();
+  });
+
   it("keeps provider correlations durable across restart and retracts the original turn", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-correlation-restart-"));
     directories.push(directory);
@@ -6062,7 +6159,7 @@ You are in a side conversation, not the main thread.`,
       displayName: "Haiku", description: "test", hidden: false,
       supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Low" }], defaultReasoningEffort: "low",
       inputModalities: ["text" as const], supportsPersonality: true, additionalSpeedTiers: [], serviceTiers: [],
-      defaultServiceTier: null, isDefault: false,
+      defaultServiceTier: null, isDefault: false, modelSpecialty: null, multiAgentVersion: null,
     }] };
     const service = new ClaudeService(
       config(directory), hub, new Logger("error"), new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory, catalog,
@@ -7152,7 +7249,7 @@ You are in a side conversation, not the main thread.`,
       availabilityNux: null, displayName: "Fable", description: "test", hidden: false,
       supportedReasoningEfforts: [{ reasoningEffort: "xhigh", description: "Extra high" }],
       defaultReasoningEffort: "xhigh", inputModalities: ["text" as const], supportsPersonality: true,
-      additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: false,
+      additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: false, modelSpecialty: null, multiAgentVersion: null,
     }] };
     const service = new ClaudeService(
       config(directory), new SubscriptionHub(), new Logger("error"),
@@ -7184,7 +7281,7 @@ You are in a side conversation, not the main thread.`,
       availabilityNux: null, displayName: "Fable", description: "test", hidden: false,
       supportedReasoningEfforts: [{ reasoningEffort: "xhigh", description: "Extra high" }],
       defaultReasoningEffort: "xhigh", inputModalities: ["text" as const], supportsPersonality: true,
-      additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: false,
+      additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: false, modelSpecialty: null, multiAgentVersion: null,
     }] };
     const service = new ClaudeService(
       config(directory), hub, new Logger("error"),
@@ -7241,7 +7338,7 @@ You are in a side conversation, not the main thread.`,
       availabilityNux: null, displayName: "Fable", description: "test", hidden: false,
       supportedReasoningEfforts: [{ reasoningEffort: "xhigh", description: "Extra high" }],
       defaultReasoningEffort: "xhigh", inputModalities: ["text" as const], supportsPersonality: true,
-      additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: false,
+      additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: false, modelSpecialty: null, multiAgentVersion: null,
     }] };
     const service = new ClaudeService(
       config(directory), hub, new Logger("error"),
@@ -7308,7 +7405,7 @@ You are in a side conversation, not the main thread.`,
       id: "completed-provider-turn",
       items: [{
         type: "agentMessage", id: "provider-answer", text: "OK",
-        phase: "final_answer", memoryCitation: null,
+        phase: "final_answer", memoryCitation: null, delivery: null,
       }],
       itemsView: "full", status: "completed", error: null,
       startedAt: 1, completedAt: 2, durationMs: 1_000,
@@ -7355,7 +7452,7 @@ You are in a side conversation, not the main thread.`,
         id,
         items: [{
           type: "agentMessage", id: `provider-answer-${index}`, text: `answer ${index}`,
-          phase: "final_answer", memoryCitation: null,
+          phase: "final_answer", memoryCitation: null, delivery: null,
         }],
         itemsView: "full", status: "completed", error: null,
         startedAt: index * 2 + 1, completedAt: index * 2 + 2, durationMs: 1_000,
@@ -7541,14 +7638,16 @@ You are in a side conversation, not the main thread.`,
     const source = await service.startThread({
       model: "claude:haiku", cwd: directory, runtimeWorkspaceRoots: [directory, extra],
     });
-    await service.updateThreadMetadata({ threadId: source.thread.id, isPinned: true });
-    expect(service.listThreads({ isPinned: true })).toEqual([
-      expect.objectContaining({ id: source.thread.id, isPinned: true }),
+    const pinnedSection = { id: "01984de2-8f74-7c91-a3b2-5c5e937cf318", name: "Pinned", appearance: null };
+    await service.setThreadSection(source.thread.id, pinnedSection);
+    expect(service.listThreads({ sectionId: pinnedSection.id })).toEqual([
+      expect.objectContaining({ id: source.thread.id, section: pinnedSection }),
     ]);
+    expect(service.listThreads({ sectionId: null })).toEqual([]);
 
     const inherited = await service.forkThread({ threadId: source.thread.id });
     expect(inherited).toMatchObject({
-      runtimeWorkspaceRoots: [directory, extra], thread: { isPinned: false },
+      runtimeWorkspaceRoots: [directory, extra], thread: { section: null, sectionEnteredAt: null, projectId: null },
     });
     const replaced = await service.forkThread({
       threadId: source.thread.id, runtimeWorkspaceRoots: [],
@@ -7564,9 +7663,8 @@ You are in a side conversation, not the main thread.`,
     const ephemeral = await service.startThread({
       model: "claude:haiku", cwd: directory, ephemeral: true,
     });
-    await expect(service.updateThreadMetadata({
-      threadId: ephemeral.thread.id, isPinned: true,
-    })).rejects.toThrow("cannot be pinned");
+    await expect(service.setThreadSection(ephemeral.thread.id, { id: "01984de2-8f74-7c91-a3b2-5c5e937cf318", name: "Pinned", appearance: null }))
+      .rejects.toThrow("cannot be sectioned");
     await expect(service.startThread({
       model: "claude:haiku", environments: [{ environmentId: "remote", cwd: directory }],
     })).rejects.toThrow("only support the local Codex environment");

@@ -19,6 +19,7 @@ import type { ThreadGoalSetParams } from "../codex/generated/v2/ThreadGoalSetPar
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
 import type { ThreadRollbackParams } from "../codex/generated/v2/ThreadRollbackParams.js";
+import type { ThreadSectionMoveParams } from "../codex/generated/v2/ThreadSectionMoveParams.js";
 import type { ThreadSettingsUpdateParams } from "../codex/generated/v2/ThreadSettingsUpdateParams.js";
 import type { ThreadSettings } from "../codex/generated/v2/ThreadSettings.js";
 import type { ThreadInjectItemsParams } from "../codex/generated/v2/ThreadInjectItemsParams.js";
@@ -37,10 +38,10 @@ import type { ClaudeService } from "../claude/service.js";
 import { connectStock } from "../codex/stockConnection.js";
 import type { Logger } from "../observability/logger.js";
 import { isRequest, isResponse, parseRpcMessage } from "../protocol/envelopes.js";
-import { RpcError, rpcCodexErrorInfo, rpcError } from "../protocol/errors.js";
+import { RpcError, invalidParams, rpcCodexErrorInfo, rpcError } from "../protocol/errors.js";
 import { mergedModelList } from "./modelList.js";
 import { providerSkillsList } from "./skillList.js";
-import { StockRpc } from "./stockRpc.js";
+import { StockRpc, findStockSection } from "./stockRpc.js";
 import type { SubscriptionHub } from "./subscriptions.js";
 import type { CursorCodec } from "../protocol/cursor.js";
 import { ThreadCatalog } from "./threadList.js";
@@ -782,21 +783,30 @@ export function attachClientConnection(
           sendResult(message.id, await claude.readRateLimits(backend));
           return;
         }
-        if (message.method === "account/usage/read" && foreground?.provider === "claude") {
-          // The captured App status flow does not request this method. If a
-          // client does, lifetime/streak Codex statistics have no Claude
-          // equivalent and must not be mislabelled as provider usage.
-          sendResult(message.id, {
-            summary: {
-              lifetimeTokens: null,
-              peakDailyTokens: null,
-              longestRunningTurnSec: null,
-              currentStreakDays: null,
-              longestStreakDays: null,
-            },
-            dailyUsageBuckets: null,
-          });
-          return;
+        if (message.method === "account/usage/read") {
+          // 0.149.1 adds an optional per-thread scope. Route by the requested
+          // thread's owner; only the legacy parameterless call uses foreground.
+          const requestedThreadId = (message.params as { threadId?: string | null } | null)?.threadId;
+          const claudeScoped = requestedThreadId
+            ? (handoffs.logical?.(requestedThreadId)?.epoch.provider === "claude"
+              || claude.ownsThread(requestedThreadId))
+            : foreground?.provider === "claude";
+          if (claudeScoped) {
+            // Lifetime/streak Codex statistics have no Claude equivalent and
+            // must not be mislabelled as provider usage.
+            sendResult(message.id, {
+              summary: {
+                lifetimeTokens: null,
+                peakDailyTokens: null,
+                longestRunningTurnSec: null,
+                currentStreakDays: null,
+                longestStreakDays: null,
+              },
+              dailyUsageBuckets: null,
+              threadUsage: null,
+            });
+            return;
+          }
         }
         if (message.method === "account/rateLimits/read" && !foreground) diagnoseUnknownStatus("account/rateLimits/read");
         if (message.method === "thread/list") {
@@ -1366,6 +1376,15 @@ export function attachClientConnection(
           }
           if (message.method === "thread/rollback") {
             sendResult(message.id, await claude.rollbackThread((message.params ?? {}) as ThreadRollbackParams));
+            return;
+          }
+          if (message.method === "thread/section/move") {
+            const move = (message.params ?? {}) as ThreadSectionMoveParams;
+            await claude.setThreadSection(
+              params.threadId,
+              move.sectionId === null ? null : await findStockSection(stockRpc, move.sectionId),
+            );
+            sendResult(message.id, {});
             return;
           }
           if (message.method === "thread/compact/start") {

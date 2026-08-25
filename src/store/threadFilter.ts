@@ -42,12 +42,21 @@ export function filterSortThreads(threads: Thread[], params: ThreadListParams): 
     }
     return false;
   };
-  const key = params.sortKey === "updated_at" ? "updatedAt" : params.sortKey === "recency_at" ? "recencyAt" : "createdAt";
+  // Stock's manual within-section order is server-internal and invisible to the
+  // merged catalog, so section_position approximates it by section entry time.
+  const key = params.sortKey === "updated_at" ? "updatedAt"
+    : params.sortKey === "recency_at" ? "recencyAt"
+    : params.sortKey === "section_position" ? "sectionEnteredAt"
+    : "createdAt";
   const direction = params.sortDirection === "asc" ? 1 : -1;
   return threads
     .filter((thread) => !providers || providers.has(thread.modelProvider))
     .filter((thread) => !sources || sources.has(sourceKind(thread)))
-    .filter((thread) => params.isPinned == null || (thread.isPinned ?? false) === params.isPinned)
+    // Tri-state: omitted = all, null = unsectioned only, id = one section.
+    .filter((thread) => params.sectionId === undefined
+      || (thread.section?.id ?? null) === params.sectionId)
+    .filter((thread) => params.projectId === undefined
+      || (thread.projectId ?? null) === params.projectId)
     .filter((thread) => !cwd || cwd.has(cwdIdentity(thread.cwd)))
     .filter((thread) => !search || `${thread.name ?? ""}\n${thread.preview}`.toLocaleLowerCase().includes(search))
     .filter((thread) => !params.parentThreadId || thread.parentThreadId === params.parentThreadId)

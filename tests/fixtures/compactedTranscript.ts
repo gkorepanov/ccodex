@@ -1,7 +1,7 @@
 import type { SessionStoreEntry } from "@anthropic-ai/claude-agent-sdk";
 
 const sessionId = "00000000-0000-4000-8000-000000000001";
-const ids = Array.from({ length: 9 }, (_, index) =>
+const ids = Array.from({ length: 10 }, (_, index) =>
   `00000000-0000-4000-8000-${String(index + 2).padStart(12, "0")}`);
 
 export const compactedTranscript = {
@@ -53,6 +53,14 @@ export const compactedTranscript = {
     {
       type: "user", uuid: ids[8], parentUuid: ids[7], sessionId,
       message: { role: "user", content: "Pending input." },
+    },
+    // SDK 0.3.245 forkSession preserves these non-message markers. The two
+    // UUID-less ones carry no provenance, so fork validation must ignore them.
+    { type: "history-suppression", sessionId, cause: "policy" },
+    { type: "atis-latch", sessionId, atis: "latch-token" },
+    {
+      type: "custom-title", uuid: ids[9], sessionId,
+      customTitle: "Synthetic lighthouse", timestamp: "2026-08-19T10:00:00.000Z",
     },
   ] as unknown as SessionStoreEntry[],
 };

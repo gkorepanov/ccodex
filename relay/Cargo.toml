@@ -16,15 +16,70 @@ tokio-util = "0.7.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 
-# Exact annotated tag object behind npm @openai/codex 0.146.0 / rust-v0.146.0.
-codex-app-server-protocol = { git = "https://github.com/openai/codex.git", rev = "be449751a978f02e5bbba886999662956c7f38f5" }
-codex-app-server-transport = { git = "https://github.com/openai/codex.git", rev = "be449751a978f02e5bbba886999662956c7f38f5" }
-codex-core = { git = "https://github.com/openai/codex.git", rev = "be449751a978f02e5bbba886999662956c7f38f5" }
-codex-login = { git = "https://github.com/openai/codex.git", rev = "be449751a978f02e5bbba886999662956c7f38f5" }
-codex-shell-command = { git = "https://github.com/openai/codex.git", rev = "be449751a978f02e5bbba886999662956c7f38f5" }
+# Exact annotated tag object behind npm @openai/codex 0.149.1 / rust-v0.149.1.
+codex-app-server-protocol = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+# Vendored at the same ref with OutgoingResponse.result relaxed back to raw
+# serde_json::Value so gateway responses relay byte-for-byte; managed by
+# scripts/codex-assets.mjs (sync:codex-assets / check:codex-assets).
+codex-app-server-transport = { path = "vendor/app-server-transport" }
+codex-core = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+codex-login = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+codex-shell-command = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
 
 [dev-dependencies]
 tempfile = "3"
+
+[workspace]
+members = [".", "vendor/app-server-transport"]
+# `cargo build`/`cargo test` target the relay only; the vendored crate builds
+# as a plain dependency and its #[cfg(test)] modules are not vendored at all.
+default-members = ["."]
+
+[workspace.package]
+version = "0.149.1"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.lints.rust]
+
+# Only the vendored transport crate resolves through these; entries mirror the
+# upstream codex-rs workspace at the pinned ref, with path deps rewritten to
+# the pinned git revision so cargo unifies them with the direct deps above.
+[workspace.dependencies]
+codex-api = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+codex-app-server-protocol = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+codex-core = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+codex-login = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+codex-model-provider = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+codex-state = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+codex-uds = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+codex-utils-absolute-path = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+codex-utils-rustls-provider = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+anyhow = "1"
+axum = { version = "0.8", default-features = false }
+base64 = "0.22.1"
+clap = "4"
+constant_time_eq = "0.3.1"
+futures = { version = "0.3", default-features = false }
+gethostname = "1.1.0"
+hmac = "0.12.1"
+httpdate = "1.0.3"
+jsonwebtoken = "9.3.1"
+owo-colors = "4.3.0"
+rand = "0.9"
+serde = { version = "1", features = ["rc"] }
+serde_json = "1"
+sha2 = "0.10"
+time = "0.3.47"
+tokio = "1"
+tokio-tungstenite = { version = "0.28.0", features = [
+    "proxy",
+    "rustls-tls-native-roots",
+] }
+tokio-util = "0.7.18"
+tracing = "0.1.44"
+url = "2"
+uuid = "1"
 
 [profile.release]
 lto = "thin"

@@ -17,7 +17,7 @@ function turn(id: string): Turn {
 
 function thread(id: string, turns: Turn[]): Thread {
   return {
-    id, extra: null, preview: "preview", ephemeral: false, isPinned: false, historyMode: "legacy", modelProvider: "openai", createdAt: 1,
+    id, extra: null, preview: "preview", ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "legacy", modelProvider: "openai", createdAt: 1,
     updatedAt: 2, status: { type: "idle" }, cwd: "/tmp", cliVersion: "test",
     source: "cli", agentNickname: null, agentRole: null, name: "Source", turns,
     recencyAt: 2, forkedFromId: null, parentThreadId: null, canAcceptDirectInput: true, threadSource: "user",
