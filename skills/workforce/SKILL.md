@@ -9,15 +9,24 @@ Be very careful with token usage: be an orchestrator and manager over subagents.
 Especially avoid (!!!) baby-sitting long runs (e.g. training or feature collection) yourself — let gpt-5.6-sol do it for you.
 One more time: NEVER spend your own time/tokens on manual labour such as writing a well-scoped, verifiable, non-production module with clearly defined inputs and outputs.
 
+## Economics
+Never spawn MANY Opus or Fable subagents. Spawn at most 1-2 at a time — they are VERY costly and should only be called when really necessary. Codex is your main workforce: do not even hesitate to spawn 2-3 codex subagents with the same task in parallel, e.g. to make sure at least one of them spots the issue.
+
 ## Rankings
 
-Axes 0–10: INT = intelligence (how hard a well-defined problem it handles unsupervised), RT = research taste, PCQ = production code quality, IF = exact instruction following, ATD = attention to detail. Cost = what I actually pay (OpenAI limits are generous).
+Axes 0–10:
+- INT = intelligence (how hard a well-defined problem it handles unsupervised)
+- RT = research taste
+- PCQ = production code quality
+- IF = exact instruction following
+- ATD = attention to detail
+- Cost = what I actually pay (OpenAI limits are generous)
 
 | model              | cost | INT | RT | PCQ | IF | ATD |
 |--------------------|------|-----|----|-----|----|-----|
 | gpt-5.6-sol (high) | $    | 8   | 5  | 4   | 10 | 10  |
-| opus-5 (high)      | $$   | 8   | 8  | 6   | 8  | 7   |
-| fable-5 (high)     | $$$$ | 9   | 9  | 9   | 8  | 8   |
+| opus-5 (high)      | $$$  | 8   | 8  | 7   | 5  | 6   |
+| fable-5 (high)     | $$$$ | 9   | 9  | 9   | 8  | 6   |
 
 How to apply:
 - Pick the cheapest model whose scores meet the task's bar; when axes conflict for anything that ships, INT & RT >> cost.
@@ -25,7 +34,7 @@ How to apply:
   - Though: you can always run gpt-5.6-sol on any research in parallel — never trust its _research_ conclusions blindly, but it can spot details that e.g. fable-5 might miss.
 - If a cheaper model's output doesn't meet the bar, redo the work with a smarter model without asking me (model choice is yours; the autonomy rules still gate *what* work is allowed). Judge the output, not the price tag: escalating costs less than shipping mediocre work.
 - Never trust agent conclusions blindly. When an agent claims "X is better than Y because <arguments>", the arguments must be backed by substantive, simple, easily explainable cases. If a subagent explains its conclusion in an overly convoluted way — a pile of numbers and plots instead of a clear story — treat the conclusion as unreliable and send another independent subagent to re-verify the ESSENCE.
-- Bulk/mechanical work (explore current codebase, clear-spec implementation, straightforward data analysis, migrations): gpt-5.6-sol — its IF/ATD are top, but PCQ 4 means never ask it to write production code.
+- Bulk/mechanical work (explore current codebase, clear-spec implementation, straightforward data analysis, migrations): gpt-5.6-sol — its IF/ATD are top, but PCQ 4 means never ask it to write production code (though CHECKING production code is a perfect task for it).
 - Anything user-facing (UI, copywriting, API design) needs RT ≥ 7.
 - Reviews of plans/implementations: fable-5. Optionally gpt-5.6-sol as an extra independent perspective.
 - Never use models below the table (Haiku, bare Sonnet, etc.) for actual work.
