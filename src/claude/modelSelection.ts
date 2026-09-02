@@ -56,3 +56,35 @@ export function normalizeClaudeServiceTier(
   if (serviceTier === "priority" && resolveClaudeModel(config, pickerId)) return "fast";
   return serviceTier ?? null;
 }
+
+const CLAUDE_MODEL_VERSION = /^claude-([a-z][a-z0-9]*?)-(\d+)(?:-(\d{1,2})(?=-|$))?/u;
+
+export function parseClaudeModelVersion(value: string): { family: string; version: number } | undefined {
+  const match = CLAUDE_MODEL_VERSION.exec(normalizeClaudeModelIdentifier(value));
+  return match ? { family: match[1]!, version: Number(match[2]) + Number(match[3] ?? 0) / 100 } : undefined;
+}
+
+export type ClaudeModelReplacement = { readonly value: string; readonly reason: "exact" | "family" | "default" };
+
+/**
+ * Picks the catalog entry to use for a requested model value (picker id without prefix).
+ * Exact match first; otherwise the newest catalog entry of the same family (so a retired
+ * `claude-fable-5` lands on `claude-fable-5-1`); otherwise the catalog default, when known.
+ */
+export function pickClaudeModelReplacement(
+  requested: string,
+  available: readonly string[],
+  defaultValue: string | undefined,
+): ClaudeModelReplacement | undefined {
+  const value = normalizeClaudeModelIdentifier(requested);
+  if (available.includes(value)) return { value, reason: "exact" };
+  const family = parseClaudeModelVersion(value)?.family;
+  const candidates = family
+    ? available.map((candidate) => ({ candidate, parsed: parseClaudeModelVersion(candidate) }))
+      .filter((entry) => entry.parsed?.family === family)
+      .sort((a, b) => b.parsed!.version - a.parsed!.version)
+    : [];
+  if (candidates[0]) return { value: candidates[0].candidate, reason: "family" };
+  if (defaultValue && available.includes(defaultValue)) return { value: defaultValue, reason: "default" };
+  return undefined;
+}

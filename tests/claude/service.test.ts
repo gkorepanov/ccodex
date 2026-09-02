@@ -7738,4 +7738,86 @@ You are in a side conversation, not the main thread.`,
     })).runtimeWorkspaceRoots).toEqual([directory, extra]);
     await service.close();
   });
+
+  const catalogEntry = (id: string, efforts: readonly string[]): Model => ({
+    id, model: id, upgrade: null, upgradeInfo: null, availabilityNux: null, displayName: id, description: "test",
+    hidden: false, defaultReasoningEffort: (efforts[0] ?? "medium") as Model["defaultReasoningEffort"],
+    supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort, description: reasoningEffort })) as Model["supportedReasoningEfforts"],
+    inputModalities: ["text"], supportsPersonality: true, additionalSpeedTiers: [], serviceTiers: [],
+    defaultServiceTier: null, isDefault: false, modelSpecialty: null, multiAgentVersion: null,
+  });
+
+  it("migrates a retired Claude model id onto its family successor at thread start and on settings updates", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-model-migration-"));
+    directories.push(directory);
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    const fake = new FakeClaudeQuery();
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), store, fake.factory,
+      { list: async () => [catalogEntry("claude:claude-fable-5-1", ["high", "max"])] },
+    );
+    const started = await service.startThread({ model: "claude:claude-fable-5", cwd: directory });
+    expect(started.model).toBe("claude:claude-fable-5-1");
+    expect(store.getThreadRecord(started.thread.id)).toMatchObject({
+      modelPickerId: "claude:claude-fable-5-1", claudeModelValue: "claude-fable-5-1",
+    });
+    await expect(service.updateThreadSettings({ threadId: started.thread.id, effort: "xhigh" }))
+      .rejects.toThrow("does not support effort");
+    await service.updateThreadSettings({ threadId: started.thread.id, model: "claude:claude-fable-5", effort: "max" });
+    expect(service.currentThreadSettings(started.thread.id)).toMatchObject({ model: "claude:claude-fable-5-1", effort: "max" });
+    await service.close();
+  });
+
+  it("migrates a stored thread onto the current catalog when it is resumed after an upgrade", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-model-migration-resume-"));
+    directories.push(directory);
+    const database = join(directory, "state.sqlite");
+    const first = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), new SqliteHybridStore(database),
+      new FakeClaudeQuery().factory, { list: async () => [catalogEntry("claude:claude-fable-5", ["xhigh"])] },
+    );
+    const started = await first.startThread({ model: "claude:claude-fable-5", cwd: directory });
+    await first.updateThreadSettings({ threadId: started.thread.id, effort: "xhigh" });
+    await first.close();
+
+    const hub = new SubscriptionHub();
+    const secondFake = new FakeClaudeQuery();
+    const store = new SqliteHybridStore(database);
+    const second = new ClaudeService(
+      config(directory), hub, new Logger("error"), store, secondFake.factory,
+      { list: async () => [catalogEntry("claude:claude-fable-5-1", ["high", "max"])] },
+    );
+    const settingsEvents: unknown[] = [];
+    hub.subscribe(started.thread.id, "test", (method, params) => {
+      if (method === "thread/settings/updated") settingsEvents.push(params);
+    });
+    await expect(second.resumeThread(started.thread.id)).resolves.toMatchObject({ model: "claude:claude-fable-5-1" });
+    expect(secondFake.inputs[0]?.options).toMatchObject({ model: "claude-fable-5-1", effort: "high" });
+    expect(store.getThreadRecord(started.thread.id)).toMatchObject({
+      modelPickerId: "claude:claude-fable-5-1", claudeModelValue: "claude-fable-5-1", reasoningEffort: "high",
+    });
+    expect(settingsEvents).toMatchObject([{ threadSettings: { model: "claude:claude-fable-5-1", effort: "high" } }]);
+    await second.close();
+  });
+
+  it("falls back to the catalog default for a retired model without a family successor", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-model-migration-default-"));
+    directories.push(directory);
+    const models = [catalogEntry("claude:claude-opus-5", ["high"])];
+    const withDefault = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), new SqliteHybridStore(join(directory, "a.sqlite")),
+      new FakeClaudeQuery().factory, { list: async () => models, defaultModelId: () => "claude:claude-opus-5" },
+    );
+    await expect(withDefault.startThread({ model: "claude:claude-mythos-5", cwd: directory }))
+      .resolves.toMatchObject({ model: "claude:claude-opus-5" });
+    await withDefault.close();
+
+    const withoutDefault = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), new SqliteHybridStore(join(directory, "b.sqlite")),
+      new FakeClaudeQuery().factory, { list: async () => models },
+    );
+    await expect(withoutDefault.startThread({ model: "claude:claude-mythos-5", cwd: directory }))
+      .rejects.toThrow("is not present in the current account catalog");
+    await withoutDefault.close();
+  });
 });

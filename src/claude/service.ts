@@ -77,9 +77,11 @@ import {
 import { isClaudeStatusCommand } from "./statusCommand.js";
 import { systemNoticeText } from "../gateway/transientNotice.js";
 import {
+  type ClaudeModelReplacement,
   claudeCatalogId,
   normalizeClaudeModelIdentifier,
   normalizeClaudeServiceTier,
+  pickClaudeModelReplacement,
   resolveClaudeModel,
 } from "./modelSelection.js";
 import type {
@@ -117,7 +119,12 @@ interface ModelCatalog {
   list(): Promise<Model[]>;
   invalidate?(): void;
   cachedPickerId?(model: string): string | undefined;
+  cachedModels?(): readonly Model[];
+  defaultModelId?(): string | undefined;
 }
+
+type CatalogLookup = { readonly id: string; readonly model: Model | undefined; readonly reason: ClaudeModelReplacement["reason"] };
+type ModelSelection = { readonly modelPickerId: string; readonly claudeModelValue: string };
 
 type PreparedGoalHandle<T> = { readonly response: T; notify(): Promise<void> };
 type PreparedResume = {
@@ -461,10 +468,11 @@ export class ClaudeService {
           interactiveQuestions: this.config.features?.interactiveQuestions ?? true,
           resolveChildModel: (model) => {
             const value = normalizeClaudeModelIdentifier(model);
-            const modelPickerId = this.modelCatalog?.cachedPickerId?.(value)
-              ?? (value.startsWith(this.config.modelPrefix) ? value : `${this.config.modelPrefix}${value}`);
+            const modelPickerId = value.startsWith(this.config.modelPrefix) ? value : `${this.config.modelPrefix}${value}`;
             const claudeModelValue = resolveClaudeModel(this.config, modelPickerId);
-            return claudeModelValue ? { modelPickerId, claudeModelValue } : undefined;
+            if (!claudeModelValue) return undefined;
+            const lookup = this.cachedCatalogLookup(claudeModelValue);
+            return lookup ? this.catalogSelection(modelPickerId, claudeModelValue, lookup) : { modelPickerId, claudeModelValue };
           },
         },
       ),
@@ -587,12 +595,47 @@ export class ClaudeService {
   }
 
   private withCatalogModel(record: ClaudeThreadRecord): ClaudeThreadRecord {
-    const modelPickerId = this.modelCatalog?.cachedPickerId?.(
-      record.resolvedModel ?? record.claudeModelValue,
-    );
-    if (!modelPickerId || modelPickerId === record.modelPickerId) return record;
-    const claudeModelValue = resolveClaudeModel(this.config, modelPickerId);
-    return claudeModelValue ? { ...record, modelPickerId, claudeModelValue } : record;
+    const lookup = this.cachedCatalogLookup(record.resolvedModel ?? record.claudeModelValue);
+    if (!lookup) return record;
+    const selection = this.catalogSelection(record.modelPickerId, record.claudeModelValue, lookup);
+    return selection.modelPickerId === record.modelPickerId ? record : { ...record, ...selection };
+  }
+
+  /** Finds the catalog entry for a Claude model value, migrating retired ids onto the closest current model. */
+  private catalogLookup(models: readonly Model[], claudeModelValue: string): CatalogLookup | undefined {
+    const catalog = this.modelCatalog!;
+    const cached = catalog.cachedPickerId?.(claudeModelValue);
+    if (cached) return { id: cached, model: models.find((candidate) => candidate.id === cached), reason: "exact" };
+    const prefix = this.config.modelPrefix;
+    const strip = (id: string) => id.slice(prefix.length);
+    const defaultId = catalog.defaultModelId?.();
+    const replacement = pickClaudeModelReplacement(claudeModelValue, models.map((candidate) => strip(candidate.id)),
+      defaultId && strip(defaultId));
+    const model = replacement && models.find((candidate) => strip(candidate.id) === replacement.value);
+    return model ? { id: model.id, model, reason: replacement.reason } : undefined;
+  }
+
+  private cachedCatalogLookup(claudeModelValue: string): CatalogLookup | undefined {
+    return this.modelCatalog && this.catalogLookup(this.modelCatalog.cachedModels?.() ?? [], claudeModelValue);
+  }
+
+  private catalogSelection(modelPickerId: string, claudeModelValue: string, lookup: CatalogLookup): ModelSelection {
+    const prefix = this.config.modelPrefix;
+    if (lookup.id === `${prefix}${claudeModelValue}` || lookup.id === claudeCatalogId(this.config, modelPickerId))
+      return { modelPickerId, claudeModelValue };
+    this.logger.warn("claude.model.migrated", { from: modelPickerId, to: lookup.id, reason: lookup.reason });
+    return { modelPickerId: lookup.id, claudeModelValue: lookup.id.slice(prefix.length) };
+  }
+
+  /** Persists a catalog migration for a stored thread so its runtime starts on a model the account still has. */
+  private async migrateStoredModel(threadId: string): Promise<void> {
+    if (!this.modelCatalog) return;
+    const record = this.requireRecord(threadId, false);
+    const models = await this.modelCatalog.list().catch(() => undefined);
+    const lookup = models && this.catalogLookup(models, record.claudeModelValue);
+    if (!lookup) return;
+    const selection = this.catalogSelection(record.modelPickerId, record.claudeModelValue, lookup);
+    if (selection.modelPickerId !== record.modelPickerId) await this.applySettings({ threadId, model: selection.modelPickerId });
   }
 
   public sideSnapshot(
@@ -711,6 +754,7 @@ export class ClaudeService {
           : {}),
       });
     }
+    await this.migrateStoredModel(threadId);
     await (await this.sessions.getOrCreate(threadId)).materializeRuntime();
     record = await this.sessions.submit<ClaudeThreadRecord>(
       threadId,
@@ -1402,9 +1446,8 @@ export class ClaudeService {
     if (sourceRecord.thread.ephemeral && !sidePromotion) {
       throw invalidParams("Forking this ephemeral Claude source thread is not supported.");
     }
-    const modelPickerId = params.model ?? sourceRecord.modelPickerId;
-    const claudeModelValue = resolveClaudeModel(this.config, modelPickerId);
-    if (!claudeModelValue) throw invalidParams("Cannot fork a Claude thread to a Codex model.");
+    const requestedModel = params.model ?? sourceRecord.modelPickerId;
+    if (!resolveClaudeModel(this.config, requestedModel)) throw invalidParams("Cannot fork a Claude thread to a Codex model.");
     const activeSideFork = Boolean(params.ephemeral === true && params.excludeTurns === true
       && params.threadSource === "user" && !params.lastTurnId && !params.beforeTurnId);
     if (params.permissions && params.sandbox) throw invalidParams("Claude thread fork cannot combine permissions with sandbox.");
@@ -1444,9 +1487,13 @@ export class ClaudeService {
     const sourceBoundaries = source.boundaries.filter((entry) => stableSelectedIds.has(entry.turnId));
     const revisionTurns = sourceTurns.filter((turn) => stableSelectedIds.has(turn.id));
     const revision = branchRevision(sourceRecord, sourceBoundaries, revisionTurns);
-    const serviceTier = normalizeClaudeServiceTier(this.config, modelPickerId,
+    const requestedServiceTier = normalizeClaudeServiceTier(this.config, requestedModel,
       params.serviceTier === undefined ? sourceRecord.serviceTier : params.serviceTier);
-    await this.validateModelSettings(modelPickerId, sourceRecord.reasoningEffort, serviceTier);
+    const { modelPickerId, claudeModelValue, reasoningEffort, serviceTier } = await this.resolveModelSettings(
+      requestedModel, sourceRecord.reasoningEffort, requestedServiceTier,
+    );
+    if (serviceTier !== requestedServiceTier)
+      throw invalidParams(`Claude model '${requestedModel}' does not support the fast service tier.`);
     const boundary = selectedBoundary?.messageUuid ?? sourceBoundaries.at(-1)?.messageUuid;
     const branch = boundary
       ? await this.transcripts.forkWithProvenance(sourceRecord.claudeSessionId, boundary, sourceRecord.thread.cwd,
@@ -1485,7 +1532,7 @@ export class ClaudeService {
     const copiedTurns = sourceTurns.map((turn) => forkProjection(turn, thread.id));
     const record: ClaudeThreadRecord = {
       ...sourceRecord, thread, runtimeWorkspaceRoots,
-      claudeSessionId: branch.sessionId, modelPickerId, claudeModelValue, serviceTier,
+      claudeSessionId: branch.sessionId, modelPickerId, claudeModelValue, serviceTier, reasoningEffort,
       approvalPolicy: params.approvalPolicy ?? sourceRecord.approvalPolicy,
       approvalsReviewer: approvalsReviewer(params.approvalsReviewer, sourceRecord.approvalsReviewer),
       sandboxPolicy: params.permissions
@@ -1997,16 +2044,16 @@ export class ClaudeService {
     params: ThreadStartParams,
     settings?: ThreadSettingsUpdateParams,
   ): Promise<ClaudeThreadRecord> {
-    const modelPickerId = params.model;
-    const claudeModelValue = modelPickerId && resolveClaudeModel(this.config, modelPickerId);
-    if (!modelPickerId || !claudeModelValue)
+    const requestedModel = params.model;
+    if (!requestedModel || !resolveClaudeModel(this.config, requestedModel))
       throw invalidParams("Claude thread requires a configured Claude model or alias.");
     if (params.permissions && params.sandbox) throw invalidParams("Claude thread start cannot combine permissions with sandbox.");
-    const requestedServiceTier = normalizeClaudeServiceTier(this.config, modelPickerId, params.serviceTier);
+    const requestedServiceTier = normalizeClaudeServiceTier(this.config, requestedModel, params.serviceTier);
     if (requestedServiceTier !== null && requestedServiceTier !== "default" && requestedServiceTier !== "fast")
       throw invalidParams(`Unsupported Claude service tier '${requestedServiceTier}'.`);
-    const reasoningEffort = settings?.effort ?? null;
-    const serviceTier = await this.validatedServiceTier(modelPickerId, reasoningEffort, requestedServiceTier);
+    const { modelPickerId, claudeModelValue, reasoningEffort, serviceTier } = await this.resolveModelSettings(
+      requestedModel, settings?.effort ?? null, requestedServiceTier,
+    );
     const createdAt = nowSeconds();
     const workspace = workspaceSelection(params);
     const { cwd, runtimeWorkspaceRoots } = workspace;
@@ -2112,12 +2159,11 @@ export class ClaudeService {
         params.threadId,
         { type: "readThread", includeTurns: false },
       );
-      const modelPickerId = params.model ?? before.modelPickerId;
-      const claudeModelValue = resolveClaudeModel(this.config, modelPickerId);
-      if (!claudeModelValue) throw invalidParams("Cannot switch a Claude thread to a Codex model.");
+      const requestedModel = params.model ?? before.modelPickerId;
+      if (!resolveClaudeModel(this.config, requestedModel)) throw invalidParams("Cannot switch a Claude thread to a Codex model.");
       const requestedServiceTier = normalizeClaudeServiceTier(
         this.config,
-        modelPickerId,
+        requestedModel,
         params.serviceTier === undefined ? before.serviceTier : params.serviceTier,
       );
       if (requestedServiceTier !== null && requestedServiceTier !== "default" && requestedServiceTier !== "fast")
@@ -2129,11 +2175,11 @@ export class ClaudeService {
       const workspaceChanged = cwd !== before.thread.cwd
         || runtimeWorkspaceRoots.length !== storedWorkspaceRoots(before).length
         || runtimeWorkspaceRoots.some((root, index) => root !== storedWorkspaceRoots(before)[index]);
-      const reasoningEffort = params.effort === undefined ? before.reasoningEffort : params.effort;
-      const serviceTier = await this.validatedServiceTier(
-        modelPickerId,
-        reasoningEffort,
+      const { modelPickerId, claudeModelValue, reasoningEffort, serviceTier } = await this.resolveModelSettings(
+        requestedModel,
+        params.effort === undefined ? before.reasoningEffort : params.effort,
         requestedServiceTier,
+        params.effort !== undefined,
       );
       syncCanonicalSettings = requestedServiceTier === "fast" && serviceTier !== "fast";
       const collaborationMode = params.collaborationMode === undefined
@@ -2196,31 +2242,32 @@ export class ClaudeService {
     }
   }
 
-  private async validatedServiceTier(
-    modelId: string,
+  /**
+   * Resolves requested model settings against the account catalog. A model id the catalog no longer
+   * lists is migrated onto its closest current entry instead of failing the request, and an effort the
+   * target model does not support is coerced to that model's default unless it was requested explicitly.
+   */
+  private async resolveModelSettings(
+    modelPickerId: string,
     effort: string | null,
     serviceTier: string | null,
-  ): Promise<string | null> {
-    if (!this.modelCatalog) return serviceTier;
-    const catalogId = claudeCatalogId(this.config, modelId);
-    const model = (await this.modelCatalog.list()).find((candidate) => candidate.id === catalogId);
-    if (!model) throw invalidParams(`Claude model '${modelId}' is not present in the current account catalog.`);
-    if (effort && !model.supportedReasoningEfforts.some((level) => level.reasoningEffort === effort)) {
-      throw invalidParams(`Claude model '${modelId}' does not support effort '${effort}'.`);
-    }
-    return serviceTier === "fast" && !model.serviceTiers.some((tier) => tier.id === "fast")
-      ? null
-      : serviceTier;
-  }
-
-  private async validateModelSettings(
-    modelId: string,
-    effort: string | null,
-    serviceTier: string | null,
-  ): Promise<void> {
-    if (await this.validatedServiceTier(modelId, effort, serviceTier) !== serviceTier) {
-      throw invalidParams(`Claude model '${modelId}' does not support the fast service tier.`);
-    }
+    explicitEffort = false,
+  ): Promise<ModelSelection & { readonly reasoningEffort: string | null; readonly serviceTier: string | null }> {
+    const claudeModelValue = resolveClaudeModel(this.config, modelPickerId)!;
+    if (!this.modelCatalog) return { modelPickerId, claudeModelValue, reasoningEffort: effort, serviceTier };
+    const lookup = this.catalogLookup(await this.modelCatalog.list(), claudeModelValue);
+    const model = lookup?.model;
+    if (!lookup || !model) throw invalidParams(`Claude model '${modelPickerId}' is not present in the current account catalog.`);
+    const selection = this.catalogSelection(modelPickerId, claudeModelValue, lookup);
+    const effortSupported = !effort || model.supportedReasoningEfforts.some((level) => level.reasoningEffort === effort);
+    if (!effortSupported && explicitEffort && selection.modelPickerId === modelPickerId)
+      throw invalidParams(`Claude model '${modelPickerId}' does not support effort '${effort}'.`);
+    if (!effortSupported) this.logger.warn("claude.effort.coerced", { model: model.id, from: effort, to: model.defaultReasoningEffort });
+    return {
+      ...selection,
+      reasoningEffort: effortSupported ? effort : model.supportedReasoningEfforts.length ? model.defaultReasoningEffort : null,
+      serviceTier: serviceTier === "fast" && !model.serviceTiers.some((tier) => tier.id === "fast") ? null : serviceTier,
+    };
   }
 
   private async readStandaloneRateLimitStatus(): Promise<ClaudeRateLimitStatus> {

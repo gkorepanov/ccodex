@@ -141,7 +141,7 @@ describe("Phase 3 ownership boundary", () => {
   });
 
   it("keeps desired-settings persistence and publication session-owned", () => {
-    const settings = section(service, "private async applySettings", "private async validateModelSettings");
+    const settings = section(service, "private async applySettings", "private async resolveModelSettings");
     expect(settings).toContain('type: "updateDesiredSettings"');
     expect(settings).not.toContain("this.store.updateThread");
     expect(settings).not.toContain("this.hub.emit");

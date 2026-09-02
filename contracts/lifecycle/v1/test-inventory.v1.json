@@ -18,8 +18,8 @@
   },
   "counts": {
     "architecture-invariant": 142,
-    "external-contract": 359,
-    "provider-mapping": 69,
+    "external-contract": 362,
+    "provider-mapping": 71,
     "old-implementation-detail": 29
   },
   "cases": [
@@ -578,6 +578,18 @@
     {
       "path": "tests/claude/modelSelection.test.ts",
       "title": "maps Codex priority to Claude fast for aliases and direct Claude models",
+      "classification": "provider-mapping",
+      "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
+    },
+    {
+      "path": "tests/claude/modelSelection.test.ts",
+      "title": "parses Claude model families and versions from catalog ids",
+      "classification": "provider-mapping",
+      "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
+    },
+    {
+      "path": "tests/claude/modelSelection.test.ts",
+      "title": "migrates a retired model id onto the newest entry of its family, else the catalog default",
       "classification": "provider-mapping",
       "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
     },
@@ -1826,6 +1838,24 @@
     {
       "path": "tests/claude/service.test.ts",
       "title": "applies turn-level runtime roots before creating the Claude runtime",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "migrates a retired Claude model id onto its family successor at thread start and on settings updates",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "migrates a stored thread onto the current catalog when it is resumed after an upgrade",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "falls back to the catalog default for a retired model without a family successor",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },

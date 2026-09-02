@@ -81,6 +81,11 @@ export function mapClaudeModels(models: readonly ModelInfo[], prefix: string): M
     .map((model) => mapClaudeModel(model, prefix));
 }
 
+export function claudeDefaultModelValue(models: readonly ModelInfo[]): string | undefined {
+  const resolved = models.find((model) => model.value === "default")?.resolvedModel;
+  return resolved ? normalizeClaudeModelIdentifier(resolved) : undefined;
+}
+
 export function claudeModelPickerIds(models: readonly ModelInfo[], prefix: string): ReadonlyMap<string, string> {
   const ids = new Map<string, string>();
   for (const model of models) {
@@ -105,6 +110,7 @@ export class ClaudeModelCatalog {
   } | undefined;
   private loading: Promise<Model[]> | undefined;
   private pickerIds: ReadonlyMap<string, string> = new Map();
+  private defaultValue: string | undefined;
 
   public constructor(
     private readonly config: HybridConfig,
@@ -131,6 +137,14 @@ export class ClaudeModelCatalog {
     const value = normalized.startsWith(this.config.modelPrefix)
       ? normalized.slice(this.config.modelPrefix.length) : normalized;
     return this.pickerIds.get(value);
+  }
+
+  public cachedModels(): readonly Model[] {
+    return this.cache?.models ?? [];
+  }
+
+  public defaultModelId(): string | undefined {
+    return this.defaultValue && `${this.config.modelPrefix}${this.defaultValue}`;
   }
 
   private async load(): Promise<Model[]> {
@@ -160,6 +174,7 @@ export class ClaudeModelCatalog {
       await sdkQuery.interrupt();
       const mapped = mapClaudeModels(models, this.config.modelPrefix);
       this.pickerIds = claudeModelPickerIds(models, this.config.modelPrefix);
+      this.defaultValue = claudeDefaultModelValue(models);
       this.cache = {
         key: this.cacheKey(),
         expiresAt: Date.now() + this.config.modelCacheSeconds * 1_000,
