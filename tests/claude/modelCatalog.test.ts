@@ -46,6 +46,28 @@ describe("mapClaudeModel", () => {
     });
   });
 
+  it("maps the Fable 5.1 catalog entry observed on claude-code 2.1.258", () => {
+    expect(mapClaudeModel({
+      value: "claude-fable-5-1",
+      resolvedModel: "claude-fable-5-1",
+      displayName: "Fable 5.1",
+      description: "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+      supportsEffort: true,
+      supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+    }, "claude:")).toMatchObject({
+      id: "claude:claude-fable-5-1",
+      model: "claude:claude-fable-5-1",
+      displayName: "Fable 5.1",
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: [
+        { reasoningEffort: "low" }, { reasoningEffort: "medium" }, { reasoningEffort: "high" },
+        { reasoningEffort: "xhigh" }, { reasoningEffort: "max" },
+      ].map((effort) => expect.objectContaining(effort)),
+      serviceTiers: [],
+      defaultServiceTier: null,
+    });
+  });
+
   it("hides the moving default alias and shows concise explicit versions", () => {
     const models = mapClaudeModels([{
       value: "default",

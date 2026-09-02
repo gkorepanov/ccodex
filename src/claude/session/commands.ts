@@ -133,7 +133,8 @@ export type MainStreamFact =
   | { readonly kind: "taskOutput"; readonly taskId: string; readonly delta: string }
   | { readonly kind: "taskComplete"; readonly taskId: string; readonly providerId?: string;
       readonly status: "completed" | "failed" | "stopped"; readonly summary: string;
-      readonly outputFile?: string; readonly durationMs?: number; readonly outputDrained?: boolean }
+      readonly outputFile?: string; readonly durationMs?: number; readonly outputDrained?: boolean;
+      readonly resourceLinks?: readonly { readonly uri: string; readonly name: string; readonly title?: string }[] }
   | { readonly kind: "taskStop"; readonly taskIds?: readonly string[]; readonly reason: string }
   | { readonly kind: "evict"; readonly itemIds: readonly string[] }
   | { readonly kind: "scopeFinish"; readonly status: "completed" | "interrupted" | "failed"; readonly message?: string }

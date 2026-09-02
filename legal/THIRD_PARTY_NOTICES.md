@@ -1111,15 +1111,15 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:zvariant | 4.2.0 | MIT |
 | cargo:zvariant_derive | 4.2.0 | MIT |
 | cargo:zvariant_utils | 2.1.0 | MIT |
-| npm:@anthropic-ai/claude-agent-sdk | 0.3.245 | SEE LICENSE IN README.md |
-| npm:@anthropic-ai/claude-agent-sdk-darwin-arm64 | 0.3.245 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-darwin-x64 | 0.3.245 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-linux-arm64 | 0.3.245 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-linux-arm64-musl | 0.3.245 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-linux-x64 | 0.3.245 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-linux-x64-musl | 0.3.245 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-win32-arm64 | 0.3.245 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-win32-x64 | 0.3.245 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk | 0.3.258 | SEE LICENSE IN README.md |
+| npm:@anthropic-ai/claude-agent-sdk-darwin-arm64 | 0.3.258 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-darwin-x64 | 0.3.258 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-linux-arm64 | 0.3.258 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-linux-arm64-musl | 0.3.258 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-linux-x64 | 0.3.258 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-linux-x64-musl | 0.3.258 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-win32-arm64 | 0.3.258 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-win32-x64 | 0.3.258 | SEE LICENSE IN LICENSE.md |
 | npm:@anthropic-ai/sdk | 0.111.0 | MIT |
 | npm:@babel/runtime | 7.29.7 | MIT |
 | npm:@emnapi/core | 1.11.1 | MIT |

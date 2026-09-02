@@ -3400,6 +3400,46 @@ You are in a side conversation, not the main thread.`,
     await service.close();
   });
 
+  it("hides ambient housekeeping tasks from the transcript and task activity", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-ambient-"));
+    directories.push(directory);
+    const hub = new SubscriptionHub();
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    const base = { session_id: "session" };
+    const messages = [
+      { type: "command_lifecycle", command_uuid: randomUUID(), state: "queued", uuid: randomUUID(), ...base },
+      { type: "system", subtype: "task_started", task_id: "watcher-1", description: "Live update watcher", subagent_type: "Explore", ambient: true, uuid: randomUUID(), ...base },
+      { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "watcher-1", ambient: true }], uuid: randomUUID(), ...base },
+      { type: "system", subtype: "task_notification", task_id: "watcher-1", status: "completed", output_file: "/tmp/watcher", summary: "Watcher finished", ambient: true, uuid: randomUUID(), ...base },
+      { type: "system", subtype: "background_tasks_changed", tasks: [], uuid: randomUUID(), ...base },
+      { type: "command_lifecycle", command_uuid: randomUUID(), state: "completed", uuid: randomUUID(), ...base },
+    ] as unknown as SDKMessage[];
+    const result = {
+      type: "result", subtype: "success", duration_ms: 15, duration_api_ms: 12, is_error: false,
+      num_turns: 1, result: "OK", stop_reason: "end_turn", total_cost_usd: 0,
+      usage: { input_tokens: 4, output_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      modelUsage: {}, permission_denials: [], uuid: randomUUID(), ...base,
+    } as unknown as SDKMessage;
+    const fake = new FakeClaudeQuery(undefined, undefined, [], false, undefined, result, undefined, messages);
+    const service = new ClaudeService(config(directory), hub, new Logger("error"), store, fake.factory);
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const prepared = await service.prepareTurn({
+      threadId: started.thread.id,
+      input: [{ type: "text", text: "quiet housekeeping", text_elements: [] }],
+    });
+    prepared.announce();
+    prepared.start();
+    await waitFor(
+      () => service.readThread(started.thread.id, true).thread.turns[0]?.status === "completed",
+      "ambient turn completion",
+    );
+    const turns = service.readThread(started.thread.id, true).thread.turns;
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.items.some((item) => item.type === "collabAgentToolCall")).toBe(false);
+    expect(turns[0]?.items.some((item) => item.id.includes("watcher-1"))).toBe(false);
+    await service.close();
+  });
+
   it("steers App turn/start into the active turn after Claude yields to background work", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-start-as-steer-"));
     directories.push(directory);

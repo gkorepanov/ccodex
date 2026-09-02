@@ -365,6 +365,52 @@ describe("ClaudeSession Phase 3 slice", () => {
     await registry.close();
   });
 
+  it("appends MCP resource links to a backgrounded MCP result", async () => {
+    const { store, registry } = harness();
+    await registry.submit("thread-1", { type: "createThread", record: record("thread-1") });
+    await registry.submit("thread-1", { type: "attachRuntime", runtimeGeneration: 1 });
+    const prepared = await registry.submit<{ turn: Turn }>("thread-1", {
+      type: "prepareTurn",
+      params: {
+        threadId: "thread-1",
+        input: [{ type: "text", text: "run slow MCP", text_elements: [] }],
+      },
+    });
+    const source = { providerEventId: "linked-mcp", providerEventType: "test" };
+    await registry.submit("thread-1", {
+      type: "mainStream", runtimeGeneration: 1, source,
+      fact: {
+        kind: "toolStart", index: 0,
+        block: { type: "mcp_tool_use", id: "mcp-tool", name: "mcp__server__slow", input: {} },
+      },
+    });
+    await registry.submit("thread-1", {
+      type: "mainStream", runtimeGeneration: 1, source,
+      fact: {
+        kind: "taskStart", taskId: "mcp-task", providerId: "mcp-tool",
+        description: "Slow MCP call", confirmed: true,
+      },
+    });
+    await registry.submit("thread-1", {
+      type: "mainStream", runtimeGeneration: 1, source,
+      fact: {
+        kind: "taskComplete", taskId: "mcp-task", providerId: "mcp-tool",
+        status: "completed", summary: "MCP completed",
+        resourceLinks: [
+          { uri: "file:///tmp/report.md", name: "report.md", title: "Report" },
+          { uri: "file:///tmp/data.csv", name: "data.csv" },
+        ],
+      },
+    });
+
+    const item = store.getTurn("thread-1", prepared.turn.id)?.items.find((candidate) => candidate.id === "mcp-tool");
+    expect(item).toMatchObject({
+      type: "mcpToolCall", status: "completed",
+      result: { content: [{ type: "text", text: "MCP completed\nReport: file:///tmp/report.md\ndata.csv: file:///tmp/data.csv" }] },
+    });
+    await registry.close();
+  });
+
   it("holds goal continuation behind every pending resume snapshot", async () => {
     const lifecycle: SessionLifecycleUpdate[] = [];
     const { store, registry } = harness((update) => lifecycle.push(update));
@@ -1347,7 +1393,7 @@ describe("ClaudeSession Phase 3 slice", () => {
         runtimeGeneration: 5,
         providerSessionId: "wrong",
         model: "haiku",
-        cliVersion: "2.1.245",
+        cliVersion: "2.1.258",
       },
     )).rejects.toThrow("expected 'claude-thread-1'");
     await registry.submit("thread-1", {
@@ -1355,12 +1401,12 @@ describe("ClaudeSession Phase 3 slice", () => {
       runtimeGeneration: 5,
       providerSessionId: "claude-thread-1",
       model: "claude-haiku-4-5",
-      cliVersion: "2.1.245",
+      cliVersion: "2.1.258",
     });
     expect(store.getThreadRecord("thread-1")).toMatchObject({
       resolvedModel: "claude-haiku-4-5",
-      claudeCodeVersion: "2.1.245",
-      thread: { cliVersion: "2.1.245" },
+      claudeCodeVersion: "2.1.258",
+      thread: { cliVersion: "2.1.258" },
     });
     await registry.submit("thread-1", {
       type: "runtimeInitialized",
@@ -1387,7 +1433,7 @@ describe("ClaudeSession Phase 3 slice", () => {
       runtimeGeneration: 1,
       providerSessionId: "claude-thread-1",
       model: "claude-sonnet-5",
-      cliVersion: "2.1.245",
+      cliVersion: "2.1.258",
       fastModeState: "off",
       fastModeDisabledReason: "extra_usage_disabled",
     });
@@ -1418,7 +1464,7 @@ describe("ClaudeSession Phase 3 slice", () => {
       runtimeGeneration: 1,
       providerSessionId: "claude-thread-1",
       model: "claude-sonnet-5",
-      cliVersion: "2.1.245",
+      cliVersion: "2.1.258",
       fastModeState: "on",
     });
     expect(store.getThreadRecord("thread-1")?.serviceTier).toBe("fast");

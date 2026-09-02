@@ -17,9 +17,9 @@
     ]
   },
   "counts": {
-    "architecture-invariant": 141,
-    "external-contract": 350,
-    "provider-mapping": 68,
+    "architecture-invariant": 142,
+    "external-contract": 359,
+    "provider-mapping": 69,
     "old-implementation-detail": 29
   },
   "cases": [
@@ -218,6 +218,30 @@
     {
       "path": "tests/claude/contextUsage.test.ts",
       "title": "replays the same persisted 298k snapshot on reconnect and gateway restart",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/developerInstructions.test.ts",
+      "title": "removes App context while preserving side-conversation instructions",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/developerInstructions.test.ts",
+      "title": "removes every App-context block and preserves other instructions",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/developerInstructions.test.ts",
+      "title": "preserves CCodex and user instructions unchanged",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/developerInstructions.test.ts",
+      "title": "keeps the owned UI contract compact and provider-accurate",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
@@ -512,6 +536,12 @@
     {
       "path": "tests/claude/modelCatalog.test.ts",
       "title": "uses a clean resolved id when Claude leaks terminal styling into model values",
+      "classification": "provider-mapping",
+      "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
+    },
+    {
+      "path": "tests/claude/modelCatalog.test.ts",
+      "title": "maps the Fable 5.1 catalog entry observed on claude-code 2.1.258",
       "classification": "provider-mapping",
       "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
     },
@@ -1111,6 +1141,18 @@
     },
     {
       "path": "tests/claude/service.test.ts",
+      "title": "removes Codex App context before persisting Claude instructions",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "cleans persisted App context when the Claude service starts",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
       "title": "maps Codex permission controls to native Claude modes and persists the auto reviewer",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
@@ -1340,6 +1382,18 @@
     {
       "path": "tests/claude/service.test.ts",
       "title": "keeps background continuation and its final answer in the originating logical turn",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "hides ambient housekeeping tasks from the transcript and task activity",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "steers App turn/start into the active turn after Claude yields to background work",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
@@ -2144,6 +2198,12 @@
     {
       "path": "tests/claude/session/session.test.ts",
       "title": "keeps an auto-backgrounded MCP call on one item through progress and completion",
+      "classification": "architecture-invariant",
+      "rationale": "Freezes bounded mailbox, single-owner session routing, ordering, backpressure, and shutdown invariants required by the lifecycle rewrite."
+    },
+    {
+      "path": "tests/claude/session/session.test.ts",
+      "title": "appends MCP resource links to a backgrounded MCP result",
       "classification": "architecture-invariant",
       "rationale": "Freezes bounded mailbox, single-owner session routing, ordering, backpressure, and shutdown invariants required by the lifecycle rewrite."
     },
@@ -3043,7 +3103,13 @@
     },
     {
       "path": "tests/gateway/providerRateLimits.test.ts",
-      "title": "shows one branded downgrade notice and continues an unsupported Fast turn",
+      "title": "silently continues an unsupported Fast turn in Standard",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/gateway/providerRateLimits.test.ts",
+      "title": "returns both skill catalogs while the App model selection is unknown",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },

@@ -156,7 +156,7 @@ keep working):
 |---|---|
 | **CCodex** | `0.4.8` |
 | **Embedded Codex CLI** | `0.149.1` (pinned; a newer global Codex never replaces it) |
-| **Claude Agent SDK / Claude Code** | `0.3.245` / `2.1.245` |
+| **Claude Agent SDK / Claude Code** | `0.3.258` / `2.1.258` |
 | **Runtime** | Node.js `>=22.13 <27`, npm `>=10` |
 | **Platforms** | macOS 11+ (arm64) · Linux arm64 & x64, glibc ≥2.31 (Ubuntu 22.04+, Debian 11+, Fedora/RHEL equivalents). Alpine/musl not supported |
 | **Shells** | Bash, Zsh, Fish |

@@ -1922,7 +1922,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       return handled ? "projected" : "retainedOnly";
     }
     if (message.type === "system" && message.subtype === "task_started") {
-      if (message.skip_transcript) return "stateOnly";
+      if (message.skip_transcript || message.ambient) return "stateOnly";
       const owner = await this.providerInteractionOwner(
         runtimeGeneration,
         message.tool_use_id,
@@ -1957,6 +1957,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       return "projected";
     }
     if (message.type === "system" && message.subtype === "task_notification") {
+      if (message.skip_transcript || message.ambient) return "stateOnly";
       const owner = await this.providerInteractionOwner(
         runtimeGeneration,
         message.tool_use_id ?? message.task_id,
@@ -1983,6 +1984,13 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         status: message.status,
         summary: message.summary,
         outputFile: message.output_file,
+        ...(message.resource_links?.length
+          ? {
+            resourceLinks: message.resource_links.map((link) => ({
+              uri: link.uri, name: link.name, ...(link.title ? { title: link.title } : {}),
+            })),
+          }
+          : {}),
         ...(message.usage?.duration_ms === undefined
           ? {}
           : { durationMs: message.usage.duration_ms }),
@@ -1992,7 +2000,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     if (message.type === "system" && message.subtype === "background_tasks_changed") {
       await this.applyProviderMainStream(projection, runtimeGeneration, {
         kind: "taskMembership",
-        taskIds: message.tasks.map((task) => task.task_id),
+        taskIds: message.tasks.filter((task) => !task.ambient).map((task) => task.task_id),
       });
       return "stateOnly";
     }
@@ -7905,7 +7913,11 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
             fact.status !== "completed", { ...(fact.durationMs === undefined ? {} : { duration_ms: fact.durationMs }),
               ...(exit ? { exit_code: Number(exit) } : {}) }, source, false);
         } else if (item?.type === "mcpToolCall" && tool) {
-          this.completeTool(ownerTurn, ownerState, tool, fact.summary, fact.status !== "completed",
+          const links = fact.resourceLinks?.length
+            ? `${fact.summary ? "\n" : ""}${fact.resourceLinks
+              .map((link) => `${link.title ?? link.name}: ${link.uri}`).join("\n")}`
+            : "";
+          this.completeTool(ownerTurn, ownerState, tool, `${fact.summary}${links}`, fact.status !== "completed",
             fact.durationMs === undefined ? undefined : { duration_ms: fact.durationMs }, source, false);
         } else if (item?.type === "collabAgentToolCall") {
           item.status = fact.status === "completed" ? "completed" : "failed";
