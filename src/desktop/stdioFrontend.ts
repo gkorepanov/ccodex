@@ -4,6 +4,7 @@ import type { Writable } from "node:stream";
 import WebSocket from "ws";
 import type { HybridConfig } from "../config/config.js";
 import { runDaemonCommand } from "../daemon/daemon.js";
+import { applyLaunchConfig } from "./launchConfig.js";
 
 const INITIAL_CONNECT_DEADLINE_MS = 20_000;
 const RETRY_DELAY_MS = 200;
@@ -29,6 +30,7 @@ export interface StdioFrontendDeps {
   readonly kick?: (config: HybridConfig) => Promise<void>;
   readonly initialConnectDeadlineMs?: number;
   readonly retryDelayMs?: number;
+  readonly configOverrides?: readonly string[];
 }
 
 function parseEnvelope(line: string): RpcEnvelope | undefined {
@@ -109,6 +111,7 @@ class StdioFrontend {
     private readonly kick: (config: HybridConfig) => Promise<void>,
     private readonly initialConnectDeadlineMs: number,
     private readonly retryDelayMs: number,
+    private readonly configOverrides: readonly string[],
   ) {
     this.reader = createInterface({ input });
     this.output = output as Writable;
@@ -192,6 +195,7 @@ class StdioFrontend {
 
   private enqueueInput(line: string): void {
     if (line.length === 0) return;
+    line = applyLaunchConfig(line, this.configOverrides);
     const envelope = parseEnvelope(line);
     if (envelope?.id !== undefined && envelope.method === "initialize") {
       this.initializeLine = line;
@@ -321,5 +325,6 @@ export function runStdioFrontend(
     deps.kick ?? defaultKick,
     deps.initialConnectDeadlineMs ?? INITIAL_CONNECT_DEADLINE_MS,
     deps.retryDelayMs ?? RETRY_DELAY_MS,
+    deps.configOverrides ?? [],
   ).run();
 }

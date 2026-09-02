@@ -731,7 +731,7 @@ describe("ClaudeSession Phase 3 slice", () => {
       runtimeGeneration: 1,
       settingsGeneration: 0,
       messageUuid: "competing-stage",
-    })).resolves.toEqual({ kind: "busy" });
+    })).resolves.toEqual({ kind: "busy", activeTurnId: null });
     await expect(registry.submit("thread-1", {
       type: "prepareTurn",
       params: { threadId: "thread-1", input: [] },

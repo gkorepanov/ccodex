@@ -137,6 +137,56 @@ describe("desktop stdio frontend", () => {
     expect(await done).toBe(0);
   });
 
+  it("combines the Codex App launch transport with its per-thread tool selection", async () => {
+    const path = socketPath();
+    const gateway = await startFakeGateway(path);
+    const input = new PassThrough();
+    const { output, text } = collector();
+    const done = runStdioFrontend(config, path, {
+      input,
+      output,
+      kick: async () => undefined,
+      initialConnectDeadlineMs: 5_000,
+      retryDelayMs: 20,
+      configOverrides: [
+        "features.code_mode_host=true",
+        "mcp_servers.codex_app={ command=\"/app-tools/launch\", args=[\"./server.mjs\"], env={ CODEX_APP_TOOLS_PIPE_PATH=\"/tmp/app.sock\" } }",
+      ],
+    });
+
+    input.write('{"id":1,"method":"initialize"}\n');
+    await waitFor(() => text().includes('{"id":1,"result":{}}\n'));
+    input.write(`${JSON.stringify({
+      id: 2,
+      method: "thread/resume",
+      params: {
+        threadId: "thread-1",
+        config: { "mcp_servers.codex_app.enabled_tools": ["automation_update", "browser_use"] },
+      },
+    })}\n`);
+    await waitFor(() => text().includes('"id":2,"result"'));
+
+    expect(JSON.parse(gateway.received[1]!)).toEqual({
+      id: 2,
+      method: "thread/resume",
+      params: {
+        threadId: "thread-1",
+        config: {
+          "features.code_mode_host": true,
+          "mcp_servers.codex_app": {
+            command: "/app-tools/launch",
+            args: ["./server.mjs"],
+            env: { CODEX_APP_TOOLS_PIPE_PATH: "/tmp/app.sock" },
+            enabled_tools: ["automation_update", "browser_use"],
+          },
+        },
+      },
+    });
+
+    input.end();
+    expect(await done).toBe(0);
+  });
+
   it("lazily starts a cold gateway without losing the initialize request", async () => {
     const path = socketPath();
     let gateway: Awaited<ReturnType<typeof startFakeGateway>> | undefined;

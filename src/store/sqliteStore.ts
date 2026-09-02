@@ -15,6 +15,7 @@ import type {
 } from "./HybridStore.js";
 import { settingsGeneration, withSettingsFrom } from "./HybridStore.js";
 import { filterSortThreads } from "./threadFilter.js";
+import { withoutAppContext } from "../protocol/appContext.js";
 
 interface ThreadRow {
   thread_json: string;
@@ -1010,6 +1011,7 @@ export class SqliteHybridStore implements HybridStore {
       this.ensureColumn("threads", "claude_code_version", "TEXT");
       this.ensureColumn("threads", "runtime_settings_json", "TEXT");
       this.ensureColumn("threads", "deletion_pending", "INTEGER NOT NULL DEFAULT 0");
+      this.ensureColumn("threads", "developer_instructions", "TEXT");
       const threadColumns = new Set((this.database.prepare("PRAGMA table_info(threads)").all() as Array<{ name: string }>)
         .map((column) => column.name));
       if (threadColumns.has("claude_session_id") && threadColumns.has("cwd")) {
@@ -1058,6 +1060,23 @@ export class SqliteHybridStore implements HybridStore {
           `);
         }
         this.database.exec("INSERT INTO schema_migrations(version) VALUES (8)");
+      }
+      const cleanDeveloperInstructions = this.database.prepare(
+        "SELECT 1 FROM schema_migrations WHERE version = 9",
+      ).get();
+      if (!cleanDeveloperInstructions) {
+        const rows = this.database.prepare(`
+          SELECT id, developer_instructions
+          FROM threads
+          WHERE developer_instructions LIKE '%<app-context>%</app-context>%'
+        `).all() as unknown as Array<{ id: string; developer_instructions: string }>;
+        const update = this.database.prepare(
+          "UPDATE threads SET developer_instructions = ? WHERE id = ?",
+        );
+        for (const row of rows) {
+          update.run(withoutAppContext(row.developer_instructions), row.id);
+        }
+        this.database.exec("INSERT INTO schema_migrations(version) VALUES (9)");
       }
       this.database.exec("DROP TABLE IF EXISTS items");
     });

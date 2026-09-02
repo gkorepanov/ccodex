@@ -79,10 +79,25 @@ describe("classifyInvocation", () => {
 
   it("routes bare and explicit stdio app-server launches through the existing gateway", () => {
     expect(classifyInvocation(["app-server", "--analytics-default-enabled"], config))
-      .toEqual({ kind: "stdioFrontend", socketPath: "/tmp/hybrid.sock" });
+      .toEqual({ kind: "stdioFrontend", socketPath: "/tmp/hybrid.sock", configOverrides: [] });
     expect(classifyInvocation(["app-server", "--stdio"], config))
-      .toEqual({ kind: "stdioFrontend", socketPath: "/tmp/hybrid.sock" });
+      .toEqual({ kind: "stdioFrontend", socketPath: "/tmp/hybrid.sock", configOverrides: [] });
     expect(classifyInvocation(["app-server", "--listen", "unix://"], config))
       .toMatchObject({ kind: "gateway", socketPath: "/tmp/hybrid.sock" });
+  });
+
+  it("preserves Codex App launch config for the stdio connection", () => {
+    expect(classifyInvocation([
+      "-c", "features.code_mode_host=true",
+      "--config=mcp_servers.codex_app={ command=\"app-tools\" }",
+      "app-server",
+    ], config)).toEqual({
+      kind: "stdioFrontend",
+      socketPath: "/tmp/hybrid.sock",
+      configOverrides: [
+        "features.code_mode_host=true",
+        "mcp_servers.codex_app={ command=\"app-tools\" }",
+      ],
+    });
   });
 });

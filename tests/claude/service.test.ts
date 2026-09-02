@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -21,7 +22,9 @@ import type {
   ProviderEventDisposition,
 } from "../../src/store/HybridStore.js";
 import { SqliteHybridStore } from "../../src/store/sqliteStore.js";
+import { MemoryHybridStore } from "../../src/store/memoryStore.js";
 import { FakeClaudeQuery } from "../fixtures/fakeClaudeQuery.js";
+import { CCODEX_APP_UI_INSTRUCTIONS } from "../../src/claude/developerInstructions.js";
 import type { TranscriptBrancher } from "../../src/claude/transcriptBrancher.js";
 import {
   deferredSettingsUpdate,
@@ -997,10 +1000,65 @@ describe("ClaudeService", () => {
     expect(fake.inputs[0]?.options.systemPrompt).toEqual({
       type: "preset",
       preset: "claude_code",
-      append: "Base contract.\n\nDeveloper contract.\n\nBe direct, pragmatic, and focused on concrete outcomes.",
+      append: `${CCODEX_APP_UI_INSTRUCTIONS}\n\nBase contract.\n\nDeveloper contract.\n\nBe direct, pragmatic, and focused on concrete outcomes.`,
     });
     expect(fake.inputs[0]?.options.disallowedTools).toEqual(["SendFeedback", "ProposeSkills"]);
     await service.close();
+  });
+
+  it("removes Codex App context before persisting Claude instructions", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-app-instructions-"));
+    directories.push(directory);
+    const store = new MemoryHybridStore();
+    const service = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), store, new FakeClaudeQuery().factory,
+    );
+    const started = await service.startThread({
+      model: "claude:haiku",
+      cwd: directory,
+      developerInstructions: `<app-context>Unavailable App tools.</app-context>
+
+You are in a side conversation.`,
+    });
+    expect(store.getThreadRecord(started.thread.id)?.developerInstructions).toBe(
+      "You are in a side conversation.",
+    );
+    await service.close();
+  });
+
+  it("cleans persisted App context when the Claude service starts", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-legacy-app-instructions-"));
+    directories.push(directory);
+    const database = join(directory, "state.sqlite");
+    const originalStore = new SqliteHybridStore(database);
+    const originalService = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), originalStore, new FakeClaudeQuery().factory,
+    );
+    const started = await originalService.startThread({ model: "claude:haiku", cwd: directory });
+    await originalService.close();
+
+    const legacyStore = new SqliteHybridStore(database);
+    legacyStore.updateThread({
+      ...legacyStore.getThreadRecord(started.thread.id, true)!,
+      developerInstructions: `<app-context>Legacy App context.</app-context>
+
+[Cross-provider compact handoff]
+Keep this summary.
+[End cross-provider compact handoff]`,
+    });
+    legacyStore.close();
+    const legacyDatabase = new DatabaseSync(database);
+    legacyDatabase.exec("DELETE FROM schema_migrations WHERE version = 9");
+    legacyDatabase.close();
+
+    const migratedStore = new SqliteHybridStore(database);
+    const migratedService = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"), migratedStore, new FakeClaudeQuery().factory,
+    );
+    expect(migratedStore.getThreadRecord(started.thread.id)?.developerInstructions).toBe(
+      "[Cross-provider compact handoff]\nKeep this summary.\n[End cross-provider compact handoff]",
+    );
+    await migratedService.close();
   });
 
   it("maps Codex permission controls to native Claude modes and persists the auto reviewer", async () => {
@@ -2379,7 +2437,11 @@ describe("ClaudeService", () => {
     const fork = await service.forkThread({
       threadId: source.thread.id,
       threadSource: "user",
-      developerInstructions: "Captured App /side instructions.",
+      developerInstructions: `<app-context>
+Unavailable Codex App tools.
+</app-context>
+
+You are in a side conversation, not the main thread.`,
       ephemeral: true,
       excludeTurns: true,
     });
@@ -2467,9 +2529,11 @@ describe("ClaudeService", () => {
       systemPrompt: {
         type: "preset",
         preset: "claude_code",
-        append: expect.stringContaining("Captured App /side instructions."),
+        append: expect.stringContaining("You are in a side conversation, not the main thread."),
       },
     });
+    expect(JSON.stringify(side.inputs[0]?.options.systemPrompt)).not.toContain("<app-context>");
+    expect(JSON.stringify(side.inputs[0]?.options.systemPrompt)).not.toContain("Unavailable Codex App tools");
     expect(side.inputs[0]?.options.systemPrompt).toMatchObject({
       append: expect.stringContaining("Use a friendly, collaborative communication style."),
     });
@@ -3331,6 +3395,80 @@ describe("ClaudeService", () => {
     expect(turns.flatMap((turn) => turn.items).filter((item) => "status" in item).every((item) => item.status !== "inProgress")).toBe(true);
     expect(events.filter((method) => method === "turn/started")).toHaveLength(1);
     expect(events.filter((method) => method === "turn/completed")).toHaveLength(1);
+    await service.close();
+  });
+
+  it("steers App turn/start into the active turn after Claude yields to background work", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-start-as-steer-"));
+    directories.push(directory);
+    const base = { session_id: "start-as-steer" };
+    const taskId = "background-agent";
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => { release = resolve; });
+    const fake = new FakeClaudeQuery(
+      undefined,
+      undefined,
+      [
+        {
+          type: "system", subtype: "status", status: null, permissionMode: "default",
+          uuid: randomUUID(), ...base,
+        },
+        {
+          type: "system", subtype: "task_notification", task_id: taskId,
+          status: "completed", summary: "Background work completed", uuid: randomUUID(), ...base,
+        },
+      ] as unknown as SDKMessage[],
+      false,
+      undefined,
+      undefined,
+      undefined,
+      [{
+        type: "system", subtype: "task_started", task_id: taskId,
+        description: "Background work", subagent_type: "general-purpose", uuid: randomUUID(), ...base,
+      }] as unknown as SDKMessage[],
+    );
+    fake.afterResultPause = { afterIndex: 0, wait };
+    const hub = new SubscriptionHub();
+    const service = new ClaudeService(
+      config(directory), hub, new Logger("error"),
+      new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory,
+    );
+    const started = await service.startThread({ model: "claude:claude-fable-5", cwd: directory });
+    const methods: string[] = [];
+    hub.subscribe(started.thread.id, "start-as-steer", (method) => methods.push(method));
+    const first = await service.prepareTurn({
+      threadId: started.thread.id,
+      input: [{ type: "text", text: "Start background work", text_elements: [] }],
+    });
+    first.announce();
+    first.start();
+    await waitFor(() => {
+      const turn = service.readThread(started.thread.id, true).thread.turns[0];
+      return turn?.status === "inProgress"
+        && turn.items.some((item) => item.type === "agentMessage" && item.text === "OK");
+    }, "provider result held by background task");
+
+    const steered = await service.prepareAppTurn({
+      threadId: started.thread.id,
+      clientUserMessageId: "app-message",
+      input: [{ type: "text", text: "How is it going?", text_elements: [] }],
+    });
+    expect(steered.response.turn.id).toBe(first.response.turn.id);
+    expect(service.readThread(started.thread.id, true).thread.turns).toHaveLength(1);
+    expect(service.readThread(started.thread.id, true).thread.turns[0]?.items).toContainEqual(expect.objectContaining({
+      type: "userMessage", clientId: "app-message",
+      content: [{ type: "text", text: "How is it going?", text_elements: [] }],
+    }));
+    expect(methods.filter((method) => method === "turn/started")).toHaveLength(1);
+    expect(service.readThread(started.thread.id, true).thread.turns[0]?.items)
+      .not.toContainEqual(expect.objectContaining({ type: "agentMessage", text: expect.stringContaining("active turn") }));
+
+    release();
+    await waitFor(() => fake.prompts.length === 2, "steered provider input");
+    await waitFor(
+      () => service.readThread(started.thread.id, true).thread.turns[0]?.status === "completed",
+      "steered background turn completion",
+    );
     await service.close();
   });
 

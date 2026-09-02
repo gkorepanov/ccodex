@@ -37,7 +37,9 @@ async function main(): Promise<number> {
   }
   if (invocation.kind === "stdioFrontend") {
     const { runStdioFrontend } = await import("../desktop/stdioFrontend.js");
-    return runStdioFrontend(config, invocation.socketPath);
+    return runStdioFrontend(config, invocation.socketPath, {
+      configOverrides: invocation.configOverrides,
+    });
   }
 
   const { startGateway } = await import("../gateway/server.js");

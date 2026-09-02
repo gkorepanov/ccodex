@@ -21,7 +21,7 @@ import type {
 } from "../../store/HybridStore.js";
 import type { ClaudeSessionHandle } from "../sessionRegistry.js";
 import { MetricsRegistry } from "../../observability/metrics.js";
-import { invalidParams } from "../../protocol/errors.js";
+import { invalidParams, RpcError } from "../../protocol/errors.js";
 import {
   classifyClaudeResult,
   classifyClaudeRuntimeError,
@@ -524,6 +524,15 @@ export interface PreparedRuntimeTurn {
   readonly readOnly: boolean;
   discard(): Promise<void>;
   attach(turn: PreparedSessionTurn["turn"]): () => Promise<void>;
+}
+
+export class ActiveClaudeTurnError extends RpcError {
+  public constructor(
+    threadId: string,
+    public readonly turnId: string,
+  ) {
+    super(-32602, `Thread '${threadId}' already has an active turn.`);
+  }
 }
 
 export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> {
@@ -1308,6 +1317,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       messageUuid,
     });
     if (staged.kind === "busy") {
+      if (staged.activeTurnId) throw new ActiveClaudeTurnError(this.threadId, staged.activeTurnId);
       throw invalidParams(`Thread '${this.threadId}' already has an active turn.`);
     }
     if (staged.kind === "stale") {
@@ -5165,7 +5175,10 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           if (this.stagedRuntimeTurns.has(command.messageUuid)) {
             return { kind: "staged" } satisfies RuntimeTurnStage;
           }
-          if (this.stagedRuntimeTurns.size) return { kind: "busy" } satisfies RuntimeTurnStage;
+          if (this.stagedRuntimeTurns.size) return {
+            kind: "busy",
+            activeTurnId: this.scopes.get(this.threadId)?.turnId ?? null,
+          } satisfies RuntimeTurnStage;
         }
         if (command.runtimeGeneration !== this.runtimeGeneration
           || command.settingsGeneration !== settingsGeneration(record)) {
@@ -5189,7 +5202,10 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         }
         if (this.interruptFence || this.transportStopFence
           || this.lifecycle || this.compaction || record.thread.status.type === "active") {
-          return { kind: "busy" } satisfies RuntimeTurnStage;
+          return {
+            kind: "busy",
+            activeTurnId: this.scopes.get(this.threadId)?.turnId ?? null,
+          } satisfies RuntimeTurnStage;
         }
         this.stagedRuntimeTurns.add(command.messageUuid);
         this.emitLifecycle();

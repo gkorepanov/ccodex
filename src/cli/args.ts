@@ -20,7 +20,11 @@ export type Invocation =
   | { readonly kind: "delegate" }
   | { readonly kind: "daemon"; readonly command: DaemonCommand; readonly remoteControl: boolean }
   | { readonly kind: "proxy"; readonly socketPath: string; readonly proxyArgs: string[] }
-  | { readonly kind: "stdioFrontend"; readonly socketPath: string }
+  | {
+      readonly kind: "stdioFrontend";
+      readonly socketPath: string;
+      readonly configOverrides: string[];
+    }
   | { readonly kind: "gateway"; readonly socketPath: string; readonly stockArgs: string[] };
 
 const daemonCommands = new Set<DaemonCommand>([
@@ -73,6 +77,23 @@ function stripOption(args: readonly string[], name: string): string[] {
   return result;
 }
 
+function configOverrides(args: readonly string[]): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index]!;
+    if (value === "-c" || value === "--config") {
+      const override = args[index + 1];
+      if (override !== undefined) result.push(override);
+      index += 1;
+    } else if (value.startsWith("--config=")) {
+      result.push(value.slice("--config=".length));
+    } else if (value.startsWith("-c") && value.length > 2) {
+      result.push(value.slice(2));
+    }
+  }
+  return result;
+}
+
 function socketPathFromListen(listen: string | undefined, config: HybridConfig): string {
   if (!listen || listen === "unix://") return config.publicSocket;
   if (!listen.startsWith("unix://")) {
@@ -107,7 +128,11 @@ export function classifyInvocation(args: readonly string[], config: HybridConfig
 
   const listen = optionValue(appArgs, "--listen");
   if (!listen || appArgs.includes("--stdio")) {
-    return { kind: "stdioFrontend", socketPath: config.publicSocket };
+    return {
+      kind: "stdioFrontend",
+      socketPath: config.publicSocket,
+      configOverrides: configOverrides(args),
+    };
   }
   const socketPath = socketPathFromListen(listen, config);
   const cleanAppArgs = stripOption(appArgs, "--listen").filter((value) => value !== "--stdio");

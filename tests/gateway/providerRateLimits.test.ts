@@ -149,7 +149,7 @@ function fakeClaude() {
     model: string; serviceTier: string | null; effort: string | null;
   }>();
   let sequence = 0;
-  return {
+  const service = {
     threads, settings,
     listeners,
     readRateLimits: vi.fn(async (_threadId?: string) => claudeSnapshot),
@@ -165,6 +165,7 @@ function fakeClaude() {
     unsubscribeRateLimits: vi.fn((id: string) => listeners.delete(id)),
     ownsModel: (model: string) => model.startsWith("claude:"),
     ownsThread: (threadId: string) => threads.has(threadId),
+    readThread: vi.fn((threadId: string) => ({ thread: stockThread(threadId) })),
     listThreads: vi.fn(() => []),
     loadedThreadIds: vi.fn(() => []),
     isChildProjection: () => false,
@@ -269,6 +270,7 @@ function fakeClaude() {
     eventsAfter: () => [],
     replayPendingRequests: vi.fn(),
   };
+  return Object.assign(service, { prepareAppTurn: service.prepareTurn });
 }
 
 async function makeHarness(
@@ -286,6 +288,7 @@ async function makeHarness(
   sideThreads?: StockSideThreads,
   optimisticSides?: OptimisticSideThreads,
   sharedSubscriptions?: SubscriptionHub,
+  claudeSkills?: { list(cwds: readonly string[], forceReload?: boolean): Promise<unknown> },
 ): Promise<Harness> {
   const socket = join(tmpdir(), `ccodex-rate-${randomUUID()}.sock`);
   const server: Server = createServer();
@@ -299,6 +302,22 @@ async function makeHarness(
       const request = JSON.parse(String(data)) as { method: string; id: string; params?: unknown };
       stockRequests.push(request);
       if (request.method === "account/rateLimits/read") ws.send(JSON.stringify({ id: request.id, result: stockSnapshot }));
+      else if (request.method === "model/list") ws.send(JSON.stringify({
+        id: request.id, result: { data: [], nextCursor: null },
+      }));
+      else if (request.method === "skills/list") {
+        const cwds = (request.params as { cwds?: string[] } | undefined)?.cwds ?? ["/tmp"];
+        ws.send(JSON.stringify({
+          id: request.id,
+          result: {
+            data: cwds.map((cwd) => ({
+              cwd,
+              skills: [{ name: "stock-skill", description: "Stock", path: "/stock/SKILL.md", scope: "user", enabled: true }],
+              errors: [],
+            })),
+          },
+        }));
+      }
       else if (request.method === "thread/start") ws.send(JSON.stringify({ id: request.id, result: { thread: { id: "stock-thread" } } }));
       else if (request.method === "thread/list") ws.send(JSON.stringify({
         id: request.id,
@@ -414,7 +433,7 @@ async function makeHarness(
   const connection = attachClientConnection(
     client as never,
     socket,
-    {} as never,
+    { list: vi.fn(async () => []) } as never,
     sharedClaude as never,
     noHandoffs as never,
     subscriptions,
@@ -433,6 +452,7 @@ async function makeHarness(
     undefined,
     sideThreads,
     optimisticSides,
+    claudeSkills as never,
   );
   while (stockClients.size === 0) await new Promise((resolve) => setTimeout(resolve, 1));
   const harness: Harness = {
@@ -527,7 +547,7 @@ describe("provider-aware rate-limit gateway routing", () => {
     });
   });
 
-  it("shows one branded downgrade notice and continues an unsupported Fast turn", async () => {
+  it("silently continues an unsupported Fast turn in Standard", async () => {
     const harness = await makeHarness();
     harness.client.request("start-fable", "thread/start", {
       model: "claude:claude-fable-5", serviceTier: null, effort: "xhigh",
@@ -550,12 +570,39 @@ describe("provider-aware rate-limit gateway routing", () => {
     const notices = (harness.client.sent.slice(beforeTurn) as any[]).filter((message) =>
       message.method === "item/agentMessage/delta"
       && String(message.params?.delta).includes("Fast was requested"));
-    expect(notices).toEqual([expect.objectContaining({
-      params: expect.objectContaining({
-        threadId,
-        delta: "◆ **CCodex** │ Fast was requested, but Fable does not support it — continuing in Standard.",
-      }),
-    })]);
+    expect(notices).toEqual([]);
+  });
+
+  it("returns both skill catalogs while the App model selection is unknown", async () => {
+    const claudeSkills = {
+      list: vi.fn(async (cwds: readonly string[]) => ({
+        data: cwds.map((cwd) => ({
+          cwd,
+          skills: [{
+            name: "claude:claude-skill", description: "Claude",
+            path: "/claude/SKILL.md", scope: "user", enabled: true,
+          }],
+          errors: [],
+        })),
+      })),
+    };
+    const harness = await makeHarness(
+      fakeClaude(), undefined, undefined, DEFAULT_FEATURES, {}, undefined,
+      undefined, undefined, undefined, undefined, claudeSkills,
+    );
+    harness.client.request("start-claude", "thread/start", { model: "claude:claude-fable-5", cwd: "/tmp" });
+    await settle();
+    harness.client.request("known-skills", "skills/list", { cwds: ["/tmp"] });
+    await settle();
+    expect(messages(harness, "known-skills")[0].result.data[0].skills.map((skill: any) => skill.name))
+      .toEqual(["claude:claude-skill"]);
+
+    harness.client.request("models", "model/list", {});
+    await settle();
+    harness.client.request("unknown-skills", "skills/list", { cwds: ["/tmp"] });
+    await settle();
+    expect(messages(harness, "unknown-skills")[0].result.data[0].skills.map((skill: any) => skill.name))
+      .toEqual(["stock-skill", "claude:claude-skill"]);
   });
 
   it("keeps captured stock source settings when App forks with omitted settings", async () => {

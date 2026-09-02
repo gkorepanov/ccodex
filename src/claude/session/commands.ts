@@ -89,7 +89,7 @@ export interface RuntimeTransportSettings {
 
 export type RuntimeTurnStage =
   | { readonly kind: "staged" }
-  | { readonly kind: "busy" }
+  | { readonly kind: "busy"; readonly activeTurnId: string | null }
   | {
     readonly kind: "stale";
     readonly reason: "runtime" | "settings";

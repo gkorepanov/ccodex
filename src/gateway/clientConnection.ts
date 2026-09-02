@@ -77,22 +77,12 @@ function requestedFast(serviceTier: string | null | undefined): boolean {
   return serviceTier === "fast" || serviceTier === "priority";
 }
 
-function claudeModelNoticeName(model: string): string {
-  const name = model.replace(/^claude:/u, "").replace(/^claude-/u, "").split("-")[0] ?? model;
-  return `${name.charAt(0).toUpperCase()}${name.slice(1)}`;
-}
-
 function fastTransitionNotice(
   before: FastSettings | undefined,
   after: FastSettings,
-  requestedTier: string | null | undefined,
 ): string | undefined {
-  const effectiveRequest = requestedTier === undefined ? before?.serviceTier : requestedTier;
   if (before && !requestedFast(before.serviceTier) && requestedFast(after.serviceTier)) {
     return "Fast mode is on — usage limits may be consumed faster.";
-  }
-  if (requestedFast(effectiveRequest) && !requestedFast(after.serviceTier)) {
-    return `Fast was requested, but ${claudeModelNoticeName(after.model)} does not support it — continuing in Standard.`;
   }
   return undefined;
 }
@@ -216,9 +206,8 @@ export function attachClientConnection(
     threadId: string,
     before: FastSettings | undefined,
     after: FastSettings,
-    requestedTier: string | null | undefined,
   ) => {
-    const text = fastTransitionNotice(before, after, requestedTier);
+    const text = fastTransitionNotice(before, after);
     if (text) emitTransientNotice(threadId, text);
   };
   const emitSystemError = (threadId: string, message: string) => {
@@ -243,6 +232,7 @@ export function attachClientConnection(
     sendJson({ id, error: { code, message: error instanceof Error ? error.message : String(error) } });
   };
   let foreground: { provider: ForegroundProvider; threadId: string } | undefined;
+  let skillsProvider: ForegroundProvider | undefined;
   let foregroundGeneration = 0;
   let unknownStatusDiagnosed = false;
   const emitRateLimits = (response: ClaudeRateLimitsResponse) => {
@@ -344,6 +334,7 @@ export function attachClientConnection(
   };
   const selectForeground = (provider: ForegroundProvider, threadId: string) => {
     foreground = { provider, threadId };
+    skillsProvider = provider;
     unknownStatusDiagnosed = false;
     foregroundGeneration += 1;
     publishForegroundRateLimits(foregroundGeneration);
@@ -351,6 +342,7 @@ export function attachClientConnection(
   const clearForeground = (threadId: string) => {
     if (foreground?.threadId !== threadId) return;
     foreground = undefined;
+    skillsProvider = undefined;
     foregroundGeneration += 1;
   };
   const diagnoseUnknownStatus = (signal: string) => {
@@ -627,7 +619,6 @@ export function attachClientConnection(
               publicThreadId,
               before,
               claude.currentThreadSettings(target.backendThreadId),
-              (params as { serviceTier?: string | null }).serviceTier,
             );
           } else {
             sendResult(request.id, await optimisticStockRequest(request.method, params));
@@ -638,14 +629,13 @@ export function attachClientConnection(
           if (target.provider === "claude") {
             const turn = params as unknown as TurnStartParams;
             const before = claude.currentThreadSettings(target.backendThreadId);
-            const prepared = await claude.prepareTurn(turn);
+            const prepared = await claude.prepareAppTurn(turn);
             sendResult(request.id, prepared.response);
             selectForeground("claude", publicThreadId);
             emitFastTransition(
               publicThreadId,
               before,
               claude.currentThreadSettings(target.backendThreadId),
-              turn.serviceTier,
             );
             await prepared.announce();
             prepared.start();
@@ -758,6 +748,10 @@ export function attachClientConnection(
           return;
         }
         if (message.method === "model/list") {
+          // model/list precedes a new composer or a model change. skills/list
+          // carries no thread/model id, so the provider is unknown until the
+          // next thread operation confirms the selection.
+          skillsProvider = undefined;
           sendResult(message.id, await mergedModelList(
             (message.params ?? {}) as ModelListParams,
             stockRpc,
@@ -778,7 +772,7 @@ export function attachClientConnection(
             (message.params ?? {}) as SkillsListParams,
             stockRpc,
             claudeSkills,
-            foreground?.provider,
+            skillsProvider,
             defaultCwd,
           ));
           return;
@@ -827,7 +821,6 @@ export function attachClientConnection(
               result.thread.id,
               undefined,
               claude.currentThreadSettings(result.thread.id),
-              params.serviceTier,
             );
             return;
           }
@@ -1343,7 +1336,7 @@ export function attachClientConnection(
             const result = await claude.updateThreadSettings(update);
             const after = claude.currentThreadSettings(params.threadId);
             sendResult(message.id, result);
-            emitFastTransition(params.threadId, before, after, update.serviceTier);
+            emitFastTransition(params.threadId, before, after);
             return;
           }
           if (message.method === "thread/archive") {
@@ -1441,11 +1434,11 @@ export function attachClientConnection(
           if (message.method === "turn/start") {
             const turn = (message.params ?? {}) as TurnStartParams;
             const before = claude.currentThreadSettings(params.threadId);
-            const prepared = await claude.prepareTurn(turn);
+            const prepared = await claude.prepareAppTurn(turn);
             const after = claude.currentThreadSettings(params.threadId);
             sendResult(message.id, prepared.response);
             selectForeground("claude", params.threadId);
-            emitFastTransition(params.threadId, before, after, turn.serviceTier);
+            emitFastTransition(params.threadId, before, after);
             await prepared.announce();
             prepared.start();
             return;

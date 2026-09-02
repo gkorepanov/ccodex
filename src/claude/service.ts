@@ -96,7 +96,7 @@ import type {
 } from "./session/commands.js";
 import { ClaudeOutputAdapter } from "./session/outputAdapter.js";
 import { branchRevision, ClaudeSessionRepository } from "./session/repository.js";
-import { ClaudeSession } from "./session/session.js";
+import { ActiveClaudeTurnError, ClaudeSession } from "./session/session.js";
 import { ShellRunner } from "./session/shellRunner.js";
 import { ClaudeSessionRegistry } from "./sessionRegistry.js";
 import { validateResponseItems } from "./responseItemValidation.js";
@@ -110,6 +110,7 @@ import {
   type ThreadStateSnapshot,
 } from "../state/stateCommand.js";
 import { syncedCollaborationMode, threadSettings } from "./threadSettings.js";
+import { claudeDeveloperInstructions } from "./developerInstructions.js";
 
 interface ModelCatalog {
   list(): Promise<Model[]>;
@@ -824,6 +825,42 @@ export class ClaudeService {
     }
   }
 
+  public async prepareAppTurn(params: TurnStartParams): Promise<{
+    response: TurnStartResponse;
+    announce: () => Promise<void>;
+    start: () => void;
+    startAndWait: () => Promise<void>;
+  }> {
+    try {
+      return await this.prepareTurn(params);
+    } catch (error) {
+      if (!(error instanceof ActiveClaudeTurnError)) throw error;
+      const { turnId } = await this.steerTurn({
+        threadId: params.threadId,
+        input: params.input,
+        expectedTurnId: error.turnId,
+        ...(params.clientUserMessageId === undefined
+          ? {}
+          : { clientUserMessageId: params.clientUserMessageId }),
+        ...(params.responsesapiClientMetadata === undefined
+          ? {}
+          : { responsesapiClientMetadata: params.responsesapiClientMetadata }),
+        ...(params.additionalContext === undefined
+          ? {}
+          : { additionalContext: params.additionalContext }),
+      });
+      const turn = this.requireRecord(params.threadId, true).thread.turns
+        .find((candidate) => candidate.id === turnId);
+      if (!turn) throw new Error(`Active Claude turn '${turnId}' disappeared after steering.`);
+      return {
+        response: { turn },
+        announce: () => Promise.resolve(),
+        start: () => undefined,
+        startAndWait: () => Promise.resolve(),
+      };
+    }
+  }
+
   public async prepareStatusTurn(params: TurnStartParams, render: () => Promise<string>): Promise<{
     response: TurnStartResponse;
     announce: () => Promise<void>;
@@ -1441,8 +1478,8 @@ export class ClaudeService {
           ? sandboxPolicy(params.sandbox, cwd, runtimeWorkspaceRoots)
           : inheritedSandboxPolicy(sourceRecord.sandboxPolicy, cwd, runtimeWorkspaceRoots),
       baseInstructions: params.baseInstructions === undefined ? sourceRecord.baseInstructions : params.baseInstructions,
-      developerInstructions: params.developerInstructions === undefined
-        ? sourceRecord.developerInstructions : params.developerInstructions,
+      developerInstructions: claudeDeveloperInstructions(params.developerInstructions === undefined
+        ? sourceRecord.developerInstructions : params.developerInstructions),
       lastClaudeMessageUuid: null, lastCompletedTurnId: null,
     };
     let responseRecord: ClaudeThreadRecord;
@@ -1992,7 +2029,7 @@ export class ClaudeService {
         ? permissionProfileSandboxPolicy(params.permissions, cwd, runtimeWorkspaceRoots)
         : sandboxPolicy(params.sandbox, cwd, runtimeWorkspaceRoots),
       baseInstructions: params.baseInstructions ?? null,
-      developerInstructions: params.developerInstructions ?? null,
+      developerInstructions: claudeDeveloperInstructions(params.developerInstructions),
       personality: settings?.personality ?? params.personality ?? null,
       resolvedModel: null,
       lastClaudeMessageUuid: null,

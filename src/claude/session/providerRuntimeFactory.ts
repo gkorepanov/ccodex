@@ -18,6 +18,10 @@ import {
   type ProviderRuntimeSettings,
 } from "./providerRuntime.js";
 import type { RuntimeTransportSettings } from "./commands.js";
+import {
+  CCODEX_APP_UI_INSTRUCTIONS,
+  claudeDeveloperInstructions,
+} from "../developerInstructions.js";
 export type { RuntimeTransportSettings } from "./commands.js";
 
 export interface GoalRuntimeEvents {
@@ -45,7 +49,11 @@ export class StaleClaudeRuntimeSettingsError extends Error {
 }
 
 function appendInstructions(startup: RuntimeStartup): string | undefined {
-  const parts = [startup.baseInstructions, startup.developerInstructions];
+  const parts = [
+    CCODEX_APP_UI_INSTRUCTIONS,
+    startup.baseInstructions,
+    claudeDeveloperInstructions(startup.developerInstructions),
+  ];
   if (startup.personality === "friendly") parts.push("Use a friendly, collaborative communication style.");
   if (startup.personality === "pragmatic") parts.push("Be direct, pragmatic, and focused on concrete outcomes.");
   const value = parts.filter((part): part is string => Boolean(part)).join("\n\n");
