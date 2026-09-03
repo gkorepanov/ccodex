@@ -29,7 +29,9 @@ if (version.stdout.trim() !== `codex-cli ${protocolVersion}`) {
 const check = process.argv.includes("--check");
 const temporary = check ? mkdtempSync(join(tmpdir(), "ccodex-protocol-")) : undefined;
 const tsOut = temporary ? join(temporary, "ts") : resolve("src/codex/generated");
-const jsonOut = temporary ? join(temporary, "json") : resolve("schemas/generated");
+// JSON schemas are never compared, so even `--check` materializes them: they are
+// gitignored, and contract tests read the bundle from schemas/generated.
+const jsonOut = resolve("schemas/generated");
 
 function files(root, prefix = "") {
   return readdirSync(join(root, prefix), { withFileTypes: true })
