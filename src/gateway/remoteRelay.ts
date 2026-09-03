@@ -56,7 +56,7 @@ export async function startRemoteRelay(
 ): Promise<RemoteRelay> {
   const binary = relayBinary();
   if (!existsSync(binary)) throw new Error(`CCodex remote-control relay binary was not found: ${binary}`);
-  const env = { ...process.env };
+  const env: NodeJS.ProcessEnv = { RUST_LOG: "warn", ...process.env };
   delete env.CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED;
   const child = spawn(binary, ["--socket", socketPath], { env, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "";
@@ -85,7 +85,7 @@ export async function startRemoteRelay(
       }
     }
   });
-  child.stderr?.on("data", (chunk: Buffer) => logger.debug("remote-relay.stderr", { output: chunk.toString("utf8").trimEnd() }));
+  child.stderr?.on("data", (chunk: Buffer) => logger.warn("remote-relay.stderr", { line: chunk.toString("utf8").trimEnd() }));
   child.once("error", (error) => readyReject(error));
   child.once("exit", (code, signal) => {
     if (!stopping) {

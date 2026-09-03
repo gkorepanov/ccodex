@@ -114,7 +114,15 @@ async fn bridge_client(
                         let emitted_at_ms = raw.get("emittedAtMs").and_then(serde_json::Value::as_i64);
                         let rpc: JSONRPCMessage = serde_json::from_value(raw)
                             .context("decode hybrid gateway RPC envelope")?;
-                        remote_writer.send(QueuedOutgoingMessage::new(outgoing_message(rpc, emitted_at_ms)?)).await
+                        // A message the typed protocol rejects must not take the whole client down.
+                        let outgoing = match outgoing_message(rpc, emitted_at_ms) {
+                            Ok(outgoing) => outgoing,
+                            Err(error) => {
+                                warn!(%error, "dropping gateway message the remote-control protocol rejects");
+                                continue;
+                            }
+                        };
+                        remote_writer.send(QueuedOutgoingMessage::new(outgoing)).await
                             .context("remote-control client closed")?;
                     }
                     Message::Ping(payload) => gateway_writer.send(Message::Pong(payload)).await

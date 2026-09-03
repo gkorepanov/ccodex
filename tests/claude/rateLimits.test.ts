@@ -99,7 +99,7 @@ describe("Claude rate-limit wire mapping", () => {
         },
         "claude-oauth-apps": {
           limitId: "claude-oauth-apps", limitName: "Claude OAuth apps · 7 day",
-          primary: { usedPercent: null, windowDurationMins: 10_080, resetsAt: null },
+          primary: null,
           secondary: null, credits: null, individualLimit: null, spendControlReached: null, planType: "unknown", rateLimitReachedType: null,
         },
         "claude-model-fable-5": {
@@ -112,14 +112,18 @@ describe("Claude rate-limit wire mapping", () => {
     });
   });
 
-  it("keeps null values null and maps exact supported subscription labels only", () => {
+  it("drops windows without utilization instead of sending usedPercent null and maps exact subscription labels only", () => {
     const raw = usage({
       subscription_type: "team",
       rate_limits: { five_hour: { utilization: null, resets_at: null }, seven_day: null },
     });
-    expect(mapClaudeUsage(raw).rateLimits).toMatchObject({
-      primary: { usedPercent: null, resetsAt: null }, secondary: null, planType: "team",
-    });
+    expect(mapClaudeUsage(raw).rateLimits).toMatchObject({ primary: null, secondary: null, planType: "team" });
+  });
+
+  it("ignores unknown window fields such as locked_reason", () => {
+    const raw = usage();
+    (raw as any).rate_limits.five_hour.locked_reason = "billing";
+    expect(mapClaudeUsage(raw).rateLimits.primary?.usedPercent).toBe(12.5);
   });
 
   it("returns labelled unavailable data without fake zero usage", () => {
@@ -394,7 +398,6 @@ describe("CCodex status command", () => {
       "  ├ 5h ▸ 12.5% used · resets 12:10",
       "  ├ 7d ▸ 34% used · resets Jul 20",
       "  ├ Fable 5 7d ▸ 44% used · resets Jul 22",
-      "  ├ OAuth apps 7d ▸ usage unavailable · reset unavailable",
       "  ├ Opus 7d ▸ 100% used · resets Jul 21",
       "  └ Sonnet 7d ▸ 0% used · reset unavailable",
       "",

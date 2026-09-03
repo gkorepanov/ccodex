@@ -5,7 +5,7 @@ import type {
 } from "./rateLimits.js";
 
 interface StatusWindow {
-  readonly usedPercent: number | null;
+  readonly usedPercent: number;
   readonly windowDurationMins: number | null;
   readonly resetsAt: number | null;
 }
@@ -63,9 +63,8 @@ function durationLabel(window: StatusWindow, fallback: string): string {
 
 function windowText(label: string, value: StatusWindow | null, now: Date): string | undefined {
   if (!value) return undefined;
-  const usage = value.usedPercent === null ? "usage unavailable" : `${value.usedPercent}% used`;
   const reset = resetText(value.resetsAt, now);
-  return `${label} ▸ ${usage} · ${reset ? `resets ${reset}` : "reset unavailable"}`;
+  return `${label} ▸ ${value.usedPercent}% used · ${reset ? `resets ${reset}` : "reset unavailable"}`;
 }
 
 function aggregateWindows(snapshot: StatusSnapshot, now: Date): string[] {

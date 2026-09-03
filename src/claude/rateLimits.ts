@@ -2,18 +2,14 @@ import type { Query, SDKRateLimitInfo } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Logger } from "../observability/logger.js";
 
+// Windows are not strict: Claude Code keeps adding fields (limit_dollars, locked_reason, ...)
+// and a rejected usage payload used to take every Claude thread offline on the phone.
 const rateWindowSchema = z.object({
   utilization: z.number().nullable(),
   resets_at: z.string().nullable(),
-  // Claude Code 2.1.211 adds these account-billing fields although the
-  // Agent SDK 0.3.209 declaration omits them. They are validated but never
-  // projected into Codex credits because their billing semantics differ.
-  limit_dollars: z.number().nullable().optional(),
-  used_dollars: z.number().nullable().optional(),
-  remaining_dollars: z.number().nullable().optional(),
-}).strict();
+});
 
-const modelWindowSchema = rateWindowSchema.extend({ display_name: z.string().min(1) }).strict();
+const modelWindowSchema = rateWindowSchema.extend({ display_name: z.string().min(1) });
 
 const rateLimitsSchema = z.object({
   five_hour: rateWindowSchema.nullable().optional(),
@@ -64,8 +60,9 @@ const usageSchema = z.object({
 type Usage = z.infer<typeof usageSchema>;
 type UsageWindow = z.infer<typeof rateWindowSchema>;
 
+/** Mirrors the Codex RateLimitWindow: usedPercent must be a number on the wire (the relay rejects null). */
 export interface ClaudeRateLimitWindow {
-  usedPercent: number | null;
+  usedPercent: number;
   windowDurationMins: number | null;
   resetsAt: number | null;
 }
@@ -95,8 +92,8 @@ export class ClaudeUsageSchemaError extends Error {
   }
 }
 
-function percent(value: number | null): number | null {
-  return value === null ? null : Math.max(0, Math.min(100, value));
+function percent(value: number): number {
+  return Math.max(0, Math.min(100, value));
 }
 
 function resetSeconds(value: string | null): number | null {
@@ -113,7 +110,7 @@ export function providerResetSeconds(value: number | undefined): number | null {
 }
 
 function window(value: UsageWindow | null | undefined, duration: number): ClaudeRateLimitWindow | null {
-  if (!value) return null;
+  if (!value || value.utilization === null) return null;
   return { usedPercent: percent(value.utilization), windowDurationMins: duration, resetsAt: resetSeconds(value.resets_at) };
 }
 
@@ -302,15 +299,15 @@ export class ClaudeRateLimitCoordinator {
     const bucket = response.rateLimitsByLimitId[target.id]
       ?? snapshot(target.id, target.name, null, null, response.rateLimits.planType);
     const current = target.secondary ? response.rateLimits.secondary : bucket.primary;
-    const incoming: ClaudeRateLimitWindow = {
-      usedPercent: info.utilization === undefined ? current?.usedPercent ?? null : percent(info.utilization),
+    const usedPercent = info.utilization === undefined ? current?.usedPercent : percent(info.utilization);
+    const incoming: ClaudeRateLimitWindow | null = usedPercent === undefined ? null : {
+      usedPercent,
       windowDurationMins: target.duration,
       resetsAt: info.resetsAt === undefined ? current?.resetsAt ?? null : providerResetSeconds(info.resetsAt),
     };
-    if (info.status !== "allowed" && current && incoming.resetsAt !== null && current.resetsAt !== null) {
+    if (info.status !== "allowed" && current && incoming && incoming.resetsAt !== null && current.resetsAt !== null) {
       if (incoming.resetsAt < current.resetsAt) return;
-      if (incoming.resetsAt === current.resetsAt && incoming.usedPercent !== null && current.usedPercent !== null
-        && incoming.usedPercent < current.usedPercent) return;
+      if (incoming.resetsAt === current.resetsAt && incoming.usedPercent < current.usedPercent) return;
     }
     const previousReached = target.id === "claude" ? response.rateLimits.rateLimitReachedType : bucket.rateLimitReachedType;
     const reached: ClaudeRateLimitSnapshot["rateLimitReachedType"] = info.status === "rejected"
@@ -332,7 +329,7 @@ export class ClaudeRateLimitCoordinator {
       const candidate: ClaudeRateLimitTransition = {
         bucket: noticeBucket,
         status: info.status,
-        resetsAt: incoming.resetsAt,
+        resetsAt: incoming?.resetsAt ?? null,
       };
       const previous = this.notices.get(noticeBucket);
       if (!previous || previous.status !== candidate.status || previous.resetsAt !== candidate.resetsAt) {
