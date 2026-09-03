@@ -17,6 +17,8 @@ import type { ThreadGoal } from "../codex/generated/v2/ThreadGoal.js";
 import type { ThreadGoalSetParams } from "../codex/generated/v2/ThreadGoalSetParams.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
+import type { ThreadRevertParams } from "../codex/generated/v2/ThreadRevertParams.js";
+import type { ThreadRevertResponse } from "../codex/generated/v2/ThreadRevertResponse.js";
 import type { ThreadRollbackParams } from "../codex/generated/v2/ThreadRollbackParams.js";
 import type { ThreadRollbackResponse } from "../codex/generated/v2/ThreadRollbackResponse.js";
 import type { ThreadSettingsUpdateParams } from "../codex/generated/v2/ThreadSettingsUpdateParams.js";
@@ -125,6 +127,7 @@ interface ModelCatalog {
 
 type CatalogLookup = { readonly id: string; readonly model: Model | undefined; readonly reason: ClaudeModelReplacement["reason"] };
 type ModelSelection = { readonly modelPickerId: string; readonly claudeModelValue: string };
+type TruncationSource = SessionBranchSnapshot & { readonly session: ClaudeSession };
 
 type PreparedGoalHandle<T> = { readonly response: T; notify(): Promise<void> };
 type PreparedResume = {
@@ -1578,19 +1581,42 @@ export class ClaudeService {
   }
 
   public async rollbackThread(params: ThreadRollbackParams): Promise<ThreadRollbackResponse> {
-    this.requireIndependentThread(params.threadId, "roll back");
-    const source = await this.sessions.submit<SessionBranchSnapshot>(params.threadId, { type: "snapshotBranch" });
-    const sourceRecord = source.record;
-    if (sourceRecord.thread.ephemeral) throw invalidParams("Rolling back an ephemeral Claude thread is not supported.");
+    const source = await this.truncationSource(params.threadId, "roll back");
     if (!Number.isInteger(params.numTurns) || params.numTurns < 1) throw invalidParams("numTurns must be at least 1.");
-    if (params.numTurns > sourceRecord.thread.turns.length)
+    if (params.numTurns > source.record.thread.turns.length)
       throw invalidParams("Cannot remove more turns than the Claude thread contains.");
-    const sourceSession = await this.sessions.getOrCreate(params.threadId);
-    if ((await sourceSession.runtimeInspection())?.quiescent === false)
-      throw invalidParams("Cannot roll back a Claude thread with an active turn.");
-    const keepCount = sourceRecord.thread.turns.length - params.numTurns;
-    const retained = sourceRecord.thread.turns.slice(0, keepCount);
-    const retainedIds = new Set(retained.map((turn) => turn.id));
+    const committed = await this.truncateThread(source, source.record.thread.turns.length - params.numTurns);
+    return { thread: committed.thread };
+  }
+
+  /** `thread/revert`: drops `beforeTurnId` and every later turn; the App hydrates retained history via the cursors. */
+  public async revertThread(params: ThreadRevertParams): Promise<ThreadRevertResponse> {
+    const source = await this.truncationSource(params.threadId, "revert");
+    const keepCount = source.record.thread.turns.findIndex((turn) => turn.id === params.beforeTurnId);
+    if (keepCount === -1) throw invalidParams(`Unknown Claude turn '${params.beforeTurnId}'.`);
+    const retained = (await this.truncateThread(source, keepCount)).thread;
+    return {
+      thread: { ...retained, turns: [] },
+      turnsBackwardsCursor: retained.turns.length ? turnCursor(retained.turns.at(-1)!.id, true) : null,
+      itemsBackwardsCursor: retained.turns.some((turn) => turn.items.length) ? "hyb-item:0" : null,
+    };
+  }
+
+  private async truncationSource(threadId: string, verb: string): Promise<TruncationSource> {
+    this.requireIndependentThread(threadId, verb);
+    const snapshot = await this.sessions.submit<SessionBranchSnapshot>(threadId, { type: "snapshotBranch" });
+    if (snapshot.record.thread.ephemeral) throw invalidParams(`Cannot ${verb} an ephemeral Claude thread.`);
+    const session = await this.sessions.getOrCreate(threadId);
+    if ((await session.runtimeInspection())?.quiescent === false)
+      throw invalidParams(`Cannot ${verb} a Claude thread with an active turn.`);
+    return { ...snapshot, session };
+  }
+
+  /** Keeps the first `keepCount` turns by forking the transcript at the last retained provider boundary. */
+  private async truncateThread(source: TruncationSource, keepCount: number): Promise<ClaudeThreadRecord> {
+    const sourceRecord = source.record;
+    const threadId = sourceRecord.thread.id;
+    const retainedIds = new Set(sourceRecord.thread.turns.slice(0, keepCount).map((turn) => turn.id));
     const sourceBoundaries = source.boundaries.filter((entry) => retainedIds.has(entry.turnId));
     const boundary = sourceBoundaries.at(-1)?.messageUuid;
     const branch = boundary
@@ -1600,7 +1626,7 @@ export class ClaudeService {
       : { sessionId: uuidv7(), uuidMap: new Map<string, string>() };
     let committed: ClaudeThreadRecord;
     try {
-      committed = await this.sessions.submit(params.threadId, {
+      committed = await this.sessions.submit(threadId, {
         type: "commitRollback", expectedRevision: source.revision, replacementSessionId: branch.sessionId,
         keepCount, sourceBoundaries, uuidMap: [...branch.uuidMap],
       });
@@ -1608,15 +1634,14 @@ export class ClaudeService {
       await this.transcripts.delete(branch.sessionId, sourceRecord.thread.cwd).catch(() => undefined);
       throw error;
     }
-    if (sourceSession.isLoaded) {
-      await sourceSession.retireRuntimeSilently().catch((error) => {
-        this.logger.warn("claude.rollback.old-runtime-retire-failed",
-          { threadId: params.threadId, error: String(error) });
+    if (source.session.isLoaded) {
+      await source.session.retireRuntimeSilently().catch((error) => {
+        this.logger.warn("claude.rollback.old-runtime-retire-failed", { threadId, error: String(error) });
       });
     }
     await this.transcripts.delete(sourceRecord.claudeSessionId, sourceRecord.thread.cwd).catch((error) =>
-      this.logger.warn("claude.rollback.old-session-delete-failed", { threadId: params.threadId, error: String(error) }));
-    return { thread: committed.thread };
+      this.logger.warn("claude.rollback.old-session-delete-failed", { threadId, error: String(error) }));
+    return committed;
   }
 
   public prepareGoalSet(

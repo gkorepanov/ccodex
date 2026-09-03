@@ -18,6 +18,7 @@ import type { ThreadSearchOccurrencesParams } from "../codex/generated/v2/Thread
 import type { ThreadGoalSetParams } from "../codex/generated/v2/ThreadGoalSetParams.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
+import type { ThreadRevertParams } from "../codex/generated/v2/ThreadRevertParams.js";
 import type { ThreadRollbackParams } from "../codex/generated/v2/ThreadRollbackParams.js";
 import type { ThreadSectionMoveParams } from "../codex/generated/v2/ThreadSectionMoveParams.js";
 import type { ThreadSettingsUpdateParams } from "../codex/generated/v2/ThreadSettingsUpdateParams.js";
@@ -1376,6 +1377,13 @@ export function attachClientConnection(
           }
           if (message.method === "thread/rollback") {
             sendResult(message.id, await claude.rollbackThread((message.params ?? {}) as ThreadRollbackParams));
+            return;
+          }
+          if (message.method === "thread/revert") {
+            const revert = (message.params ?? {}) as ThreadRevertParams;
+            sendResult(message.id, await claude.revertThread(revert));
+            // Stock ordering: the response lands before the lifecycle notification.
+            subscriptions.emit(params.threadId, "thread/reverted", { threadId: params.threadId });
             return;
           }
           if (message.method === "thread/section/move") {

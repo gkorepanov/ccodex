@@ -21,6 +21,7 @@
     "thread/delete",
     "thread/fork",
     "thread/rollback",
+    "thread/revert",
     "thread/compact/start",
     "thread/inject_items",
     "thread/shellCommand",
@@ -384,6 +385,7 @@
       "computerUseScenario": "Edit/resend or rollback across one or more compactions, then fork/rollback deeper again.",
       "appRpcInputs": [
         "thread/rollback(numTurns=N)",
+        "thread/revert(beforeTurnId=T)",
         "following turn/start(model/effort)"
       ],
       "providerInputs": [
@@ -402,6 +404,7 @@
       "reconnectRestart": "replacement lineage and remapped boundaries survive restart and support deeper rollback",
       "tests": [
         "tests/claude/rollbackBoundary.test.ts",
+        "tests/gateway/goalRpc.test.ts#replays App fork then rollback for two completed boundaries while a newer Claude turn remains active",
         "tests/store/sqliteStore.test.ts#atomically commits a durable fork with stable turn/item ids and remapped provider boundaries"
       ],
       "gap": null

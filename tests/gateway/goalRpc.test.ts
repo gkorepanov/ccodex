@@ -13,6 +13,7 @@ import type {
 import type { HybridConfig } from "../../src/config/config.js";
 import { attachClientConnection } from "../../src/gateway/clientConnection.js";
 import { CursorCodec } from "../../src/protocol/cursor.js";
+import { turnCursor } from "../../src/protocol/turnPagination.js";
 import { CrossProviderForks } from "../../src/handoff/service.js";
 import { HandoffStore } from "../../src/handoff/store.js";
 import { MetricsRegistry } from "../../src/observability/metrics.js";
@@ -641,6 +642,26 @@ describe("Claude goal gateway RPC", () => {
     expect(claude.readThread(olderTargetId, true).thread.turns.map((turn) => turn.id))
       .toEqual([turnAId]);
     expect(store.getTurnClaudeMessageUuid(olderTargetId, turnAId)).toBeTruthy();
+
+    const forkRevert = await client.request("thread/fork", { threadId: sourceId });
+    expect(forkRevert.error).toBeUndefined();
+    const revertTargetId = (forkRevert.result as { thread: { id: string } }).thread.id;
+    const beforeRevert = client.messages.length;
+    const reverted = await client.request("thread/revert", { threadId: revertTargetId, beforeTurnId: turnBId });
+    expect(reverted.error).toBeUndefined();
+    expect(reverted.result).toMatchObject({
+      thread: { id: revertTargetId, turns: [] },
+      turnsBackwardsCursor: turnCursor(turnAId, true),
+      itemsBackwardsCursor: "hyb-item:0",
+    });
+    const afterRevert = client.messages.slice(beforeRevert);
+    const revertedAt = afterRevert.findIndex((message) => message.method === "thread/reverted");
+    expect(afterRevert[revertedAt]?.params).toEqual({ threadId: revertTargetId });
+    expect(revertedAt).toBeGreaterThan(afterRevert.findIndex((message) => message.id === reverted.id));
+    expect(claude.readThread(revertTargetId, true).thread.turns.map((turn) => turn.id)).toEqual([turnAId]);
+    expect(store.getTurnClaudeMessageUuid(revertTargetId, turnAId)).toBeTruthy();
+    await expect(claude.revertThread({ threadId: revertTargetId, beforeTurnId: "missing" }))
+      .rejects.toThrow("Unknown Claude turn 'missing'");
 
     expect(claude.readThread(sourceId, true).thread).toEqual(sourceBeforeFork);
     expect(JSON.stringify(client.messages.slice(beforeForkMessages))).not.toContain("◆ **CCodex** │ ⚠️");
