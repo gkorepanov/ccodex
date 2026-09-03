@@ -596,6 +596,43 @@ describe("provider switch service", () => {
     service.close();
   });
 
+  it("reverts an established logical Claude thread before a selected public turn", async () => {
+    const first = turn("claude-turn-1", "first answer");
+    const second = turn("claude-turn-2", "answer being edited");
+    const backend = thread("claude-backend", "claude", [first, second]);
+    const publicThread = { ...backend, id: "public-thread", sessionId: "public-thread" };
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    store.createLogicalThread({
+      thread: publicThread,
+      epoch: { id: "claude-epoch", provider: "claude", backendThreadId: backend.id, model: "claude:sonnet", settings: {} },
+    });
+    const claude = {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: (id: string) => id === backend.id,
+      readThread: vi.fn(() => ({ thread: backend })),
+      rollbackThread: vi.fn(async () => ({ thread: { ...backend, turns: [first] } })),
+    };
+    const stock = { request: vi.fn() };
+    const service = new CrossProviderForks(store, claude as never);
+
+    const reverted = await service.revertLogicalThread({
+      threadId: publicThread.id,
+      beforeTurnId: second.id,
+    }, stock as never);
+
+    expect(claude.rollbackThread).toHaveBeenCalledWith({ threadId: backend.id, numTurns: 1 });
+    expect(reverted).toMatchObject({
+      thread: { id: publicThread.id, turns: [] },
+      turnsBackwardsCursor: JSON.stringify({ turnId: first.id, includeAnchor: true }),
+      itemsBackwardsCursor: "hyb-overlay-item:0",
+    });
+    await expect(service.revertLogicalThread({ threadId: publicThread.id, beforeTurnId: "missing" }, stock as never))
+      .rejects.toThrow("Unknown turn 'missing'");
+    await expect(service.revertLogicalThread({ threadId: publicThread.id, beforeTurnId: first.id }, stock as never))
+      .rejects.toThrow("Rollback removed every provider turn.");
+    service.close();
+  });
+
   it("lets an explicit source-provider turn cancel a switch staged by another client", () => {
     const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
     const claude = {

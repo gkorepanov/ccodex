@@ -9,6 +9,8 @@ import type { ThreadItemsListResponse } from "../codex/generated/v2/ThreadItemsL
 import type { ThreadSectionMoveParams } from "../codex/generated/v2/ThreadSectionMoveParams.js";
 import type { ThreadMetadataUpdateParams } from "../codex/generated/v2/ThreadMetadataUpdateParams.js";
 import type { ThreadSetNameParams } from "../codex/generated/v2/ThreadSetNameParams.js";
+import type { ThreadRevertParams } from "../codex/generated/v2/ThreadRevertParams.js";
+import type { ThreadRevertResponse } from "../codex/generated/v2/ThreadRevertResponse.js";
 import type { ThreadRollbackParams } from "../codex/generated/v2/ThreadRollbackParams.js";
 import type { ThreadRollbackResponse } from "../codex/generated/v2/ThreadRollbackResponse.js";
 import type { ThreadInjectItemsParams } from "../codex/generated/v2/ThreadInjectItemsParams.js";
@@ -42,7 +44,7 @@ import {
   projectRpcToPublicThread,
 } from "../gateway/logicalThreadProjection.js";
 import { invalidParams } from "../protocol/errors.js";
-import { paginateTurns } from "../protocol/turnPagination.js";
+import { paginateTurns, turnCursor } from "../protocol/turnPagination.js";
 import { filterSortThreads } from "../store/threadFilter.js";
 import { v7 as uuidv7 } from "uuid";
 import {
@@ -1007,25 +1009,54 @@ export class CrossProviderForks {
     }
   }
 
-  public async rollbackLogicalThread(
+  public rollbackLogicalThread(
     params: ThreadRollbackParams,
     clientStock: StockRpc,
     connectionId?: string,
   ): Promise<ThreadRollbackResponse> {
+    if (!Number.isInteger(params.numTurns) || params.numTurns < 0) {
+      throw invalidParams("numTurns must be a non-negative integer.");
+    }
+    return this.truncateLogicalThread(params.threadId, (turns) => turns.length - params.numTurns, clientStock, connectionId);
+  }
+
+  /** `thread/revert` on a logical thread: drops `beforeTurnId` and later public turns via the rollback path. */
+  public async revertLogicalThread(
+    params: ThreadRevertParams,
+    clientStock: StockRpc,
+    connectionId?: string,
+  ): Promise<ThreadRevertResponse> {
+    const { thread } = await this.truncateLogicalThread(params.threadId, (turns) => {
+      const keep = turns.findIndex((entry) => entry.publicTurnId === params.beforeTurnId);
+      if (keep === -1) throw invalidParams(`Unknown turn '${params.beforeTurnId}'.`);
+      return keep;
+    }, clientStock, connectionId);
+    return {
+      thread: { ...thread, turns: [] },
+      turnsBackwardsCursor: thread.turns.length ? turnCursor(thread.turns.at(-1)!.id, true) : null,
+      itemsBackwardsCursor: thread.turns.some((turn) => turn.items.length) ? "hyb-overlay-item:0" : null,
+    };
+  }
+
+  private async truncateLogicalThread(
+    publicThreadId: string,
+    keepOf: (turns: readonly NewLogicalTurn[]) => number,
+    clientStock: StockRpc,
+    connectionId?: string,
+  ): Promise<ThreadRollbackResponse> {
+    const params = { threadId: publicThreadId };
     const selection = this.store.getForkSelection(params.threadId);
     const unresolvedTarget = this.epochs.resolve(params.threadId);
     if (!unresolvedTarget) throw invalidParams(`Unknown logical thread '${params.threadId}'.`);
     const target = await this.hydrate(unresolvedTarget, this.daemonStock ?? clientStock);
-    if (!Number.isInteger(params.numTurns) || params.numTurns < 0) {
-      throw invalidParams("numTurns must be a non-negative integer.");
-    }
     const pendingFork = selection?.status === "pending" ? selection : undefined;
     const currentTurns = await this.currentBackendTurns(target, this.daemonStock ?? clientStock);
     const turns = await this.snapshotTurns(
       params.threadId, currentTurns, this.daemonStock ?? clientStock,
     );
-    const keep = turns.length - params.numTurns;
+    const keep = keepOf(turns);
     if (keep <= 0) throw invalidParams("Rollback removed every provider turn.");
+    const numTurns = turns.length - keep;
     const retained = turns.slice(0, keep);
     const boundary = [...retained].reverse().find((turn) => turn.epochId && turn.providerTurnId);
     if (!boundary?.epochId || !boundary.providerTurnId) {
@@ -1038,7 +1069,7 @@ export class CrossProviderForks {
     }
     const selectedEpoch = await this.hydrateEpoch(selectedBoundary.epochId, this.daemonStock ?? clientStock);
     if (!pendingFork && selectedEpoch.id === target.epoch.id) {
-      if (params.numTurns === 0) {
+      if (numTurns === 0) {
         const backend = target.epoch.provider === "claude"
           ? this.claude.readThread(target.epoch.backendThreadId, true).thread
           : (await clientStock.request("thread/read", {
@@ -1055,11 +1086,11 @@ export class CrossProviderForks {
       const rolled = target.epoch.provider === "claude"
         ? await this.claude.rollbackThread({
           threadId: target.epoch.backendThreadId,
-          numTurns: params.numTurns,
+          numTurns,
         })
         : await clientStock.request("thread/rollback", {
           threadId: target.epoch.backendThreadId,
-          numTurns: params.numTurns,
+          numTurns,
         }) as ThreadRollbackResponse;
       return { thread: this.epochs.projectThread(
         params.threadId,

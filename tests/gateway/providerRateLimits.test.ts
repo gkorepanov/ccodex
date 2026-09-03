@@ -1554,6 +1554,32 @@ describe("provider-aware rate-limit gateway routing", () => {
     });
   });
 
+  it("routes App revert for a logical thread through the history rollback and notifies after the result", async () => {
+    const revertLogicalThread = vi.fn(async () => ({
+      thread: { ...stockThread("public-fork"), turns: [] }, turnsBackwardsCursor: null, itemsBackwardsCursor: null,
+    }));
+    const harness = await makeHarness(fakeClaude(), undefined, undefined, DEFAULT_FEATURES, {
+      logical: (threadId: string) => threadId === "public-fork" ? { epoch: { provider: "stock" } } : undefined,
+      revertLogicalThread,
+    });
+    const observed: string[] = [];
+    harness.subscriptions.subscribe("public-fork", "observer", (method) => observed.push(method));
+
+    harness.client.request("revert-before", "thread/revert", { threadId: "public-fork", beforeTurnId: "turn-2" });
+    await settle();
+
+    expect(revertLogicalThread).toHaveBeenCalledWith(
+      { threadId: "public-fork", beforeTurnId: "turn-2" },
+      expect.anything(),
+      expect.any(String),
+    );
+    expect(messages(harness, "revert-before")[0]).toMatchObject({
+      result: { thread: { id: "public-fork", turns: [] }, turnsBackwardsCursor: null },
+    });
+    expect(observed).toEqual(["thread/reverted"]);
+    expect(harness.stockRequests.some((request) => request.method === "thread/revert")).toBe(false);
+  });
+
   it("does not let a system-ephemeral title worker steal Claude foreground", async () => {
     const harness = await makeHarness();
     harness.client.request("claude", "thread/start", { model: "claude:sonnet", threadSource: "user" });

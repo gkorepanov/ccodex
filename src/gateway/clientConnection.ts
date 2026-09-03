@@ -1039,7 +1039,8 @@ export function attachClientConnection(
           }
         }
         if (params.threadId && handoffs.logical?.(params.threadId)
-          && message.method !== "thread/fork" && message.method !== "thread/rollback") {
+          && message.method !== "thread/fork" && message.method !== "thread/rollback"
+          && message.method !== "thread/revert") {
           if (message.method === "thread/unsubscribe") {
             subscriptions.unsubscribe(params.threadId, connectionId);
             sendResult(message.id, { status: "unsubscribed" });
@@ -1220,6 +1221,15 @@ export function attachClientConnection(
             stockRpc,
             connectionId,
           ));
+          return;
+        }
+        if (params.threadId && message.method === "thread/revert" && handoffs.logical?.(params.threadId)) {
+          sendResult(message.id, await handoffs.revertLogicalThread(
+            (message.params ?? {}) as ThreadRevertParams,
+            stockRpc,
+            connectionId,
+          ));
+          subscriptions.emitPublic(params.threadId, "thread/reverted", { threadId: params.threadId });
           return;
         }
         if (params.threadId && handoffs.overlay(params.threadId)) {
