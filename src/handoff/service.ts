@@ -824,6 +824,9 @@ export class CrossProviderForks {
     if (method === "thread/queue/list") {
       return { provider: "claude", result: this.claude.listQueue(params as unknown as ThreadQueueListParams) };
     }
+    if (method === "app/list" || method === "mcpServerStatus/list") {
+      return { provider: "claude", result: { data: [], nextCursor: null } };
+    }
     if (method === "thread/queue/add") {
       const prepared = await this.claude.addQueuedSubmission(params as unknown as ThreadQueueAddParams);
       return { provider: "claude", result: prepared.response, after: prepared.after };

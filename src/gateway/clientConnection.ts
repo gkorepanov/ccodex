@@ -78,6 +78,9 @@ import type { OptimisticSideThreads, OptimisticSideTarget } from "./optimisticSi
 import { projectRpcToPublicThread } from "./logicalThreadProjection.js";
 import { isUserSideFork, normalizeUserSideFork } from "./sideFork.js";
 
+/** Stock RPC failures the App handles itself; a chat banner would only add noise (e.g. app/list 403 from Cloudflare). */
+const BANNERLESS_STOCK_ERRORS = new Set(["thread/read", "turn/steer", "app/list", "mcpServerStatus/list"]);
+
 type ForegroundProvider = "codex" | "claude";
 type FastSettings = Pick<ThreadSettings, "model" | "serviceTier">;
 
@@ -1469,6 +1472,11 @@ export function attachClientConnection(
             sendResult(message.id, claude.listQueue((message.params ?? {}) as ThreadQueueListParams));
             return;
           }
+          if (message.method === "app/list" || message.method === "mcpServerStatus/list") {
+            // Codex apps and MCP servers never apply to a Claude runtime.
+            sendResult(message.id, { data: [], nextCursor: null });
+            return;
+          }
           if (message.method === "thread/queue/add") {
             const prepared = await claude.addQueuedSubmission((message.params ?? {}) as ThreadQueueAddParams);
             sendResult(message.id, prepared.response);
@@ -1658,7 +1666,7 @@ export function attachClientConnection(
           }
         }
         if (forwarded?.threadId && isUuid(forwarded.threadId) && "error" in message
-          && forwarded.method !== "thread/read" && forwarded.method !== "turn/steer") {
+          && !BANNERLESS_STOCK_ERRORS.has(forwarded.method)) {
           emitSystemError(forwarded.threadId, message.error.message);
         }
         if (forwarded && "result" in message) {

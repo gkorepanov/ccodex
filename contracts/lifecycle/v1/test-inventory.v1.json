@@ -18,7 +18,7 @@
   },
   "counts": {
     "architecture-invariant": 142,
-    "external-contract": 373,
+    "external-contract": 375,
     "provider-mapping": 71,
     "old-implementation-detail": 30
   },
@@ -3254,6 +3254,18 @@
     {
       "path": "tests/gateway/providerRateLimits.test.ts",
       "title": "answers thread/queue/list for Claude threads with an empty queue instead of an error",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/gateway/providerRateLimits.test.ts",
+      "title": "answers app/list and mcpServerStatus/list for Claude threads with empty pages",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/gateway/providerRateLimits.test.ts",
+      "title": "relays stock app/list failures without a chat banner",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },

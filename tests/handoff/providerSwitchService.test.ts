@@ -656,6 +656,10 @@ describe("provider switch service", () => {
 
     expect(claude.listQueue).toHaveBeenCalledWith({ threadId: backend.id, limit: 100 });
     expect(response).toMatchObject({ provider: "claude", result: { data: [], nextCursor: null } });
+    for (const method of ["app/list", "mcpServerStatus/list"]) {
+      expect(await service.requestLogical(method, { threadId: publicThread.id }, stock as never))
+        .toMatchObject({ provider: "claude", result: { data: [], nextCursor: null } });
+    }
     expect(stock.request).not.toHaveBeenCalled();
     service.close();
   });

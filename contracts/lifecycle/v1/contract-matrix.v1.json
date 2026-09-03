@@ -34,6 +34,8 @@
     "thread/queue/delete",
     "thread/queue/reorder",
     "thread/queue/start",
+    "app/list",
+    "mcpServerStatus/list",
     "thread/goal/set",
     "thread/goal/get",
     "thread/goal/clear",

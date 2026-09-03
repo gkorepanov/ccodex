@@ -424,6 +424,10 @@ async function makeHarness(
         id: request.id,
         error: { code: -32600, message: "expected active turn id `stale` but found `fresh`" },
       }));
+      else if (request.method === "app/list") ws.send(JSON.stringify({
+        id: request.id,
+        error: { code: -32603, message: "failed to list apps: Request failed with status 403 Forbidden: <html>" },
+      }));
       else ws.send(JSON.stringify({ id: request.id, result: {} }));
     });
   }));
@@ -1021,6 +1025,34 @@ describe("provider-aware rate-limit gateway routing", () => {
       id: "queue-claude", result: { data: [], nextCursor: null },
     });
     expect(harness.stockRequests.some((request) => request.id === "queue-claude")).toBe(false);
+  });
+
+  it("answers app/list and mcpServerStatus/list for Claude threads with empty pages", async () => {
+    const harness = await makeHarness();
+    harness.client.request("start-claude", "thread/start", { model: "claude:sonnet" });
+    await settle();
+    const threadId = (messages(harness, "start-claude")[0] as any).result.thread.id;
+    harness.client.request("apps-claude", "app/list", { threadId, limit: 1000, forceRefetch: false });
+    harness.client.request("mcp-claude", "mcpServerStatus/list", { threadId, limit: 100, detail: "toolsAndAuthOnly" });
+    await settle();
+    for (const id of ["apps-claude", "mcp-claude"]) {
+      expect(messages(harness, id)[0]).toEqual({ id, result: { data: [], nextCursor: null } });
+      expect(harness.stockRequests.some((request) => request.id === id)).toBe(false);
+    }
+  });
+
+  it("relays stock app/list failures without a chat banner", async () => {
+    const harness = await makeHarness();
+    const threadId = randomUUID();
+    const before = harness.client.sent.length;
+    harness.client.request("apps-stock", "app/list", { threadId, limit: 1000, forceRefetch: false });
+    await settle();
+    expect(messages(harness, "apps-stock")[0]).toMatchObject({
+      error: { code: -32603, message: expect.stringContaining("failed to list apps") },
+    });
+    const banners = (harness.client.sent.slice(before) as any[])
+      .filter((message) => JSON.stringify(message).includes("CCodex"));
+    expect(banners).toEqual([]);
   });
 
   it("dispatches every thread/queue method for owned Claude threads and runs add/start after the result", async () => {
