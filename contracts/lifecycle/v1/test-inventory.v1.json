@@ -18,7 +18,7 @@
   },
   "counts": {
     "architecture-invariant": 142,
-    "external-contract": 362,
+    "external-contract": 364,
     "provider-mapping": 71,
     "old-implementation-detail": 29
   },
@@ -3211,6 +3211,12 @@
     },
     {
       "path": "tests/gateway/providerRateLimits.test.ts",
+      "title": "answers thread/queue/list for Claude threads with an empty queue instead of an error",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/gateway/providerRateLimits.test.ts",
       "title": "suppresses every internal stock compact event before generic error rendering",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
@@ -3308,6 +3314,12 @@
     {
       "path": "tests/gateway/providerRateLimits.test.ts",
       "title": "routes App rollback for every logical thread to the universal history rollback",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/gateway/providerRateLimits.test.ts",
+      "title": "routes App revert for a logical thread through the history rollback and notifies after the result",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },

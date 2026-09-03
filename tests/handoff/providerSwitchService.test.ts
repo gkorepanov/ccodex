@@ -633,6 +633,33 @@ describe("provider switch service", () => {
     service.close();
   });
 
+  it("answers thread/queue/list for a logical Claude thread from the Claude adapter", async () => {
+    const backend = thread("claude-backend", "claude", [turn("claude-turn-1", "first answer")]);
+    const publicThread = { ...backend, id: "public-thread", sessionId: "public-thread" };
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    store.createLogicalThread({
+      thread: publicThread,
+      epoch: { id: "claude-epoch", provider: "claude", backendThreadId: backend.id, model: "claude:sonnet", settings: {} },
+    });
+    const claude = {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: (id: string) => id === backend.id,
+      readThread: vi.fn(() => ({ thread: backend })),
+      listQueue: vi.fn(() => ({ data: [], nextCursor: null })),
+    };
+    const stock = { request: vi.fn() };
+    const service = new CrossProviderForks(store, claude as never);
+
+    const response = await service.requestLogical("thread/queue/list", {
+      threadId: publicThread.id, limit: 100,
+    }, stock as never);
+
+    expect(claude.listQueue).toHaveBeenCalledWith({ threadId: backend.id, limit: 100 });
+    expect(response).toMatchObject({ provider: "claude", result: { data: [], nextCursor: null } });
+    expect(stock.request).not.toHaveBeenCalled();
+    service.close();
+  });
+
   it("lets an explicit source-provider turn cancel a switch staged by another client", () => {
     const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
     const claude = {

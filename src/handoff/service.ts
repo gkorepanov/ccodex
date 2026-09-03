@@ -18,6 +18,7 @@ import type { ThreadShellCommandParams } from "../codex/generated/v2/ThreadShell
 import type { TurnInterruptParams } from "../codex/generated/v2/TurnInterruptParams.js";
 import type { TurnSteerParams } from "../codex/generated/v2/TurnSteerParams.js";
 import type { ThreadGoalSetParams } from "../codex/generated/v2/ThreadGoalSetParams.js";
+import type { ThreadQueueListParams } from "../codex/generated/v2/ThreadQueueListParams.js";
 import type { ThreadBackgroundTerminalsCleanParams } from "../codex/generated/v2/ThreadBackgroundTerminalsCleanParams.js";
 import type { ThreadBackgroundTerminalsListParams } from "../codex/generated/v2/ThreadBackgroundTerminalsListParams.js";
 import type { ThreadBackgroundTerminalsTerminateParams } from "../codex/generated/v2/ThreadBackgroundTerminalsTerminateParams.js";
@@ -814,6 +815,9 @@ export class CrossProviderForks {
     }
     if (method === "turn/steer") {
       return { provider: "claude", result: await this.claude.steerTurn(params as unknown as TurnSteerParams) };
+    }
+    if (method === "thread/queue/list") {
+      return { provider: "claude", result: this.claude.listQueue(params as unknown as ThreadQueueListParams) };
     }
     throw invalidParams(`Method '${method}' is not implemented for a migrated Claude task yet.`);
   }

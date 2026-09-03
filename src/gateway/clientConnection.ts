@@ -16,6 +16,7 @@ import type { ThreadMetadataUpdateParams } from "../codex/generated/v2/ThreadMet
 import type { ThreadItemsListParams } from "../codex/generated/v2/ThreadItemsListParams.js";
 import type { ThreadSearchOccurrencesParams } from "../codex/generated/v2/ThreadSearchOccurrencesParams.js";
 import type { ThreadGoalSetParams } from "../codex/generated/v2/ThreadGoalSetParams.js";
+import type { ThreadQueueListParams } from "../codex/generated/v2/ThreadQueueListParams.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
 import type { ThreadRevertParams } from "../codex/generated/v2/ThreadRevertParams.js";
@@ -1457,6 +1458,10 @@ export function attachClientConnection(
           }
           if (message.method === "thread/goal/get") {
             sendResult(message.id, await claude.getGoal(params.threadId));
+            return;
+          }
+          if (message.method === "thread/queue/list") {
+            sendResult(message.id, claude.listQueue((message.params ?? {}) as ThreadQueueListParams));
             return;
           }
           if (message.method === "thread/goal/clear") {

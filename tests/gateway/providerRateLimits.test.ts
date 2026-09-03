@@ -192,6 +192,7 @@ function fakeClaude() {
       response: { thread: { id: params.threadId } },
       notifyGoalSnapshot: vi.fn(),
     })),
+    listQueue: vi.fn((_params: { threadId: string }) => ({ data: [], nextCursor: null })),
     searchOccurrences: vi.fn((params: { threadId: string; searchTerm: string }) => ({
       data: [{
         turnId: "claude-turn", itemId: "claude-item", snippet: params.searchTerm,
@@ -988,6 +989,20 @@ describe("provider-aware rate-limit gateway routing", () => {
       result: { data: [{ turnId: "claude-turn", itemId: "claude-item" }], nextCursor: null },
     });
     expect(harness.stockRequests.some((request) => request.id === "search-claude")).toBe(false);
+  });
+
+  it("answers thread/queue/list for Claude threads with an empty queue instead of an error", async () => {
+    const harness = await makeHarness();
+    harness.client.request("start-claude", "thread/start", { model: "claude:sonnet" });
+    await settle();
+    const threadId = (messages(harness, "start-claude")[0] as any).result.thread.id;
+    harness.client.request("queue-claude", "thread/queue/list", { threadId, limit: 100 });
+    await settle();
+    expect(harness.claude.listQueue).toHaveBeenCalledWith({ threadId, limit: 100 });
+    expect(messages(harness, "queue-claude")[0]).toEqual({
+      id: "queue-claude", result: { data: [], nextCursor: null },
+    });
+    expect(harness.stockRequests.some((request) => request.id === "queue-claude")).toBe(false);
   });
 
   it("suppresses every internal stock compact event before generic error rendering", async () => {

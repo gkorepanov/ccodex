@@ -15,6 +15,8 @@ import type { ThreadSearchOccurrencesParams } from "../codex/generated/v2/Thread
 import type { ThreadSearchOccurrencesResponse } from "../codex/generated/v2/ThreadSearchOccurrencesResponse.js";
 import type { ThreadGoal } from "../codex/generated/v2/ThreadGoal.js";
 import type { ThreadGoalSetParams } from "../codex/generated/v2/ThreadGoalSetParams.js";
+import type { ThreadQueueListParams } from "../codex/generated/v2/ThreadQueueListParams.js";
+import type { ThreadQueueListResponse } from "../codex/generated/v2/ThreadQueueListResponse.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
 import type { ThreadRevertParams } from "../codex/generated/v2/ThreadRevertParams.js";
@@ -1651,6 +1653,12 @@ export class ClaudeService {
     return this.sessions.submit<Extract<PreparedGoalMutation, { kind: "set" }>>(
       params.threadId, { type: "goal", command: { kind: "prepareSet", params } },
     ).then((mutation) => this.goalHandle(params.threadId, mutation));
+  }
+
+  /** Claude threads keep no server-side submission queue: in-turn messages are steered, so the queue is always empty. */
+  public listQueue(params: ThreadQueueListParams): ThreadQueueListResponse {
+    this.requireRecord(params.threadId, false);
+    return { data: [], nextCursor: null };
   }
 
   public async getGoal(threadId: string): Promise<{ goal: ThreadGoal | null }> {
