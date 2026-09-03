@@ -17,6 +17,11 @@ import type { ThreadItemsListParams } from "../codex/generated/v2/ThreadItemsLis
 import type { ThreadSearchOccurrencesParams } from "../codex/generated/v2/ThreadSearchOccurrencesParams.js";
 import type { ThreadGoalSetParams } from "../codex/generated/v2/ThreadGoalSetParams.js";
 import type { ThreadQueueListParams } from "../codex/generated/v2/ThreadQueueListParams.js";
+import type { ThreadQueueAddParams } from "../codex/generated/v2/ThreadQueueAddParams.js";
+import type { ThreadQueueUpdateParams } from "../codex/generated/v2/ThreadQueueUpdateParams.js";
+import type { ThreadQueueDeleteParams } from "../codex/generated/v2/ThreadQueueDeleteParams.js";
+import type { ThreadQueueReorderParams } from "../codex/generated/v2/ThreadQueueReorderParams.js";
+import type { ThreadQueueStartParams } from "../codex/generated/v2/ThreadQueueStartParams.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
 import type { ThreadRevertParams } from "../codex/generated/v2/ThreadRevertParams.js";
@@ -1464,6 +1469,32 @@ export function attachClientConnection(
             sendResult(message.id, claude.listQueue((message.params ?? {}) as ThreadQueueListParams));
             return;
           }
+          if (message.method === "thread/queue/add") {
+            const prepared = await claude.addQueuedSubmission((message.params ?? {}) as ThreadQueueAddParams);
+            sendResult(message.id, prepared.response);
+            await prepared.after();
+            return;
+          }
+          if (message.method === "thread/queue/update") {
+            sendResult(message.id, await claude.updateQueuedSubmission((message.params ?? {}) as ThreadQueueUpdateParams));
+            return;
+          }
+          if (message.method === "thread/queue/delete") {
+            sendResult(message.id, await claude.deleteQueuedSubmission((message.params ?? {}) as ThreadQueueDeleteParams));
+            return;
+          }
+          if (message.method === "thread/queue/reorder") {
+            sendResult(message.id, await claude.reorderQueue((message.params ?? {}) as ThreadQueueReorderParams));
+            return;
+          }
+          if (message.method === "thread/queue/start") {
+            const prepared = await claude.prepareQueueStart((message.params ?? {}) as ThreadQueueStartParams);
+            sendResult(message.id, prepared.response);
+            selectForeground("claude", params.threadId);
+            await prepared.announce();
+            prepared.start();
+            return;
+          }
           if (message.method === "thread/goal/clear") {
             const prepared = await claude.prepareGoalClear(params.threadId);
             try {
@@ -1517,8 +1548,10 @@ export function attachClientConnection(
           : undefined;
         const threadId = typeof params?.threadId === "string" ? params.threadId : undefined;
         const childProjection = Boolean(threadId && claude.isChildProjection(threadId));
+        // A steer that lost its turn (App races an automatic queue drain) expects a plain RPC error, not a banner.
+        const silent = message.method === "turn/steer";
         let attachedToActiveTurn = false;
-        if (threadId && !childProjection && claude.ownsThread(threadId)) {
+        if (threadId && !childProjection && !silent && claude.ownsThread(threadId)) {
           attachedToActiveTurn = await claude.reportError(
             threadId,
             typeof params?.turnId === "string" ? params.turnId : undefined,
@@ -1542,7 +1575,7 @@ export function attachClientConnection(
           emitNotice(notice);
           return;
         }
-        if (threadId && !childProjection && !attachedToActiveTurn) emitSystemError(threadId, failure.message);
+        if (threadId && !childProjection && !attachedToActiveTurn && !silent) emitSystemError(threadId, failure.message);
         sendError(message.id, failure.code, failure.message);
         if (threadId && !childProjection && !claude.ownsThread(threadId)) {
             sendJson({
@@ -1625,7 +1658,7 @@ export function attachClientConnection(
           }
         }
         if (forwarded?.threadId && isUuid(forwarded.threadId) && "error" in message
-          && forwarded.method !== "thread/read") {
+          && forwarded.method !== "thread/read" && forwarded.method !== "turn/steer") {
           emitSystemError(forwarded.threadId, message.error.message);
         }
         if (forwarded && "result" in message) {

@@ -18,9 +18,9 @@
   },
   "counts": {
     "architecture-invariant": 142,
-    "external-contract": 364,
+    "external-contract": 373,
     "provider-mapping": 71,
-    "old-implementation-detail": 29
+    "old-implementation-detail": 30
   },
   "cases": [
     {
@@ -1860,6 +1860,42 @@
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
     {
+      "path": "tests/claude/service.test.ts",
+      "title": "queues a submission during an active turn and starts it after completion with the client message id",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "starts a submission added to an idle thread immediately",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "keeps the queue paused after an interrupt until an explicit queue start",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "validates queue mutations, paginates the list, and starts a selected entry ahead of the head",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "caps the queue at 100 entries and rejects ephemeral threads",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "keeps queued submissions across a service restart and drains them on resume",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
       "path": "tests/claude/session/architecture.test.ts",
       "title": "keeps thread creation and announcement off direct service store/runtime/hub writers",
       "classification": "architecture-invariant",
@@ -3126,6 +3162,12 @@
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
     {
+      "path": "tests/gateway/goalRpc.test.ts",
+      "title": "queues an App submission during an active turn, drains it after completion, and answers a stale steer with a plain error",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
       "path": "tests/gateway/providerRateLimits.test.ts",
       "title": "shows one branded notice when a Claude task switches Standard to Fast",
       "classification": "external-contract",
@@ -3212,6 +3254,18 @@
     {
       "path": "tests/gateway/providerRateLimits.test.ts",
       "title": "answers thread/queue/list for Claude threads with an empty queue instead of an error",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/gateway/providerRateLimits.test.ts",
+      "title": "dispatches every thread/queue method for owned Claude threads and runs add/start after the result",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/gateway/providerRateLimits.test.ts",
+      "title": "returns turn/steer failures as plain RPC errors without a chat banner for Claude and stock threads",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
@@ -3554,6 +3608,12 @@
     {
       "path": "tests/store/sqliteStore.test.ts",
       "title": "persists thread metadata and durable turns",
+      "classification": "old-implementation-detail",
+      "rationale": "Freezes the current broad-record/SQLite implementation; retain as migration evidence, not reducer parity."
+    },
+    {
+      "path": "tests/store/sqliteStore.test.ts",
+      "title": "persists the per-thread submission queue and drops it with the thread",
       "classification": "old-implementation-detail",
       "rationale": "Freezes the current broad-record/SQLite implementation; retain as migration evidence, not reducer parity."
     },

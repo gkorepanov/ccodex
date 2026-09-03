@@ -8,6 +8,7 @@ import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { ThreadListParams } from "../codex/generated/v2/ThreadListParams.js";
 import type { Turn } from "../codex/generated/v2/Turn.js";
 import type { ApprovalsReviewer } from "../codex/generated/v2/ApprovalsReviewer.js";
+import type { QueuedSubmission } from "../codex/generated/v2/QueuedSubmission.js";
 import type {
   AppendProviderEvent, ClaudeThreadRecord, EventPersistence, GoalPatch, GoalUsageInput, HybridStore, InternalGoal,
   PendingRequestRecord, PendingThreadRemoval, ProviderEventDisposition, ProviderEventRecord, ProviderItemCorrelation,
@@ -773,6 +774,24 @@ export class SqliteHybridStore implements HybridStore {
     return Number(this.database.prepare("DELETE FROM goals WHERE thread_id = ?").run(threadId).changes) > 0;
   }
 
+  public listQueuedSubmissions(threadId: string): QueuedSubmission[] {
+    const row = this.database.prepare("SELECT queue_json FROM thread_queues WHERE thread_id = ?").get(threadId) as unknown as
+      | { queue_json: string }
+      | undefined;
+    return row ? JSON.parse(row.queue_json) as QueuedSubmission[] : [];
+  }
+
+  public setQueuedSubmissions(threadId: string, items: readonly QueuedSubmission[]): void {
+    if (items.length === 0) {
+      this.database.prepare("DELETE FROM thread_queues WHERE thread_id = ?").run(threadId);
+      return;
+    }
+    this.database.prepare(`
+      INSERT INTO thread_queues (thread_id, queue_json) VALUES (?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET queue_json = excluded.queue_json
+    `).run(threadId, json(items));
+  }
+
   public accountGoalUsage(input: GoalUsageInput): InternalGoal | undefined {
     return this.transaction(() => {
       if (input.checkpointKey) {
@@ -850,6 +869,7 @@ export class SqliteHybridStore implements HybridStore {
   private deleteThreadRows(threadId: string): void {
     this.database.prepare("DELETE FROM provider_item_correlations WHERE owner_thread_id = ?").run(threadId);
     this.database.prepare("DELETE FROM goals WHERE thread_id = ?").run(threadId);
+    this.database.prepare("DELETE FROM thread_queues WHERE thread_id = ?").run(threadId);
     this.database.prepare("DELETE FROM pending_requests WHERE thread_id = ?").run(threadId);
     this.database.prepare("DELETE FROM events WHERE thread_id = ?").run(threadId);
     this.database.prepare("DELETE FROM turns WHERE thread_id = ?").run(threadId);
@@ -959,6 +979,10 @@ export class SqliteHybridStore implements HybridStore {
       CREATE TABLE IF NOT EXISTS goals (
         thread_id TEXT PRIMARY KEY,
         goal_json TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS thread_queues (
+        thread_id TEXT PRIMARY KEY,
+        queue_json TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS goal_checkpoints (
         thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,

@@ -19,6 +19,11 @@ import type { TurnInterruptParams } from "../codex/generated/v2/TurnInterruptPar
 import type { TurnSteerParams } from "../codex/generated/v2/TurnSteerParams.js";
 import type { ThreadGoalSetParams } from "../codex/generated/v2/ThreadGoalSetParams.js";
 import type { ThreadQueueListParams } from "../codex/generated/v2/ThreadQueueListParams.js";
+import type { ThreadQueueAddParams } from "../codex/generated/v2/ThreadQueueAddParams.js";
+import type { ThreadQueueUpdateParams } from "../codex/generated/v2/ThreadQueueUpdateParams.js";
+import type { ThreadQueueDeleteParams } from "../codex/generated/v2/ThreadQueueDeleteParams.js";
+import type { ThreadQueueReorderParams } from "../codex/generated/v2/ThreadQueueReorderParams.js";
+import type { ThreadQueueStartParams } from "../codex/generated/v2/ThreadQueueStartParams.js";
 import type { ThreadBackgroundTerminalsCleanParams } from "../codex/generated/v2/ThreadBackgroundTerminalsCleanParams.js";
 import type { ThreadBackgroundTerminalsListParams } from "../codex/generated/v2/ThreadBackgroundTerminalsListParams.js";
 import type { ThreadBackgroundTerminalsTerminateParams } from "../codex/generated/v2/ThreadBackgroundTerminalsTerminateParams.js";
@@ -818,6 +823,33 @@ export class CrossProviderForks {
     }
     if (method === "thread/queue/list") {
       return { provider: "claude", result: this.claude.listQueue(params as unknown as ThreadQueueListParams) };
+    }
+    if (method === "thread/queue/add") {
+      const prepared = await this.claude.addQueuedSubmission(params as unknown as ThreadQueueAddParams);
+      return { provider: "claude", result: prepared.response, after: prepared.after };
+    }
+    if (method === "thread/queue/update") {
+      return {
+        provider: "claude",
+        result: await this.claude.updateQueuedSubmission(params as unknown as ThreadQueueUpdateParams),
+      };
+    }
+    if (method === "thread/queue/delete") {
+      return {
+        provider: "claude",
+        result: await this.claude.deleteQueuedSubmission(params as unknown as ThreadQueueDeleteParams),
+      };
+    }
+    if (method === "thread/queue/reorder") {
+      return { provider: "claude", result: await this.claude.reorderQueue(params as unknown as ThreadQueueReorderParams) };
+    }
+    if (method === "thread/queue/start") {
+      const prepared = await this.claude.prepareQueueStart(params as unknown as ThreadQueueStartParams);
+      return {
+        provider: "claude",
+        result: prepared.response,
+        after: async () => { await prepared.announce(); prepared.start(); },
+      };
     }
     throw invalidParams(`Method '${method}' is not implemented for a migrated Claude task yet.`);
   }

@@ -7821,3 +7821,229 @@ You are in a side conversation, not the main thread.`,
     await withoutDefault.close();
   });
 });
+
+describe("ClaudeService submission queue", () => {
+  const text = (value: string) => [{ type: "text" as const, text: value, text_elements: [] }];
+  const pauseSentinel = () => ({
+    type: "system", subtype: "status", status: "working", uuid: randomUUID(), session_id: "session",
+  } as unknown as SDKMessage);
+
+  function heldFake(): { fake: FakeClaudeQuery; release: () => void } {
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => { release = resolve; });
+    const fake = new FakeClaudeQuery(
+      undefined, undefined, [], false, undefined, undefined, undefined, [pauseSentinel()], { afterIndex: 0, wait },
+    );
+    return { fake, release };
+  }
+
+  function makeService(prefix: string, fake: FakeClaudeQuery) {
+    const directory = mkdtempSync(join(tmpdir(), prefix));
+    directories.push(directory);
+    const hub = new SubscriptionHub();
+    const service = new ClaudeService(
+      config(directory), hub, new Logger("error"),
+      new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory,
+    );
+    return { directory, hub, service };
+  }
+
+  const turns = (service: ClaudeService, threadId: string) => service.readThread(threadId, true).thread.turns;
+
+  it("queues a submission during an active turn and starts it after completion with the client message id", async () => {
+    const { fake, release } = heldFake();
+    const { directory, hub, service } = makeService("ccodex-queue-active-", fake);
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const threadId = started.thread.id;
+    const events: Array<{ method: string; turnId: string | undefined }> = [];
+    hub.subscribe(threadId, "queue", (method, params) => events.push({
+      method, turnId: (params as { turn?: { id?: string } }).turn?.id,
+    }));
+    const first = await service.prepareTurn({ threadId, input: text("stay busy") });
+    await first.announce();
+    first.start();
+    await waitFor(() => fake.prompts.length === 1, "first prompt");
+
+    const added = await service.addQueuedSubmission({
+      threadId, input: text("queued one"), clientUserMessageId: "cm-1",
+    });
+    expect(added.response.queuedSubmission).toEqual({
+      id: expect.any(String), input: text("queued one"), clientUserMessageId: "cm-1",
+    });
+    await added.after();
+    expect(turns(service, threadId)).toHaveLength(1);
+    expect(service.listQueue({ threadId })).toEqual({
+      data: [added.response.queuedSubmission], nextCursor: null,
+    });
+    expect(events.filter((event) => event.method === "thread/queue/changed")).toHaveLength(1);
+    await expect(service.prepareQueueStart({ threadId }))
+      .rejects.toThrow("thread already has an active or pending turn");
+
+    release();
+    await waitFor(() => turns(service, threadId)[1]?.status === "completed", "drained queued turn");
+    const second = turns(service, threadId)[1]!;
+    expect(second.items).toContainEqual(expect.objectContaining({
+      type: "userMessage", clientId: "cm-1", content: text("queued one"),
+    }));
+    expect(service.listQueue({ threadId })).toEqual({ data: [], nextCursor: null });
+    const completedFirst = events.findIndex((event) => event.method === "turn/completed" && event.turnId === first.response.turn.id);
+    const secondChanged = events.findIndex((event, index) => event.method === "thread/queue/changed" && index > completedFirst);
+    const startedSecond = events.findIndex((event) => event.method === "turn/started" && event.turnId === second.id);
+    expect(completedFirst).toBeGreaterThanOrEqual(0);
+    expect(secondChanged).toBeGreaterThan(completedFirst);
+    expect(startedSecond).toBeGreaterThan(secondChanged);
+    await service.close();
+  });
+
+  it("starts a submission added to an idle thread immediately", async () => {
+    const fake = new FakeClaudeQuery();
+    const { directory, hub, service } = makeService("ccodex-queue-idle-", fake);
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const threadId = started.thread.id;
+    const methods: string[] = [];
+    hub.subscribe(threadId, "queue", (method) => methods.push(method));
+    const added = await service.addQueuedSubmission({
+      threadId, input: text("right away"), clientUserMessageId: "cm-idle",
+    });
+    await added.after();
+    await waitFor(() => turns(service, threadId)[0]?.status === "completed", "immediately started turn");
+    expect(turns(service, threadId)[0]!.items).toContainEqual(expect.objectContaining({
+      type: "userMessage", clientId: "cm-idle", content: text("right away"),
+    }));
+    expect(methods.filter((method) => method === "thread/queue/changed")).toHaveLength(2);
+    expect(service.listQueue({ threadId })).toEqual({ data: [], nextCursor: null });
+    await service.close();
+  });
+
+  it("keeps the queue paused after an interrupt until an explicit queue start", async () => {
+    const { fake, release } = heldFake();
+    const { directory, service } = makeService("ccodex-queue-interrupt-", fake);
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const threadId = started.thread.id;
+    const first = await service.prepareTurn({ threadId, input: text("to be interrupted") });
+    await first.announce();
+    first.start();
+    await waitFor(() => fake.prompts.length === 1, "first prompt");
+    const added = await service.addQueuedSubmission({ threadId, input: text("after interrupt"), clientUserMessageId: "cm-2" });
+    await added.after();
+    await service.interruptTurn({ threadId, turnId: first.response.turn.id });
+    release();
+    await waitFor(() => turns(service, threadId)[0]?.status === "interrupted", "interrupted first turn");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(turns(service, threadId)).toHaveLength(1);
+    expect(service.listQueue({ threadId }).data).toHaveLength(1);
+
+    const prepared = await service.prepareQueueStart({ threadId });
+    expect(prepared.response.turn.status).toBe("inProgress");
+    expect(service.listQueue({ threadId }).data).toHaveLength(0);
+    await prepared.announce();
+    prepared.start();
+    await waitFor(() => turns(service, threadId)[1]?.status === "completed", "manually started queued turn");
+    expect(turns(service, threadId)[1]!.items).toContainEqual(expect.objectContaining({
+      type: "userMessage", clientId: "cm-2", content: text("after interrupt"),
+    }));
+    await service.close();
+  });
+
+  it("validates queue mutations, paginates the list, and starts a selected entry ahead of the head", async () => {
+    const fake = new FakeClaudeQuery();
+    const { directory, hub, service } = makeService("ccodex-queue-mutations-", fake);
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const threadId = started.thread.id;
+    let changed = 0;
+    hub.subscribe(threadId, "queue", (method) => { if (method === "thread/queue/changed") changed += 1; });
+    await expect(service.addQueuedSubmission({ threadId, input: [], clientUserMessageId: "empty" }))
+      .rejects.toThrow("only user input can be added to the user-message queue");
+    const add = async (label: string) =>
+      (await service.addQueuedSubmission({ threadId, input: text(label), clientUserMessageId: `cm-${label}` }))
+        .response.queuedSubmission;
+    const [a, b, c] = [await add("a"), await add("b"), await add("c")];
+    expect(changed).toBe(3);
+    expect(service.listQueue({ threadId })).toEqual({ data: [a, b, c], nextCursor: null });
+    expect(service.listQueue({ threadId, limit: 2 })).toEqual({ data: [a, b], nextCursor: "2" });
+    expect(service.listQueue({ threadId, cursor: "2", limit: 2 })).toEqual({ data: [c], nextCursor: null });
+    expect(() => service.listQueue({ threadId, cursor: "x" })).toThrow("invalid queue pagination cursor: x");
+
+    const updated = await service.updateQueuedSubmission({ threadId, queuedSubmissionId: b.id, input: text("b2") });
+    expect(updated.queuedSubmission).toEqual({ ...b, input: text("b2") });
+    expect(service.listQueue({ threadId }).data.map((entry) => entry.id)).toEqual([a.id, b.id, c.id]);
+    await expect(service.updateQueuedSubmission({ threadId, queuedSubmissionId: "nope", input: text("x") }))
+      .rejects.toThrow("queued submission not found: nope");
+    await expect(service.updateQueuedSubmission({ threadId, queuedSubmissionId: b.id, input: [] }))
+      .rejects.toThrow("only user input can be added to the user-message queue");
+
+    expect(await service.reorderQueue({ threadId, queuedSubmissionIds: [c.id, a.id, b.id] })).toEqual({});
+    expect(service.listQueue({ threadId }).data.map((entry) => entry.id)).toEqual([c.id, a.id, b.id]);
+    await expect(service.reorderQueue({ threadId, queuedSubmissionIds: [a.id, b.id] }))
+      .rejects.toThrow("queue reorder must include every queued submission exactly once");
+    await expect(service.reorderQueue({ threadId, queuedSubmissionIds: [a.id, b.id, b.id] }))
+      .rejects.toThrow("queue reorder must include every queued submission exactly once");
+
+    expect(await service.deleteQueuedSubmission({ threadId, queuedSubmissionId: b.id })).toEqual({ deleted: true });
+    expect(await service.deleteQueuedSubmission({ threadId, queuedSubmissionId: b.id })).toEqual({ deleted: false });
+    expect(changed).toBe(6);
+    await expect(service.prepareQueueStart({ threadId, queuedSubmissionId: "missing" }))
+      .rejects.toThrow("queued submission not found: missing");
+
+    const prepared = await service.prepareQueueStart({ threadId, queuedSubmissionId: a.id });
+    expect(service.listQueue({ threadId }).data).toEqual([c]);
+    await prepared.announce();
+    prepared.start();
+    await waitFor(() => turns(service, threadId)[1]?.status === "completed", "selected entry then drained head");
+    expect(turns(service, threadId).map((turn) => turn.items.find((item) => item.type === "userMessage")))
+      .toEqual([
+        expect.objectContaining({ clientId: "cm-a", content: text("a") }),
+        expect.objectContaining({ clientId: "cm-c", content: text("c") }),
+      ]);
+    expect(service.listQueue({ threadId })).toEqual({ data: [], nextCursor: null });
+    await expect(service.prepareQueueStart({ threadId })).rejects.toThrow("queue is empty");
+    await service.close();
+  });
+
+  it("caps the queue at 100 entries and rejects ephemeral threads", async () => {
+    const fake = new FakeClaudeQuery();
+    const { directory, service } = makeService("ccodex-queue-cap-", fake);
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const threadId = started.thread.id;
+    for (let index = 0; index < 100; index += 1) {
+      await service.addQueuedSubmission({ threadId, input: text(`n${index}`), clientUserMessageId: `cm-${index}` });
+    }
+    await expect(service.addQueuedSubmission({ threadId, input: text("overflow"), clientUserMessageId: "cm-100" }))
+      .rejects.toThrow("queue cannot contain more than 100 submissions");
+    expect(service.listQueue({ threadId, limit: 1000 })).toMatchObject({ nextCursor: null });
+    expect(service.listQueue({ threadId, limit: 1000 }).data).toHaveLength(100);
+
+    const ephemeral = await service.startThread({ model: "claude:haiku", cwd: directory, ephemeral: true });
+    await expect(service.addQueuedSubmission({
+      threadId: ephemeral.thread.id, input: text("nope"), clientUserMessageId: "cm-e",
+    })).rejects.toThrow(`ephemeral thread does not support queued submissions: ${ephemeral.thread.id}`);
+    await service.close();
+  });
+
+  it("keeps queued submissions across a service restart and drains them on resume", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ccodex-queue-restart-"));
+    directories.push(directory);
+    const first = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(join(directory, "state.sqlite")), new FakeClaudeQuery().factory,
+    );
+    const started = await first.startThread({ model: "claude:haiku", cwd: directory });
+    const threadId = started.thread.id;
+    const added = await first.addQueuedSubmission({ threadId, input: text("survive"), clientUserMessageId: "cm-r" });
+    await first.close();
+
+    const fake = new FakeClaudeQuery();
+    const second = new ClaudeService(
+      config(directory), new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory,
+    );
+    expect(second.listQueue({ threadId })).toEqual({ data: [added.response.queuedSubmission], nextCursor: null });
+    await second.resumeThread({ threadId });
+    await waitFor(() => turns(second, threadId)[0]?.status === "completed", "turn drained on resume");
+    expect(turns(second, threadId)[0]!.items).toContainEqual(expect.objectContaining({
+      type: "userMessage", clientId: "cm-r", content: text("survive"),
+    }));
+    expect(second.listQueue({ threadId })).toEqual({ data: [], nextCursor: null });
+    await second.close();
+  });
+});

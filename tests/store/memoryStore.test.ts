@@ -89,6 +89,26 @@ describe("MemoryHybridStore thread-state commits", () => {
     expect(store.hasThread("internal")).toBe(true);
   });
 
+  it("keeps the submission queue in the owning layer with defensive copies", () => {
+    const durable = new MemoryHybridStore();
+    const store = new LayeredHybridStore(durable);
+    const base = record();
+    store.createThread(base);
+    const entry = { id: "q-1", input: [{ type: "text" as const, text: "later", text_elements: [] }], clientUserMessageId: "cm-1" };
+    const items = [entry];
+    store.setQueuedSubmissions(base.thread.id, items);
+    items.push({ ...entry, id: "q-2" });
+    expect(durable.listQueuedSubmissions(base.thread.id)).toEqual([entry]);
+    expect(store.listQueuedSubmissions(base.thread.id)).toEqual([entry]);
+    store.listQueuedSubmissions(base.thread.id).pop();
+    expect(store.listQueuedSubmissions(base.thread.id)).toHaveLength(1);
+    store.setQueuedSubmissions(base.thread.id, []);
+    expect(durable.listQueuedSubmissions(base.thread.id)).toEqual([]);
+    store.setQueuedSubmissions(base.thread.id, [entry]);
+    store.deleteThread(base.thread.id);
+    expect(durable.listQueuedSubmissions(base.thread.id)).toEqual([]);
+  });
+
   it("keeps an ephemeral root deletion atomic inside the process-local layer", () => {
     const durable = new MemoryHybridStore();
     const store = new LayeredHybridStore(durable);

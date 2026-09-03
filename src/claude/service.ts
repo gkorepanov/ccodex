@@ -17,6 +17,17 @@ import type { ThreadGoal } from "../codex/generated/v2/ThreadGoal.js";
 import type { ThreadGoalSetParams } from "../codex/generated/v2/ThreadGoalSetParams.js";
 import type { ThreadQueueListParams } from "../codex/generated/v2/ThreadQueueListParams.js";
 import type { ThreadQueueListResponse } from "../codex/generated/v2/ThreadQueueListResponse.js";
+import type { ThreadQueueAddParams } from "../codex/generated/v2/ThreadQueueAddParams.js";
+import type { ThreadQueueAddResponse } from "../codex/generated/v2/ThreadQueueAddResponse.js";
+import type { ThreadQueueUpdateParams } from "../codex/generated/v2/ThreadQueueUpdateParams.js";
+import type { ThreadQueueUpdateResponse } from "../codex/generated/v2/ThreadQueueUpdateResponse.js";
+import type { ThreadQueueDeleteParams } from "../codex/generated/v2/ThreadQueueDeleteParams.js";
+import type { ThreadQueueDeleteResponse } from "../codex/generated/v2/ThreadQueueDeleteResponse.js";
+import type { ThreadQueueReorderParams } from "../codex/generated/v2/ThreadQueueReorderParams.js";
+import type { ThreadQueueReorderResponse } from "../codex/generated/v2/ThreadQueueReorderResponse.js";
+import type { ThreadQueueStartParams } from "../codex/generated/v2/ThreadQueueStartParams.js";
+import type { ThreadQueueStartResponse } from "../codex/generated/v2/ThreadQueueStartResponse.js";
+import type { QueuedSubmission } from "../codex/generated/v2/QueuedSubmission.js";
 import type { ThreadForkParams } from "../codex/generated/v2/ThreadForkParams.js";
 import type { ThreadForkResponse } from "../codex/generated/v2/ThreadForkResponse.js";
 import type { ThreadRevertParams } from "../codex/generated/v2/ThreadRevertParams.js";
@@ -64,7 +75,7 @@ import { createClaudeQuery, type ClaudeQueryFactory } from "./queryFactory.js";
 import { claudeEnvironment } from "./environment.js";
 import type { Model } from "../codex/generated/v2/Model.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
-import { invalidParams } from "../protocol/errors.js";
+import { invalidParams, invalidRequest } from "../protocol/errors.js";
 import { paginateTurns, turnCursor } from "../protocol/turnPagination.js";
 import { MetricsRegistry } from "../observability/metrics.js";
 import {
@@ -97,6 +108,7 @@ import type {
   PreparedThreadAdmin,
   PreparedThreadRemoval,
   SessionBranchSnapshot,
+  SessionLifecycleUpdate,
   ShellCancellation,
   ThreadAdminOperation,
   ThreadRemovalKind,
@@ -406,6 +418,8 @@ export const EPHEMERAL_DISCONNECT_GRACE_MS = 60 * 60_000;
 export class ClaudeService {
   private readonly ephemeralReleases = new Map<string, Promise<void>>();
   private readonly ephemeralReleaseTimers = new Map<string, NodeJS.Timeout>();
+  /** Root threads whose last turn completed or failed and whose queue drains once the session is quiescent. */
+  private readonly queueDrainPending = new Set<string>();
   private readonly removalRetries = new Map<
     string,
     { readonly kind: ThreadRemovalKind; readonly promise: Promise<void> }
@@ -455,7 +469,7 @@ export class ClaudeService {
         this.sessionOutput,
         undefined,
         metrics,
-        undefined,
+        (update) => this.onSessionLifecycle(threadId, update),
         (childThreadId) => this.sessions.registerChild(childThreadId, threadId),
         (childThreadId) => this.sessions.unregisterChild(childThreadId),
         shellRunner,
@@ -766,6 +780,7 @@ export class ClaudeService {
       { type: "readThread", includeTurns: true },
     );
     record = this.withCatalogModel(record);
+    if (this.store.listQueuedSubmissions(threadId).length) this.scheduleQueueDrain(threadId);
     return {
       ...threadResponse(record, !resume.excludeTurns),
       turnsBackwardsCursor: record.thread.turns.length ? turnCursor(record.thread.turns.at(-1)!.id, true) : null,
@@ -1655,10 +1670,117 @@ export class ClaudeService {
     ).then((mutation) => this.goalHandle(params.threadId, mutation));
   }
 
-  /** Claude threads keep no server-side submission queue: in-turn messages are steered, so the queue is always empty. */
+  public async addQueuedSubmission(
+    params: ThreadQueueAddParams,
+  ): Promise<{ response: ThreadQueueAddResponse; after: () => Promise<void> }> {
+    this.requireIndependentThread(params.threadId, "queue a submission in");
+    const queuedSubmission = await this.sessions.submit<QueuedSubmission>(params.threadId, {
+      type: "queue",
+      command: { kind: "add", input: params.input, clientUserMessageId: params.clientUserMessageId },
+    });
+    return { response: { queuedSubmission }, after: () => this.drainQueue(params.threadId) };
+  }
+
+  /** Offset pagination over the durable per-thread queue; the cursor is the base-10 offset, as in stock. */
   public listQueue(params: ThreadQueueListParams): ThreadQueueListResponse {
     this.requireRecord(params.threadId, false);
-    return { data: [], nextCursor: null };
+    const cursor = params.cursor ?? null;
+    if (cursor !== null && !/^\d+$/u.test(cursor)) throw invalidRequest(`invalid queue pagination cursor: ${cursor}`);
+    const offset = cursor === null ? 0 : Number(cursor);
+    const limit = Math.min(Math.max(params.limit ?? 25, 1), 100);
+    const queue = this.store.listQueuedSubmissions(params.threadId);
+    return {
+      data: queue.slice(offset, offset + limit),
+      nextCursor: offset + limit < queue.length ? String(offset + limit) : null,
+    };
+  }
+
+  public async updateQueuedSubmission(params: ThreadQueueUpdateParams): Promise<ThreadQueueUpdateResponse> {
+    this.requireIndependentThread(params.threadId, "update a queued submission in");
+    const queuedSubmission = await this.sessions.submit<QueuedSubmission>(params.threadId, {
+      type: "queue",
+      command: { kind: "update", queuedSubmissionId: params.queuedSubmissionId, input: params.input },
+    });
+    return { queuedSubmission };
+  }
+
+  public async deleteQueuedSubmission(params: ThreadQueueDeleteParams): Promise<ThreadQueueDeleteResponse> {
+    this.requireIndependentThread(params.threadId, "delete a queued submission from");
+    const deleted = await this.sessions.submit<boolean>(params.threadId, {
+      type: "queue", command: { kind: "delete", queuedSubmissionId: params.queuedSubmissionId },
+    });
+    return { deleted };
+  }
+
+  public async reorderQueue(params: ThreadQueueReorderParams): Promise<ThreadQueueReorderResponse> {
+    this.requireIndependentThread(params.threadId, "reorder the queue of");
+    await this.sessions.submit(params.threadId, {
+      type: "queue", command: { kind: "reorder", queuedSubmissionIds: params.queuedSubmissionIds },
+    });
+    return {};
+  }
+
+  public async prepareQueueStart(params: ThreadQueueStartParams): Promise<{
+    response: ThreadQueueStartResponse;
+    announce: () => Promise<void>;
+    start: () => void;
+  }> {
+    this.requireIndependentThread(params.threadId, "start a queued submission in");
+    const entry = await this.sessions.submit<QueuedSubmission>(params.threadId, {
+      type: "queue",
+      command: {
+        kind: "take",
+        manual: true,
+        ...(params.queuedSubmissionId == null ? {} : { queuedSubmissionId: params.queuedSubmissionId }),
+      },
+    });
+    return this.startQueuedSubmission(params.threadId, entry);
+  }
+
+  private async startQueuedSubmission(threadId: string, entry: QueuedSubmission): Promise<{
+    response: ThreadQueueStartResponse;
+    announce: () => Promise<void>;
+    start: () => void;
+  }> {
+    try {
+      return await this.prepareTurn({ threadId, input: entry.input, clientUserMessageId: entry.clientUserMessageId });
+    } catch (error) {
+      await this.sessions.submit(threadId, { type: "queue", command: { kind: "restore", entry } });
+      throw error;
+    }
+  }
+
+  /** Starts the head of the queue when the thread is idle and its last turn was not interrupted. */
+  private async drainQueue(threadId: string): Promise<void> {
+    if (this.closing || this.store.listQueuedSubmissions(threadId).length === 0) return;
+    const entry = await this.sessions.submit<QueuedSubmission | undefined>(threadId, {
+      type: "queue", command: { kind: "take", manual: false },
+    });
+    if (!entry) return;
+    let prepared: Awaited<ReturnType<ClaudeService["startQueuedSubmission"]>>;
+    try {
+      prepared = await this.startQueuedSubmission(threadId, entry);
+    } catch (error) {
+      this.logger[error instanceof ActiveClaudeTurnError ? "info" : "warn"]("claude.queue.drain-skipped", {
+        threadId, queuedSubmissionId: entry.id, error: String(error),
+      });
+      return;
+    }
+    await prepared.announce();
+    prepared.start();
+  }
+
+  private scheduleQueueDrain(threadId: string): void {
+    queueMicrotask(() => {
+      void this.drainQueue(threadId).catch((error) => {
+        this.logger.warn("claude.queue.drain-failed", { threadId, error: String(error) });
+      });
+    });
+  }
+
+  private onSessionLifecycle(threadId: string, update: SessionLifecycleUpdate): void {
+    if (update.completed && update.completed.turn.status !== "interrupted") this.queueDrainPending.add(threadId);
+    if (update.quiescent && this.queueDrainPending.delete(threadId)) this.scheduleQueueDrain(threadId);
   }
 
   public async getGoal(threadId: string): Promise<{ goal: ThreadGoal | null }> {

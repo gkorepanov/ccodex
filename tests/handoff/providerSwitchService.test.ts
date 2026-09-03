@@ -660,6 +660,55 @@ describe("provider switch service", () => {
     service.close();
   });
 
+  it("routes thread/queue add and start for a logical Claude thread to the backend thread and runs their after hooks", async () => {
+    const backend = thread("claude-backend", "claude", [turn("claude-turn-1", "first answer")]);
+    const publicThread = { ...backend, id: "public-thread", sessionId: "public-thread" };
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    store.createLogicalThread({
+      thread: publicThread,
+      epoch: { id: "claude-epoch", provider: "claude", backendThreadId: backend.id, model: "claude:sonnet", settings: {} },
+    });
+    const input = [{ type: "text", text: "later", text_elements: [] }];
+    const after = vi.fn(async () => undefined);
+    const announce = vi.fn(async () => undefined);
+    const start = vi.fn();
+    const claude = {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: (id: string) => id === backend.id,
+      readThread: vi.fn(() => ({ thread: backend })),
+      addQueuedSubmission: vi.fn(async () => ({
+        response: { queuedSubmission: { id: "queued-1", input, clientUserMessageId: "cm-1" } }, after,
+      })),
+      prepareQueueStart: vi.fn(async () => ({ response: { turn: { id: "queued-turn" } }, announce, start })),
+      deleteQueuedSubmission: vi.fn(async () => ({ deleted: false })),
+    };
+    const stock = { request: vi.fn() };
+    const service = new CrossProviderForks(store, claude as never);
+
+    const added = await service.requestLogical("thread/queue/add", {
+      threadId: publicThread.id, input, clientUserMessageId: "cm-1",
+    }, stock as never);
+    expect(claude.addQueuedSubmission).toHaveBeenCalledWith({ threadId: backend.id, input, clientUserMessageId: "cm-1" });
+    expect(added).toMatchObject({ provider: "claude", result: { queuedSubmission: { id: "queued-1" } } });
+    await added.after?.();
+    expect(after).toHaveBeenCalledTimes(1);
+
+    const started = await service.requestLogical("thread/queue/start", { threadId: publicThread.id }, stock as never);
+    expect(claude.prepareQueueStart).toHaveBeenCalledWith({ threadId: backend.id });
+    expect(started).toMatchObject({ provider: "claude", result: { turn: { id: "queued-turn" } } });
+    await started.after?.();
+    expect(announce).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(1);
+
+    const deleted = await service.requestLogical("thread/queue/delete", {
+      threadId: publicThread.id, queuedSubmissionId: "queued-1",
+    }, stock as never);
+    expect(claude.deleteQueuedSubmission).toHaveBeenCalledWith({ threadId: backend.id, queuedSubmissionId: "queued-1" });
+    expect(deleted).toMatchObject({ provider: "claude", result: { deleted: false } });
+    expect(stock.request).not.toHaveBeenCalled();
+    service.close();
+  });
+
   it("lets an explicit source-provider turn cancel a switch staged by another client", () => {
     const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
     const claude = {

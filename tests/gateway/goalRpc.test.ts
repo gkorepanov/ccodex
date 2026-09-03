@@ -846,4 +846,104 @@ describe("Claude goal gateway RPC", () => {
     stockWebSockets.close();
     await closeServer(stockServer);
   });
+
+  it("queues an App submission during an active turn, drains it after completion, and answers a stale steer with a plain error", async () => {
+    const root = directory();
+    const cfg = config(root);
+    const stockSocket = join(root, "stock-queue.sock");
+    const stockServer = createServer();
+    const stockWebSockets = new WebSocketServer({ server: stockServer });
+    stockWebSockets.on("connection", (socket) => socket.on("message", (data) => {
+      const request = JSON.parse(data.toString()) as { id: string; method: string };
+      socket.send(JSON.stringify({
+        id: request.id,
+        error: { code: -32602, message: `Unknown stock request '${request.method}'.` },
+      }));
+    }));
+    await listen(stockServer, stockSocket);
+
+    let releaseTurnA!: () => void;
+    const holdTurnA = new Promise<void>((resolve) => { releaseTurnA = resolve; });
+    const pauseSentinel = {
+      type: "system", subtype: "status", status: "working",
+      uuid: randomUUID(), session_id: "session",
+    } as unknown as SDKMessage;
+    const fake = new FakeClaudeQuery(
+      undefined, undefined, [], false, undefined, undefined, undefined, [pauseSentinel],
+      { afterIndex: 0, wait: holdTurnA },
+    );
+    const store = new SqliteHybridStore(join(root, "queue-state.sqlite"));
+    const subscriptions = new SubscriptionHub();
+    const logger = new Logger("error");
+    const metrics = new MetricsRegistry();
+    const claude = new ClaudeService(cfg, subscriptions, logger, store, fake.factory, undefined, metrics);
+    const handoffs = new CrossProviderForks(new HandoffStore(join(root, "queue-handoffs.sqlite")), claude);
+    const models = { list: async () => [] } as unknown as ClaudeModelCatalog;
+    const gatewayServer = createServer();
+    const gatewayWebSockets = new WebSocketServer({ server: gatewayServer });
+    gatewayWebSockets.on("connection", (socket) => attachClientConnection(
+      socket, stockSocket, models, claude, handoffs, subscriptions, logger,
+      CursorCodec.load(root), metrics, new RpcRecorder(cfg),
+    ));
+    await listen(gatewayServer);
+    const address = gatewayServer.address();
+    if (!address || typeof address === "string") throw new Error("Queue gateway did not bind TCP.");
+    const client = await RpcClient.connect(`ws://127.0.0.1:${address.port}`);
+
+    const started = await client.request("thread/start", { model: "claude:haiku", cwd: root });
+    const threadId = (started.result as { thread: { id: string } }).thread.id;
+    const turnA = await client.request("turn/start", {
+      threadId, input: [{ type: "text", text: "keep A active", text_elements: [] }],
+    });
+    const turnAId = (turnA.result as { turn: { id: string } }).turn.id;
+    await vi.waitFor(() => expect(fake.prompts).toHaveLength(1));
+
+    const queued = [{ type: "text", text: "queued from phone", text_elements: [] }];
+    const added = await client.request("thread/queue/add", { threadId, input: queued, clientUserMessageId: "phone-1" });
+    expect(added.error).toBeUndefined();
+    const submission = (added.result as { queuedSubmission: { id: string; input: unknown; clientUserMessageId: string } })
+      .queuedSubmission;
+    expect(submission).toEqual({ id: expect.any(String), input: queued, clientUserMessageId: "phone-1" });
+    await client.waitFor((message) => message.method === "thread/queue/changed", "queue changed after add");
+    const listed = await client.request("thread/queue/list", { threadId, limit: 25 });
+    expect(listed.result).toEqual({ data: [submission], nextCursor: null });
+    expect(claude.readThread(threadId, true).thread.turns).toHaveLength(1);
+
+    releaseTurnA();
+    const completedA = await client.waitFor((message) =>
+      message.method === "turn/completed" && (message.params as { turn: { id: string } }).turn.id === turnAId,
+    "turn A completion");
+    const startedB = await client.waitFor((message) =>
+      message.method === "turn/started" && (message.params as { turn: { id: string } }).turn.id !== turnAId,
+    "drained turn start");
+    const turnBId = (startedB.params as { turn: { id: string } }).turn.id;
+    const userItem = await client.waitFor((message) =>
+      message.method === "item/completed"
+      && (message.params as { item: { type: string; clientId?: string | null } }).item.type === "userMessage"
+      && (message.params as { item: { clientId?: string | null } }).item.clientId === "phone-1",
+    "queued user item with the client message id");
+    expect((userItem.params as { turnId: string }).turnId).toBe(turnBId);
+    const order = (message: unknown) => client.messages.indexOf(message as never);
+    const drainChanged = client.messages.filter((message) => message.method === "thread/queue/changed").at(-1)!;
+    expect(order(completedA)).toBeLessThan(order(drainChanged));
+    expect(order(drainChanged)).toBeLessThan(order(startedB));
+
+    const staleSteer = await client.request("turn/steer", {
+      threadId, expectedTurnId: turnAId,
+      input: [{ type: "text", text: "phone steers the finished turn", text_elements: [] }],
+    });
+    expect(staleSteer.error).toBeDefined();
+    expect(staleSteer.result).toBeUndefined();
+    await client.waitFor((message) =>
+      message.method === "turn/completed" && (message.params as { turn: { id: string } }).turn.id === turnBId,
+    "turn B completion");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(client.messages.filter((message) => JSON.stringify(message).includes("◆ **CCodex**"))).toEqual([]);
+    expect((await client.request("thread/queue/list", { threadId })).result).toEqual({ data: [], nextCursor: null });
+
+    await client.close();
+    await claude.close();
+    await closeServer(gatewayServer);
+    await closeServer(stockServer);
+  });
 });

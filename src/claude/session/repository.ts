@@ -1,4 +1,5 @@
 import type { Turn } from "../../codex/generated/v2/Turn.js";
+import type { QueuedSubmission } from "../../codex/generated/v2/QueuedSubmission.js";
 import type {
   ClaudeThreadRecord,
   GoalPatch,
@@ -94,6 +95,8 @@ export class ClaudeSessionRepository {
   public setGoal(threadId: string, patch: GoalPatch): InternalGoal { return this.store.setGoal(threadId, patch); }
   public clearGoal(threadId: string): boolean { return this.store.clearGoal(threadId); }
   public accountGoalUsage(input: GoalUsageInput): InternalGoal | undefined { return this.store.accountGoalUsage(input); }
+  public listQueue(threadId: string): QueuedSubmission[] { return this.store.listQueuedSubmissions(threadId); }
+  public setQueue(threadId: string, items: readonly QueuedSubmission[]): void { this.store.setQueuedSubmissions(threadId, items); }
   public archived(threadId: string): boolean { return this.store.isThreadArchived(threadId); }
   public commitArchived(threadIds: readonly string[], archived: boolean): void {
     this.store.commitThreadsArchived(threadIds, archived);

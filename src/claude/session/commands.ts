@@ -7,6 +7,8 @@ import type { TokenUsageBreakdown } from "../../codex/generated/v2/TokenUsageBre
 import type { ThreadSettings } from "../../codex/generated/v2/ThreadSettings.js";
 import type { ThreadGoal } from "../../codex/generated/v2/ThreadGoal.js";
 import type { ThreadGoalSetParams } from "../../codex/generated/v2/ThreadGoalSetParams.js";
+import type { UserInput } from "../../codex/generated/v2/UserInput.js";
+import type { QueuedSubmission } from "../../codex/generated/v2/QueuedSubmission.js";
 import type { ThreadMetadataUpdateParams } from "../../codex/generated/v2/ThreadMetadataUpdateParams.js";
 import type { ThreadSection } from "../../codex/generated/v2/ThreadSection.js";
 import type { JsonValue } from "../../codex/generated/serde_json/JsonValue.js";
@@ -237,6 +239,16 @@ export type GoalSessionCommand =
     readonly runtimeGeneration?: number;
   };
 
+export type QueueSessionCommand =
+  | { readonly kind: "add"; readonly input: readonly UserInput[]; readonly clientUserMessageId: string }
+  | { readonly kind: "update"; readonly queuedSubmissionId: string; readonly input: readonly UserInput[] }
+  | { readonly kind: "delete"; readonly queuedSubmissionId: string }
+  | { readonly kind: "reorder"; readonly queuedSubmissionIds: readonly string[] }
+  /** Atomically removes the submission to start next; `manual` rejects when a turn is active or pending. */
+  | { readonly kind: "take"; readonly queuedSubmissionId?: string; readonly manual: boolean }
+  /** Puts a taken submission back at the head when starting it failed. */
+  | { readonly kind: "restore"; readonly entry: QueuedSubmission };
+
 export interface SessionInteractionRequest {
   readonly threadId: string;
   readonly turnId: string | null;
@@ -389,6 +401,7 @@ export type ClaudeSessionCommand =
   }
   | { readonly type: "deleteBranchTarget" }
   | { readonly type: "goal"; readonly command: GoalSessionCommand }
+  | { readonly type: "queue"; readonly command: QueueSessionCommand }
   | {
     readonly type: "runtimeDetached";
     readonly runtimeGeneration: number;

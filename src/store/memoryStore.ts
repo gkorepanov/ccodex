@@ -1,6 +1,7 @@
 import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { ThreadListParams } from "../codex/generated/v2/ThreadListParams.js";
 import type { Turn } from "../codex/generated/v2/Turn.js";
+import type { QueuedSubmission } from "../codex/generated/v2/QueuedSubmission.js";
 import type {
   AppendProviderEvent, ClaudeThreadRecord, EventPersistence, GoalPatch, GoalUsageInput, HybridStore, InternalGoal, PendingRequestRecord,
   PendingThreadRemoval, ProviderEventDisposition, ProviderEventRecord, ProviderItemCorrelation, ProviderRetractionMutation,
@@ -34,6 +35,7 @@ export class MemoryHybridStore implements HybridStore {
   private readonly archived = new Set<string>();
   private readonly pendingRemovals = new Map<string, PendingThreadRemoval>();
   private readonly goals = new Map<string, InternalGoal>();
+  private readonly queues = new Map<string, QueuedSubmission[]>();
   private readonly goalCheckpoints = new Set<string>();
   private readonly turnMessages = new Map<string, string>();
   private readonly eventDedup = new Set<string>();
@@ -115,6 +117,7 @@ export class MemoryHybridStore implements HybridStore {
       archived: this.archived,
       pendingRemovals: this.pendingRemovals,
       goals: this.goals,
+      queues: this.queues,
       goalCheckpoints: this.goalCheckpoints,
       turnMessages: this.turnMessages,
       events: this.events,
@@ -130,6 +133,7 @@ export class MemoryHybridStore implements HybridStore {
       restoreSet(this.archived, snapshot.archived);
       restoreMap(this.pendingRemovals, snapshot.pendingRemovals);
       restoreMap(this.goals, snapshot.goals);
+      restoreMap(this.queues, snapshot.queues);
       restoreSet(this.goalCheckpoints, snapshot.goalCheckpoints);
       restoreMap(this.turnMessages, snapshot.turnMessages);
       this.events.splice(0, this.events.length, ...snapshot.events);
@@ -150,6 +154,7 @@ export class MemoryHybridStore implements HybridStore {
     this.turns.delete(threadId);
     this.archived.delete(threadId);
     this.goals.delete(threadId);
+    this.queues.delete(threadId);
     for (const checkpoint of this.goalCheckpoints) if (checkpoint.startsWith(`${threadId}:`)) this.goalCheckpoints.delete(checkpoint);
     for (let index = this.events.length - 1; index >= 0; index -= 1) {
       if (this.events[index]!.threadId === threadId) this.events.splice(index, 1);
@@ -394,6 +399,11 @@ export class MemoryHybridStore implements HybridStore {
     return copy(goal);
   }
   public clearGoal(threadId: string): boolean { return this.goals.delete(threadId); }
+  public listQueuedSubmissions(threadId: string): QueuedSubmission[] { return copy(this.queues.get(threadId) ?? []); }
+  public setQueuedSubmissions(threadId: string, items: readonly QueuedSubmission[]): void {
+    if (items.length === 0) this.queues.delete(threadId);
+    else this.queues.set(threadId, copy([...items]));
+  }
   public accountGoalUsage(input: GoalUsageInput): InternalGoal | undefined {
     const checkpoint = input.checkpointKey ? `${input.threadId}:${input.expectedGoalId}:${input.checkpointKey}` : undefined;
     if (checkpoint && this.goalCheckpoints.has(checkpoint)) return this.getGoal(input.threadId);
@@ -419,6 +429,7 @@ export class MemoryHybridStore implements HybridStore {
     this.archived.clear();
     this.pendingRemovals.clear();
     this.goals.clear();
+    this.queues.clear();
     this.goalCheckpoints.clear();
     this.turnMessages.clear();
     this.eventDedup.clear();
@@ -576,6 +587,10 @@ export class LayeredHybridStore implements HybridStore {
   public getGoal(threadId: string): InternalGoal | undefined { return this.owner(threadId).getGoal(threadId); }
   public setGoal(threadId: string, patch: GoalPatch): InternalGoal { return this.owner(threadId).setGoal(threadId, patch); }
   public clearGoal(threadId: string): boolean { return this.owner(threadId).clearGoal(threadId); }
+  public listQueuedSubmissions(threadId: string): QueuedSubmission[] { return this.owner(threadId).listQueuedSubmissions(threadId); }
+  public setQueuedSubmissions(threadId: string, items: readonly QueuedSubmission[]): void {
+    this.owner(threadId).setQueuedSubmissions(threadId, items);
+  }
   public accountGoalUsage(input: GoalUsageInput): InternalGoal | undefined { return this.owner(input.threadId).accountGoalUsage(input); }
   public close(): void { this.ephemeral.close(); this.durable.close(); }
 }

@@ -13,6 +13,8 @@ import type {
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { ThreadItem } from "../../codex/generated/v2/ThreadItem.js";
 import type { Turn } from "../../codex/generated/v2/Turn.js";
+import type { UserInput } from "../../codex/generated/v2/UserInput.js";
+import type { QueuedSubmission } from "../../codex/generated/v2/QueuedSubmission.js";
 import type {
   ClaudeThreadRecord,
   ProviderBoundaryCommit,
@@ -21,7 +23,7 @@ import type {
 } from "../../store/HybridStore.js";
 import type { ClaudeSessionHandle } from "../sessionRegistry.js";
 import { MetricsRegistry } from "../../observability/metrics.js";
-import { invalidParams, RpcError } from "../../protocol/errors.js";
+import { invalidParams, invalidRequest, RpcError } from "../../protocol/errors.js";
 import {
   classifyClaudeResult,
   classifyClaudeRuntimeError,
@@ -55,6 +57,7 @@ import type {
   GoalEffect,
   GoalSessionCommand,
   HookFact,
+  QueueSessionCommand,
   StartedCompaction,
   ThreadAdminCommand,
   ThreadAdminOperation,
@@ -223,6 +226,9 @@ function childProjectionIds(turns: readonly Turn[]): Set<string> {
     return [];
   })));
 }
+
+/** Stock app-server caps the per-thread submission queue at 100 entries. */
+const MAX_QUEUED_SUBMISSIONS = 100;
 
 function commandLane(command: SessionMailboxCommand): ClaudeMailboxLane {
   if (command.type === "runtimeLineage"
@@ -4503,6 +4509,8 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           );
         }
         return dispatchGoal(this.goal, this.goalContext(), command.command);
+      case "queue":
+        return this.handleQueue(command.command);
       case "runtimeDetached": {
         const detached = this.runtimeGeneration === command.runtimeGeneration;
         if (detached && command.requireQuiescent && !this.isQuiescent()) {
@@ -5811,7 +5819,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       null,
     );
     this.shell = undefined;
-    this.finishTurn(turn, nullSource, false, [{
+    const completed = this.finishTurn(turn, nullSource, false, [{
       turnId: turn.id,
       method: "item/completed",
       params: {
@@ -5821,7 +5829,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         completedAtMs: Date.now(),
       },
     }]);
-    this.emitLifecycle();
+    this.emitLifecycle(completed);
     shell.resolve();
     return true;
   }
@@ -5888,7 +5896,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       items: active.items.map((candidate) => candidate.id === item.id ? updatedItem : candidate),
     }, "interrupted", undefined, null);
     this.shell = undefined;
-    this.finishTurn(turn, nullSource, false, [{
+    const completed = this.finishTurn(turn, nullSource, false, [{
       turnId: turn.id,
       method: "item/completed",
       params: {
@@ -5898,7 +5906,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         completedAtMs: Date.now(),
       },
     }]);
-    this.emitLifecycle();
+    this.emitLifecycle(completed);
     shell.resolve();
     return true;
   }
@@ -6070,7 +6078,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     const active = this.repository.readTurn(this.threadId, operation.turnId)!;
     const item = active.items[0]!;
     const turn = this.terminalTurn(active, status, errorMessage, codexErrorInfo);
-    this.finishTurn(turn, source, true, [
+    const completed = this.finishTurn(turn, source, true, [
       {
         turnId: turn.id,
         method: "item/completed",
@@ -6095,7 +6103,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         operation.hidden.completion.reject(new Error(errorMessage ?? `Claude compaction ${status}.`));
       }
     }
-    this.emitLifecycle();
+    this.emitLifecycle(operation.hidden ? undefined : completed, Boolean(operation.hidden));
     return { turnId: turn.id, terminal: true, ...(operation.hidden ? { hidden: true } : {}) };
   }
 
@@ -6550,8 +6558,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     this.lifecycle = undefined;
     this.cancelContinuation();
     this.metrics.turnCompleted(active.result.status);
-    if (active.synthetic) this.emitLifecycle(undefined, true);
-    else this.emitLifecycle(completed);
+    this.emitLifecycle(completed, Boolean(active.synthetic));
   }
 
   private hasNotifications(): boolean {
@@ -6756,6 +6763,76 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           ...(effect.kind === "continue" ? { runtimeGeneration: effect.runtimeGeneration } : {}),
         },
       }).catch(() => undefined);
+    }
+  }
+
+  private handleQueue(command: QueueSessionCommand): unknown {
+    const queue = this.repository.listQueue(this.threadId);
+    const changed = (items: readonly QueuedSubmission[]) => {
+      this.repository.setQueue(this.threadId, items);
+      this.output.emit(this.threadId, "thread/queue/changed", { threadId: this.threadId });
+    };
+    const find = (id: string) => {
+      const index = queue.findIndex((entry) => entry.id === id);
+      if (index < 0) throw invalidRequest(`queued submission not found: ${id}`);
+      return index;
+    };
+    const validInput = (input: readonly UserInput[]) => {
+      if (input.length === 0) throw invalidRequest("only user input can be added to the user-message queue");
+      return [...input];
+    };
+    switch (command.kind) {
+      case "add": {
+        if (this.requireRecord(false).thread.ephemeral) {
+          throw invalidRequest(`ephemeral thread does not support queued submissions: ${this.threadId}`);
+        }
+        if (queue.length >= MAX_QUEUED_SUBMISSIONS) {
+          throw invalidRequest(`queue cannot contain more than ${MAX_QUEUED_SUBMISSIONS} submissions`);
+        }
+        const entry: QueuedSubmission = {
+          id: uuidv7(), input: validInput(command.input), clientUserMessageId: command.clientUserMessageId,
+        };
+        changed([...queue, entry]);
+        return entry;
+      }
+      case "update": {
+        const index = find(command.queuedSubmissionId);
+        const entry = { ...queue[index]!, input: validInput(command.input) };
+        changed(queue.with(index, entry));
+        return entry;
+      }
+      case "delete": {
+        const remaining = queue.filter((entry) => entry.id !== command.queuedSubmissionId);
+        if (remaining.length !== queue.length) changed(remaining);
+        return remaining.length !== queue.length;
+      }
+      case "reorder": {
+        const ids = new Set(command.queuedSubmissionIds);
+        if (ids.size !== command.queuedSubmissionIds.length || ids.size !== queue.length
+          || !queue.every((entry) => ids.has(entry.id))) {
+          throw invalidRequest("queue reorder must include every queued submission exactly once");
+        }
+        changed(command.queuedSubmissionIds.map((id) => queue[find(id)]!));
+        return undefined;
+      }
+      case "take": {
+        const idle = this.isQuiescent() && this.goal.pendingTurns === 0;
+        let index = 0;
+        if (command.manual) {
+          if (queue.length === 0) throw invalidRequest("queue is empty");
+          index = command.queuedSubmissionId === undefined ? 0 : find(command.queuedSubmissionId);
+          if (!idle) throw invalidRequest("thread already has an active or pending turn");
+        } else if (queue.length === 0 || !idle
+          || this.requireRecord(true).thread.turns.at(-1)?.status === "interrupted") {
+          return undefined;
+        }
+        changed(queue.toSpliced(index, 1));
+        return queue[index];
+      }
+      case "restore": {
+        changed([command.entry, ...queue]);
+        return undefined;
+      }
     }
   }
 

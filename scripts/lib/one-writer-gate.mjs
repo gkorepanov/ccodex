@@ -17,6 +17,7 @@ export const STORE_READS = new Set([
   "listEventsAfter",
   "listPendingRequests",
   "listPendingThreadRemovals",
+  "listQueuedSubmissions",
   "listProviderEvents",
   "listProviderItemCorrelations",
   "listThreads",

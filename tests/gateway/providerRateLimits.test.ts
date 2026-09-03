@@ -261,6 +261,20 @@ function fakeClaude() {
       announce: vi.fn(),
     })),
     steerTurn: vi.fn(async (params: { expectedTurnId: string }) => ({ turnId: params.expectedTurnId })),
+    addQueuedSubmission: vi.fn(async (params: { threadId: string; input: unknown; clientUserMessageId: string }) => ({
+      response: { queuedSubmission: { id: "queued-1", input: params.input, clientUserMessageId: params.clientUserMessageId } },
+      after: vi.fn(async () => undefined),
+    })),
+    updateQueuedSubmission: vi.fn(async (params: { queuedSubmissionId: string; input: unknown }) => ({
+      queuedSubmission: { id: params.queuedSubmissionId, input: params.input, clientUserMessageId: "cm-1" },
+    })),
+    deleteQueuedSubmission: vi.fn(async () => ({ deleted: true })),
+    reorderQueue: vi.fn(async () => ({})),
+    prepareQueueStart: vi.fn(async (params: { threadId: string }) => ({
+      response: { turn: { id: `queued-turn-${params.threadId}` } },
+      announce: vi.fn(),
+      start: vi.fn(),
+    })),
     stateSnapshot: vi.fn((threadId: string) => ({
       provider: "claude", model: "Claude Sonnet 4.6", effort: "high", serviceTier: "default",
       approvalPolicy: "on-request", approvalsReviewer: "user",
@@ -406,6 +420,10 @@ async function makeHarness(
             }
           : { id: request.id, result: { thread: stockThread(threadId) } }));
       }
+      else if (request.method === "turn/steer") ws.send(JSON.stringify({
+        id: request.id,
+        error: { code: -32600, message: "expected active turn id `stale` but found `fresh`" },
+      }));
       else ws.send(JSON.stringify({ id: request.id, result: {} }));
     });
   }));
@@ -1003,6 +1021,67 @@ describe("provider-aware rate-limit gateway routing", () => {
       id: "queue-claude", result: { data: [], nextCursor: null },
     });
     expect(harness.stockRequests.some((request) => request.id === "queue-claude")).toBe(false);
+  });
+
+  it("dispatches every thread/queue method for owned Claude threads and runs add/start after the result", async () => {
+    const harness = await makeHarness();
+    harness.client.request("start-claude", "thread/start", { model: "claude:sonnet" });
+    await settle();
+    const threadId = (messages(harness, "start-claude")[0] as any).result.thread.id;
+    const input = [{ type: "text", text: "later", text_elements: [] }];
+
+    harness.client.request("queue-add", "thread/queue/add", { threadId, input, clientUserMessageId: "cm-1" });
+    await settle();
+    expect(harness.claude.addQueuedSubmission).toHaveBeenCalledWith({ threadId, input, clientUserMessageId: "cm-1" });
+    expect(messages(harness, "queue-add")[0]).toEqual({
+      id: "queue-add", result: { queuedSubmission: { id: "queued-1", input, clientUserMessageId: "cm-1" } },
+    });
+    const addResult = await harness.claude.addQueuedSubmission.mock.results[0]!.value;
+    expect(addResult.after).toHaveBeenCalledTimes(1);
+
+    harness.client.request("queue-update", "thread/queue/update", { threadId, queuedSubmissionId: "queued-1", input });
+    harness.client.request("queue-reorder", "thread/queue/reorder", { threadId, queuedSubmissionIds: ["queued-1"] });
+    harness.client.request("queue-delete", "thread/queue/delete", { threadId, queuedSubmissionId: "queued-1" });
+    harness.client.request("queue-start", "thread/queue/start", { threadId, queuedSubmissionId: "queued-1" });
+    await settle();
+    expect(harness.claude.updateQueuedSubmission).toHaveBeenCalledWith({ threadId, queuedSubmissionId: "queued-1", input });
+    expect(messages(harness, "queue-update")[0]).toMatchObject({ result: { queuedSubmission: { id: "queued-1" } } });
+    expect(harness.claude.reorderQueue).toHaveBeenCalledWith({ threadId, queuedSubmissionIds: ["queued-1"] });
+    expect(messages(harness, "queue-reorder")[0]).toEqual({ id: "queue-reorder", result: {} });
+    expect(harness.claude.deleteQueuedSubmission).toHaveBeenCalledWith({ threadId, queuedSubmissionId: "queued-1" });
+    expect(messages(harness, "queue-delete")[0]).toEqual({ id: "queue-delete", result: { deleted: true } });
+    expect(harness.claude.prepareQueueStart).toHaveBeenCalledWith({ threadId, queuedSubmissionId: "queued-1" });
+    expect(messages(harness, "queue-start")[0]).toEqual({
+      id: "queue-start", result: { turn: { id: `queued-turn-${threadId}` } },
+    });
+    const startResult = await harness.claude.prepareQueueStart.mock.results[0]!.value;
+    expect(startResult.announce).toHaveBeenCalledTimes(1);
+    expect(startResult.start).toHaveBeenCalledTimes(1);
+    expect(harness.stockRequests.some((request) => request.method.startsWith("thread/queue/"))).toBe(false);
+  });
+
+  it("returns turn/steer failures as plain RPC errors without a chat banner for Claude and stock threads", async () => {
+    const harness = await makeHarness();
+    harness.claude.steerTurn.mockRejectedValueOnce(new Error("Expected active turn 'stale' does not match the Claude thread."));
+    harness.client.request("start-claude", "thread/start", { model: "claude:sonnet" });
+    await settle();
+    const threadId = (messages(harness, "start-claude")[0] as any).result.thread.id;
+    const input = [{ type: "text", text: "late steer", text_elements: [] }];
+    const before = harness.client.sent.length;
+
+    harness.client.request("steer-claude", "turn/steer", { threadId, input, expectedTurnId: "stale" });
+    harness.client.request("steer-stock", "turn/steer", { threadId: randomUUID(), input, expectedTurnId: "stale" });
+    await settle();
+    expect(messages(harness, "steer-claude")[0]).toMatchObject({
+      error: { message: expect.stringContaining("does not match") },
+    });
+    expect(messages(harness, "steer-stock")[0]).toMatchObject({
+      error: { code: -32600, message: expect.stringContaining("expected active turn id") },
+    });
+    expect(harness.claude.reportError).not.toHaveBeenCalled();
+    const banners = (harness.client.sent.slice(before) as any[])
+      .filter((message) => JSON.stringify(message).includes("CCodex"));
+    expect(banners).toEqual([]);
   });
 
   it("suppresses every internal stock compact event before generic error rendering", async () => {

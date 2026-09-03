@@ -2,6 +2,7 @@ import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { ThreadListParams } from "../codex/generated/v2/ThreadListParams.js";
 import type { Turn } from "../codex/generated/v2/Turn.js";
 import type { ThreadGoal } from "../codex/generated/v2/ThreadGoal.js";
+import type { QueuedSubmission } from "../codex/generated/v2/QueuedSubmission.js";
 import type { TokenUsageBreakdown } from "../codex/generated/v2/TokenUsageBreakdown.js";
 import type { ApprovalsReviewer } from "../codex/generated/v2/ApprovalsReviewer.js";
 
@@ -258,5 +259,8 @@ export interface HybridStore {
   setGoal(threadId: string, patch: GoalPatch): InternalGoal;
   clearGoal(threadId: string): boolean;
   accountGoalUsage(input: GoalUsageInput): InternalGoal | undefined;
+  listQueuedSubmissions(threadId: string): QueuedSubmission[];
+  /** Replaces the ordered submission queue; an empty list clears it. */
+  setQueuedSubmissions(threadId: string, items: readonly QueuedSubmission[]): void;
   close(): void;
 }

@@ -160,6 +160,23 @@ describe("SqliteHybridStore", () => {
     store.close();
   });
 
+  it("persists the per-thread submission queue and drops it with the thread", () => {
+    const store = createStore();
+    const stored = record();
+    store.createThread(stored);
+    const entry = { id: "q-1", input: [{ type: "text" as const, text: "later", text_elements: [] }], clientUserMessageId: "cm-1" };
+    expect(store.listQueuedSubmissions(stored.thread.id)).toEqual([]);
+    store.setQueuedSubmissions(stored.thread.id, [entry]);
+    store.setQueuedSubmissions(stored.thread.id, [{ ...entry, id: "q-2" }, entry]);
+    expect(store.listQueuedSubmissions(stored.thread.id).map((item) => item.id)).toEqual(["q-2", "q-1"]);
+    store.setQueuedSubmissions(stored.thread.id, []);
+    expect(store.listQueuedSubmissions(stored.thread.id)).toEqual([]);
+    store.setQueuedSubmissions(stored.thread.id, [entry]);
+    store.deleteThread(stored.thread.id);
+    expect(store.listQueuedSubmissions(stored.thread.id)).toEqual([]);
+    store.close();
+  });
+
   it("preserves a newer desired-settings generation across stale runtime writes", () => {
     const store = createStore();
     const original = record();
