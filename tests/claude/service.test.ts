@@ -8,6 +8,7 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { HybridConfig } from "../../src/config/config.js";
 import type { Model } from "../../src/codex/generated/v2/Model.js";
 import type { Turn } from "../../src/codex/generated/v2/Turn.js";
+import type { UserInput } from "../../src/codex/generated/v2/UserInput.js";
 import type { ThreadStartParams } from "../../src/codex/generated/v2/ThreadStartParams.js";
 import type { ThreadSettingsUpdateParams } from "../../src/codex/generated/v2/ThreadSettingsUpdateParams.js";
 import { ClaudeService } from "../../src/claude/service.js";
@@ -7892,6 +7893,27 @@ describe("ClaudeService submission queue", () => {
     expect(completedFirst).toBeGreaterThanOrEqual(0);
     expect(secondChanged).toBeGreaterThan(completedFirst);
     expect(startedSecond).toBeGreaterThan(secondChanged);
+    await service.close();
+  });
+
+  it("stores text input without text_elements in stock shape for turns, steers and queued submissions", async () => {
+    const { fake, release } = heldFake();
+    const { directory, service } = makeService("ccodex-queue-text-elements-", fake);
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const threadId = started.thread.id;
+    const phone = (text: string) => [{ type: "text", text } as unknown as UserInput];
+    const stock = (text: string) => [{ type: "text", text, text_elements: [] }];
+    const first = await service.prepareTurn({ threadId, input: phone("from the phone"), clientUserMessageId: "cm-p" });
+    await first.announce();
+    first.start();
+    await waitFor(() => turns(service, threadId)[0]?.status === "inProgress", "active turn");
+    await service.steerTurn({ threadId, input: phone("steered"), expectedTurnId: first.response.turn.id });
+    const added = await service.addQueuedSubmission({ threadId, input: phone("queued"), clientUserMessageId: "cm-q" });
+    expect(added.response.queuedSubmission.input).toEqual(stock("queued"));
+    expect(service.listQueue({ threadId }).data[0]!.input).toEqual(stock("queued"));
+    expect(turns(service, threadId)[0]!.items.filter((item) => item.type === "userMessage").map((item) => item.content))
+      .toEqual([stock("from the phone"), stock("steered")]);
+    release();
     await service.close();
   });
 

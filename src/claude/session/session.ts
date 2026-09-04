@@ -112,7 +112,7 @@ import type { ClaudeQueryFactory } from "../queryFactory.js";
 import type { TranscriptBrancher } from "../transcriptBrancher.js";
 import type { ClaudeRateLimitCoordinator } from "../rateLimits.js";
 import { createGoalMcpServer } from "../goalTools.js";
-import { mapUserInput } from "../inputMapper.js";
+import { mapUserInput, normalizeUserInput } from "../inputMapper.js";
 import { bashCommandActions } from "../commandActions.js";
 import { safeSessionPermissionUpdates } from "./permissionUpdates.js";
 import { threadSettings } from "../threadSettings.js";
@@ -4649,7 +4649,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           type: "userMessage",
           id: command.review ? turnId : uuidv7(),
           clientId: command.params.clientUserMessageId ?? null,
-          content: command.params.input,
+          content: normalizeUserInput(command.params.input),
         };
         const reviewItem: ThreadItem | undefined = command.review
           ? { type: "enteredReviewMode", id: uuidv7(), review: command.review }
@@ -5172,7 +5172,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           type: "userMessage",
           id: uuidv7(),
           clientId: command.clientUserMessageId ?? null,
-          content: command.input,
+          content: normalizeUserInput(command.input),
         };
         turn.items.push(item);
         this.publishTurn(turn, "item/started", {
@@ -6779,7 +6779,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     };
     const validInput = (input: readonly UserInput[]) => {
       if (input.length === 0) throw invalidRequest("only user input can be added to the user-message queue");
-      return [...input];
+      return normalizeUserInput(input);
     };
     switch (command.kind) {
       case "add": {

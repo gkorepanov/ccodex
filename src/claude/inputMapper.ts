@@ -89,3 +89,13 @@ export async function mapUserInput(input: readonly UserInput[], uuid?: string, c
     },
   } as unknown as SDKUserMessage;
 }
+
+/**
+ * Stock re-serializes user input through its protocol types, so `text_elements` is always present
+ * on stored items; the iOS client omits it and the Desktop app crashes on items without it.
+ */
+export function normalizeUserInput(input: readonly UserInput[]): UserInput[] {
+  return input.map((item) => item.type === "text"
+    ? { type: "text", text: item.text, text_elements: item.text_elements ?? [] }
+    : item);
+}

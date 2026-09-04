@@ -113,6 +113,30 @@ describe("SqliteHybridStore", () => {
     migrated.close();
   });
 
+  it("backfills text_elements on stored user messages when migration 10 runs", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ccodex-store-text-elements-"));
+    directories.push(directory);
+    const path = join(directory, "state.sqlite");
+    const store = new SqliteHybridStore(path);
+    store.createThread(record());
+    const legacyItem = { type: "userMessage", id: "u1", clientId: "c1", content: [{ type: "text", text: "hi" }] } as unknown as Turn["items"][number];
+    store.createTurn("thread-1", {
+      id: "turn-1", items: [legacyItem], itemsView: "full", status: "completed", error: null,
+      startedAt: 1, completedAt: 2, durationMs: 1000,
+    });
+    store.close();
+
+    const legacy = new DatabaseSync(path);
+    legacy.prepare("DELETE FROM schema_migrations WHERE version = 10").run();
+    legacy.close();
+
+    const migrated = new SqliteHybridStore(path);
+    expect(migrated.getTurn("thread-1", "turn-1")?.items[0]).toEqual({
+      type: "userMessage", id: "u1", clientId: "c1", content: [{ type: "text", text: "hi", text_elements: [] }],
+    });
+    migrated.close();
+  });
+
   it("loads legacy runtime settings without a persisted resident usage snapshot", () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-store-legacy-usage-"));
     directories.push(directory);

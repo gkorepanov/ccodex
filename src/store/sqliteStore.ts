@@ -1104,6 +1104,25 @@ export class SqliteHybridStore implements HybridStore {
         }
         this.database.exec("INSERT INTO schema_migrations(version) VALUES (9)");
       }
+      const textElements = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 10").get();
+      if (!textElements) {
+        // User input from the iOS client was stored without text_elements; the Desktop app crashes on it.
+        const rows = this.database.prepare("SELECT thread_id, id, turn_json FROM turns WHERE turn_json LIKE '%\"userMessage\"%'")
+          .all() as unknown as Array<{ thread_id: string; id: string; turn_json: string }>;
+        const update = this.database.prepare("UPDATE turns SET turn_json = ? WHERE thread_id = ? AND id = ?");
+        for (const row of rows) {
+          const turn = JSON.parse(row.turn_json) as Turn;
+          let changed = false;
+          for (const item of turn.items) {
+            if (item.type !== "userMessage") continue;
+            for (const entry of item.content) {
+              if (entry.type === "text" && entry.text_elements === undefined) { entry.text_elements = []; changed = true; }
+            }
+          }
+          if (changed) update.run(JSON.stringify(turn), row.thread_id, row.id);
+        }
+        this.database.exec("INSERT INTO schema_migrations(version) VALUES (10)");
+      }
       this.database.exec("DROP TABLE IF EXISTS items");
     });
   }
