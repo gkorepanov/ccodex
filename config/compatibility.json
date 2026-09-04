@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "productVersion": "0.4.21-dev.20260905.1",
+  "productVersion": "0.4.21-dev.20260905.2",
   "node": ">=22.13 <27",
   "codexCli": "0.153.3",
   "codexGitRevision": "29d1e7f316229cd65c7e4a70476050c14962cf10",
