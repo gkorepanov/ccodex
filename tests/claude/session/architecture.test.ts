@@ -234,7 +234,7 @@ describe("Phase 3 ownership boundary", () => {
       "completeShellCancellation",
       "shellCancellation",
     ]) expect(service).not.toContain(retired);
-    expect(shell).toContain('{ type: "runShell", command: params.command }');
+    expect(shell).toContain('{ type: "runShell", command: params.command, timeoutMs }');
     expect(shell).not.toContain("spawn(");
     expect(session).toContain("private readonly shellRunner: ShellRunner");
     expect(session).toContain("shell.process.kill()");

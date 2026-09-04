@@ -40,7 +40,7 @@ function record(threadId: string): ClaudeThreadRecord {
     ephemeral: false,
     section: null, sectionEnteredAt: null, projectId: null,
     historyMode: "legacy",
-    modelProvider: "claude",
+    modelProvider: "claude", model: null, reasoningEffort: null,
     createdAt: 1,
     updatedAt: 1,
     recencyAt: 1,

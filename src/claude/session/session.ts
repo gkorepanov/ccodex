@@ -2737,6 +2737,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       method = "item/commandExecution/requestApproval";
       params = {
         ...common,
+        kind: "command",
         environmentId: null,
         reason: options.decisionReason ?? options.description ?? null,
         command: typeof input.command === "string" ? input.command : null,
@@ -5555,7 +5556,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       case "threadAdmin":
         return this.dispatchThreadAdmin(command.command);
       case "runShell":
-        return this.runShell(command.command);
+        return this.runShell(command.command, command.timeoutMs);
       case "startShell":
         return this.startShell(command.command);
       case "admitShellEffect":
@@ -5725,10 +5726,12 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     return { operationId, turnId: turn.id, cwd: record.thread.cwd };
   }
 
-  private runShell(command: string): Promise<void> {
+  private runShell(command: string, timeoutMs: number): Promise<void> {
     const started = this.startShell(command);
     const shell = this.shell!;
     let processHandle!: ShellProcess;
+    let timer: NodeJS.Timeout | undefined;
+    let timedOut = false;
     try {
       processHandle = this.shellRunner.launch(started.cwd, command, {
         ready: () => {
@@ -5736,7 +5739,8 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
             type: "admitShellEffect",
             operationId: started.operationId,
           }).then((admitted) => {
-            if (!admitted) processHandle.kill();
+            if (!admitted) return processHandle.kill();
+            timer = setTimeout(() => { timedOut = true; processHandle.kill(); }, timeoutMs);
           }, () => processHandle.kill());
         },
         output: (bytes) => {
@@ -5747,11 +5751,13 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           }).catch(() => undefined);
         },
         terminal: (exitCode, errorMessage) => {
+          clearTimeout(timer);
+          const message = errorMessage ?? (timedOut ? `command timed out after ${timeoutMs}ms` : undefined);
           void this.submit({
             type: "finishShell",
             operationId: started.operationId,
             exitCode,
-            ...(errorMessage ? { errorMessage } : {}),
+            ...(message ? { errorMessage: message } : {}),
           }).catch(() => shell.resolve());
         },
       });
@@ -6221,7 +6227,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           "error",
         ),
         phase: "final_answer",
-        memoryCitation: null,
+        memoryCitation: null, questions: null,
       });
     }
     if (items.some((item) => item.type === "enteredReviewMode")
@@ -6243,7 +6249,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       error: {
         message: "Gateway restarted while the Claude turn was active.",
         codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
-        additionalDetails: null,
+        additionalDetails: null, misalignment: null,
       },
     };
   }
@@ -6296,7 +6302,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       ...active, status, completedAt,
       durationMs: Math.max(0, (completedAt - (active.startedAt ?? completedAt)) * 1_000),
       error: status === "failed"
-        ? { message: errorMessage ?? "Claude turn failed.", codexErrorInfo, additionalDetails: null }
+        ? { message: errorMessage ?? "Claude turn failed.", codexErrorInfo, additionalDetails: null , misalignment: null}
         : null,
     };
   }
@@ -7496,7 +7502,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       id: uuidv7(),
       text: value,
       phase: null,
-      memoryCitation: null,
+      memoryCitation: null, questions: null,
       delivery: null,
     };
     const turn: Turn = {
@@ -7599,7 +7605,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           id: uuidv7(),
           text: fact.text,
           phase: null,
-          memoryCitation: null,
+          memoryCitation: null, questions: null,
           delivery: null,
         };
         turn.items.push(item);
@@ -8259,7 +8265,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     const completedAt = Math.floor(Date.now() / 1_000);
     turn.status = status === "completed" ? "completed" : status === "stopped" ? "interrupted" : "failed";
     turn.completedAt = completedAt; turn.durationMs = Math.max(0, (completedAt - (turn.startedAt ?? completedAt)) * 1_000);
-    turn.error = status === "failed" ? { message: summary, codexErrorInfo: null, additionalDetails: null } : null;
+    turn.error = status === "failed" ? { message: summary, codexErrorInfo: null, additionalDetails: null , misalignment: null} : null;
     const updated = { ...record, lastCompletedTurnId: turn.id,
       thread: { ...record.thread, status: { type: "idle" as const }, updatedAt: completedAt } };
     this.commitState(updated, [
@@ -8349,7 +8355,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     state.blockItems.delete(index);
     if (block === "text") {
       const item: ThreadItem = {
-        type: "agentMessage", id: uuidv7(), text: "", phase: null, memoryCitation: null, delivery: null,
+        type: "agentMessage", id: uuidv7(), text: "", phase: null, memoryCitation: null, questions: null, delivery: null,
       };
       state.blockItems.set(index, item.id);
       turn.items.push(item);

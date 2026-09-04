@@ -76,7 +76,7 @@ import { claudeEnvironment } from "./environment.js";
 import type { Model } from "../codex/generated/v2/Model.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
 import { invalidParams, invalidRequest } from "../protocol/errors.js";
-import { paginateTurns, turnCursor } from "../protocol/turnPagination.js";
+import { historyCursors, paginateItems, paginateTurns, turnCursor } from "../protocol/turnPagination.js";
 import { MetricsRegistry } from "../observability/metrics.js";
 import {
   SdkTranscriptBrancher,
@@ -752,8 +752,7 @@ export class ClaudeService {
       record = this.withCatalogModel(record);
       return {
         ...threadResponse(record, !resume.excludeTurns),
-        turnsBackwardsCursor: record.thread.turns.length ? turnCursor(record.thread.turns.at(-1)!.id, true) : null,
-        itemsBackwardsCursor: record.thread.turns.some((turn) => turn.items.length) ? "hyb-item:0" : null,
+        ...historyCursors(record.thread.turns),
         initialTurnsPage: resume.initialTurnsPage
           ? this.turnsPage({
             threadId,
@@ -783,8 +782,7 @@ export class ClaudeService {
     if (this.store.listQueuedSubmissions(threadId).length) this.scheduleQueueDrain(threadId);
     return {
       ...threadResponse(record, !resume.excludeTurns),
-      turnsBackwardsCursor: record.thread.turns.length ? turnCursor(record.thread.turns.at(-1)!.id, true) : null,
-      itemsBackwardsCursor: record.thread.turns.some((turn) => turn.items.length) ? "hyb-item:0" : null,
+      ...historyCursors(record.thread.turns),
       initialTurnsPage: resume.initialTurnsPage
         ? this.turnsPage({
           threadId,
@@ -844,6 +842,9 @@ export class ClaudeService {
     startAndWait: () => Promise<void>;
   }> {
     this.requireIndependentThread(params.threadId, "start a turn in");
+    if (params.toolOutput) throw invalidParams("Claude threads do not support toolOutput.");
+    if (params.serviceTierForTurn != null) this.logger.warn("claude.turn.service-tier-for-turn.ignored",
+      { threadId: params.threadId, serviceTierForTurn: params.serviceTierForTurn });
     const availability = await this.availabilityProbe();
     if (availability.state !== "ready") throw invalidParams(providerUnavailableMessage(availability));
     await this.sessions.submit(params.threadId, { type: "goal", command: { kind: "reserveTurn" } });
@@ -1146,7 +1147,9 @@ export class ClaudeService {
 
   public async shellCommand(params: ThreadShellCommandParams): Promise<Record<string, never>> {
     this.requireIndependentThread(params.threadId, "run a shell command in");
-    await this.sessions.submit(params.threadId, { type: "runShell", command: params.command });
+    const timeoutMs = params.timeoutMs ?? 3_600_000;
+    if (timeoutMs < 0) throw invalidParams(`thread/shellCommand timeoutMs must be non-negative, got ${timeoutMs}`);
+    await this.sessions.submit(params.threadId, { type: "runShell", command: params.command, timeoutMs });
     return {};
   }
 
@@ -1387,21 +1390,7 @@ export class ClaudeService {
 
   public listItems(params: ThreadItemsListParams): ThreadItemsListResponse {
     this.assertThreadAvailable(params.threadId);
-    const items = this.store.listTurns(params.threadId)
-      .flatMap((turn) => params.turnId && turn.id !== params.turnId
-        ? []
-        : turn.items.map((item) => ({ turnId: turn.id, item })));
-    const ordered = params.sortDirection === "desc" ? [...items].reverse() : items;
-    if (params.cursor && !params.cursor.startsWith("hyb-item:")) throw invalidParams("Invalid Claude item cursor.");
-    const offset = params.cursor?.startsWith("hyb-item:") ? Number(params.cursor.slice("hyb-item:".length)) : 0;
-    if (!Number.isInteger(offset) || offset < 0) throw invalidParams("Invalid Claude item cursor.");
-    const limit = Math.max(1, Math.min(params.limit ?? 50, 100));
-    const data = ordered.slice(offset, offset + limit);
-    return {
-      data,
-      nextCursor: offset + data.length < ordered.length ? `hyb-item:${offset + data.length}` : null,
-      backwardsCursor: data.length > 0 ? `hyb-item:${Math.max(0, offset - limit)}` : null,
-    };
+    return paginateItems(this.store.listTurns(params.threadId), params, ["hyb-item:"]);
   }
 
   public searchOccurrences(params: ThreadSearchOccurrencesParams): ThreadSearchOccurrencesResponse {
@@ -1541,7 +1530,8 @@ export class ClaudeService {
       ...sourceRecord.thread, id: threadId, ephemeral: params.ephemeral ?? false,
       section: null, sectionEnteredAt: null, projectId: null,
       sessionId: threadId, forkedFromId: visibleForkedFromId,
-      cwd, modelProvider: "claude", createdAt, updatedAt: createdAt, recencyAt: createdAt,
+      cwd, modelProvider: "claude", model: modelPickerId, reasoningEffort,
+      createdAt, updatedAt: createdAt, recencyAt: createdAt,
       status: params.ephemeral ? { type: "idle" } : { type: "notLoaded" },
       canAcceptDirectInput: true,
       name: params.ephemeral
@@ -1599,6 +1589,7 @@ export class ClaudeService {
 
   public async rollbackThread(params: ThreadRollbackParams): Promise<ThreadRollbackResponse> {
     const source = await this.truncationSource(params.threadId, "roll back");
+    if (source.record.thread.historyMode === "paginated") throw invalidRequest("paginated threads do not support thread/rollback");
     if (!Number.isInteger(params.numTurns) || params.numTurns < 1) throw invalidParams("numTurns must be at least 1.");
     if (params.numTurns > source.record.thread.turns.length)
       throw invalidParams("Cannot remove more turns than the Claude thread contains.");
@@ -1614,8 +1605,7 @@ export class ClaudeService {
     const retained = (await this.truncateThread(source, keepCount)).thread;
     return {
       thread: { ...retained, turns: [] },
-      turnsBackwardsCursor: retained.turns.length ? turnCursor(retained.turns.at(-1)!.id, true) : null,
-      itemsBackwardsCursor: retained.turns.some((turn) => turn.items.length) ? "hyb-item:0" : null,
+      ...historyCursors(retained.turns),
     };
   }
 
@@ -2224,8 +2214,8 @@ export class ClaudeService {
         section: null,
         sectionEnteredAt: null,
         projectId: null,
-        historyMode: params.historyMode ?? "legacy",
-        modelProvider: "claude",
+        historyMode: params.historyMode ?? (params.ephemeral ? "legacy" : "paginated"),
+        modelProvider: "claude", model: modelPickerId, reasoningEffort,
         createdAt,
         updatedAt: createdAt,
         recencyAt: createdAt,

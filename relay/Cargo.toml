@@ -16,15 +16,15 @@ tokio-util = "0.7.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 
-# Exact annotated tag object behind npm @openai/codex 0.149.1 / rust-v0.149.1.
-codex-app-server-protocol = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+# Exact annotated tag object behind npm @openai/codex 0.153.3 / rust-v0.153.3.
+codex-app-server-protocol = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
 # Vendored at the same ref with OutgoingResponse.result relaxed back to raw
 # serde_json::Value so gateway responses relay byte-for-byte; managed by
 # scripts/codex-assets.mjs (sync:codex-assets / check:codex-assets).
 codex-app-server-transport = { path = "vendor/app-server-transport" }
-codex-core = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
-codex-login = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
-codex-shell-command = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+codex-core = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
+codex-login = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
+codex-shell-command = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
 
 [dev-dependencies]
 tempfile = "3"
@@ -36,7 +36,7 @@ members = [".", "vendor/app-server-transport"]
 default-members = ["."]
 
 [workspace.package]
-version = "0.149.1"
+version = "0.153.3"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -46,15 +46,15 @@ license = "Apache-2.0"
 # upstream codex-rs workspace at the pinned ref, with path deps rewritten to
 # the pinned git revision so cargo unifies them with the direct deps above.
 [workspace.dependencies]
-codex-api = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
-codex-app-server-protocol = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
-codex-core = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
-codex-login = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
-codex-model-provider = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
-codex-state = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
-codex-uds = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
-codex-utils-absolute-path = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
-codex-utils-rustls-provider = { git = "https://github.com/openai/codex.git", rev = "980a6d12110b110d29ec13bdcbe14011100b3566" }
+codex-api = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
+codex-app-server-protocol = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
+codex-core = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
+codex-login = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
+codex-model-provider = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
+codex-state = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
+codex-uds = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
+codex-utils-absolute-path = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
+codex-utils-rustls-provider = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
 anyhow = "1"
 axum = { version = "0.8", default-features = false }
 base64 = "0.22.1"

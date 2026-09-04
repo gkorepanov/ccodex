@@ -13,7 +13,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 
 export const root = resolve(import.meta.dirname, "..");
-export const upstreamAssetPath = "codex-rs/prompts/templates/goals/continuation.md";
+export const upstreamAssetPath = "codex-rs/ext/goal/templates/goals/continuation.md";
 export const vendoredAssetPath = join(root, "vendor", "codex", "continuation.md");
 
 const upstreamTransportRoot = "codex-rs/app-server-transport";
@@ -27,15 +27,18 @@ export const vendoredTransportDir = join(root, "relay", "vendor", "app-server-tr
 // to serde_json::Value — the wire bytes are identical either way, the upstream
 // typing is compile-time only. Overlays are pinned per Codex ref so an upgrade
 // forces a review of upstream transport changes before re-vendoring.
+const RESULT_AS_VALUE_OVERLAY = [
+  // Test modules are #[cfg(test)]-gated upstream and are not vendored, so
+  // the dev-dependencies (and their workspace entries) are not needed.
+  { file: "Cargo.toml", find: /\n\[dev-dependencies\]\n[\s\S]*$/u, replace: "\n" },
+  { file: "src/outgoing_message.rs", find: "use codex_app_server_protocol::ClientResponsePayload;\n", replace: "" },
+  { file: "src/outgoing_message.rs", find: "    pub result: Box<ClientResponsePayload>,", replace: "    pub result: serde_json::Value," },
+];
 const TRANSPORT_OVERLAYS = {
   // rust-v0.149.1
-  "980a6d12110b110d29ec13bdcbe14011100b3566": [
-    // Test modules are #[cfg(test)]-gated upstream and are not vendored, so
-    // the dev-dependencies (and their workspace entries) are not needed.
-    { file: "Cargo.toml", find: /\n\[dev-dependencies\]\n[\s\S]*$/u, replace: "\n" },
-    { file: "src/outgoing_message.rs", find: "use codex_app_server_protocol::ClientResponsePayload;\n", replace: "" },
-    { file: "src/outgoing_message.rs", find: "    pub result: Box<ClientResponsePayload>,", replace: "    pub result: serde_json::Value," },
-  ],
+  "980a6d12110b110d29ec13bdcbe14011100b3566": RESULT_AS_VALUE_OVERLAY,
+  // rust-v0.153.3 (transport crate unchanged apart from test code)
+  "29d1e7f316229cd65c7e4a70476050c14962cf10": RESULT_AS_VALUE_OVERLAY,
 };
 
 export function pinnedCodexRef(cargo = readFileSync(join(root, "relay", "Cargo.toml"), "utf8")) {

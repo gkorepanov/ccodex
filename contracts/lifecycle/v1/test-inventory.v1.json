@@ -18,9 +18,9 @@
   },
   "counts": {
     "architecture-invariant": 142,
-    "external-contract": 376,
+    "external-contract": 378,
     "provider-mapping": 72,
-    "old-implementation-detail": 31
+    "old-implementation-detail": 32
   },
   "cases": [
     {
@@ -541,7 +541,7 @@
     },
     {
       "path": "tests/claude/modelCatalog.test.ts",
-      "title": "maps the Fable 5.1 catalog entry observed on claude-code 2.1.258",
+      "title": "maps the Fable 5.1 catalog entry observed on claude-code 2.1.261",
       "classification": "provider-mapping",
       "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
     },
@@ -1874,6 +1874,18 @@
     {
       "path": "tests/claude/service.test.ts",
       "title": "stores text input without text_elements in stock shape for turns, steers and queued submissions",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "starts durable threads paginated, mirrors the model on the thread and rejects toolOutput",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "validates and enforces the thread/shellCommand timeout",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
@@ -3626,6 +3638,12 @@
     {
       "path": "tests/store/sqliteStore.test.ts",
       "title": "backfills text_elements on stored user messages when migration 10 runs",
+      "classification": "old-implementation-detail",
+      "rationale": "Freezes the current broad-record/SQLite implementation; retain as migration evidence, not reducer parity."
+    },
+    {
+      "path": "tests/store/sqliteStore.test.ts",
+      "title": "backfills Thread.model and Thread.reasoningEffort from the record when migration 11 runs",
       "classification": "old-implementation-detail",
       "rationale": "Freezes the current broad-record/SQLite implementation; retain as migration evidence, not reducer parity."
     },

@@ -31,7 +31,7 @@ function config(dataDir: string): HybridConfig {
   };
 }
 
-describe("synthesized Claude responses against pinned 0.149.1 schemas", () => {
+describe("synthesized Claude responses against pinned 0.153.3 schemas", () => {
   it("validates the thread and turn lifecycle responses CCodex fabricates", async () => {
     const directory = mkdtempSync(join(tmpdir(), "ccodex-response-schemas-"));
     directories.push(directory);

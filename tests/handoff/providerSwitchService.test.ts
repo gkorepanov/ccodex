@@ -13,7 +13,7 @@ import { HandoffStore } from "../../src/handoff/store.js";
 function turn(id: string, text: string): Turn {
   return {
     id,
-    items: [{ type: "agentMessage", id: `${id}-item`, text, phase: "final_answer", memoryCitation: null, delivery: null }],
+    items: [{ type: "agentMessage", id: `${id}-item`, text, phase: "final_answer", memoryCitation: null, questions: null, delivery: null }],
     itemsView: "full",
     status: "completed",
     error: null,
@@ -26,7 +26,7 @@ function turn(id: string, text: string): Turn {
 function thread(id: string, provider: string, turns: Turn[] = []): Thread {
   return {
     id, extra: null, sessionId: id, forkedFromId: null, parentThreadId: null, canAcceptDirectInput: true,
-    preview: "hello", ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "legacy", modelProvider: provider,
+    preview: "hello", ephemeral: false, section: null, sectionEnteredAt: null, projectId: null, historyMode: "legacy", modelProvider: provider, model: null, reasoningEffort: null,
     createdAt: 1, updatedAt: 2, recencyAt: 2, status: { type: "idle" }, path: null,
     cwd: "/tmp/project", cliVersion: "test", source: "cli", threadSource: "user",
     agentNickname: null, agentRole: null, gitInfo: null, name: "Migrated", turns,
@@ -596,6 +596,36 @@ describe("provider switch service", () => {
     service.close();
   });
 
+  it("reverts a paginated logical Claude thread through the backend's thread/revert", async () => {
+    const first = turn("claude-turn-1", "first answer");
+    const second = turn("claude-turn-2", "answer being edited");
+    const backend = { ...thread("claude-backend", "claude", [first, second]), historyMode: "paginated" as const };
+    const publicThread = { ...backend, id: "public-thread", sessionId: "public-thread" };
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    store.createLogicalThread({
+      thread: publicThread,
+      epoch: { id: "claude-epoch", provider: "claude", backendThreadId: backend.id, model: "claude:sonnet", settings: {} },
+    });
+    const claude = {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: (id: string) => id === backend.id,
+      readThread: vi.fn(() => ({ thread: backend })),
+      rollbackThread: vi.fn(),
+      revertThread: vi.fn(async () => ({ thread: { ...backend, turns: [] }, turnsBackwardsCursor: null, itemsBackwardsCursor: null })),
+    };
+    const service = new CrossProviderForks(store, claude as never);
+
+    const reverted = await service.revertLogicalThread({ threadId: publicThread.id, beforeTurnId: second.id }, { request: vi.fn() } as never);
+
+    expect(claude.rollbackThread).not.toHaveBeenCalled();
+    expect(claude.revertThread).toHaveBeenCalledWith({ threadId: backend.id, beforeTurnId: second.id });
+    expect(reverted).toMatchObject({
+      thread: { id: publicThread.id, historyMode: "paginated", turns: [] },
+      turnsBackwardsCursor: JSON.stringify({ turnId: first.id, includeAnchor: true }),
+      itemsBackwardsCursor: expect.stringMatching(/^\{"itemId":"ccodex-item-[0-9a-f]+","includeAnchor":true\}$/u),
+    });
+  });
+
   it("reverts an established logical Claude thread before a selected public turn", async () => {
     const first = turn("claude-turn-1", "first answer");
     const second = turn("claude-turn-2", "answer being edited");
@@ -624,7 +654,7 @@ describe("provider switch service", () => {
     expect(reverted).toMatchObject({
       thread: { id: publicThread.id, turns: [] },
       turnsBackwardsCursor: JSON.stringify({ turnId: first.id, includeAnchor: true }),
-      itemsBackwardsCursor: "hyb-overlay-item:0",
+      itemsBackwardsCursor: expect.stringMatching(/^\{"itemId":"ccodex-item-[0-9a-f]+","includeAnchor":true\}$/u),
     });
     await expect(service.revertLogicalThread({ threadId: publicThread.id, beforeTurnId: "missing" }, stock as never))
       .rejects.toThrow("Unknown turn 'missing'");

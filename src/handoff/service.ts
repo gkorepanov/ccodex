@@ -50,7 +50,7 @@ import {
   projectRpcToPublicThread,
 } from "../gateway/logicalThreadProjection.js";
 import { invalidParams } from "../protocol/errors.js";
-import { paginateTurns, turnCursor } from "../protocol/turnPagination.js";
+import { historyCursors, paginateItems, paginateTurns } from "../protocol/turnPagination.js";
 import { filterSortThreads } from "../store/threadFilter.js";
 import { v7 as uuidv7 } from "uuid";
 import {
@@ -297,20 +297,7 @@ function pageTurns(turns: Turn[], params: ThreadTurnsListParams): ThreadTurnsLis
 }
 
 function pageItems(turns: Turn[], params: ThreadItemsListParams): ThreadItemsListResponse {
-  if (params.cursor && !params.cursor.startsWith("hyb-overlay-item:")) throw invalidParams("Invalid handoff item cursor.");
-  const offset = params.cursor ? Number(params.cursor.slice("hyb-overlay-item:".length)) : 0;
-  if (!Number.isInteger(offset) || offset < 0) throw invalidParams("Invalid handoff item cursor.");
-  const items = turns.flatMap((turn) => params.turnId && turn.id !== params.turnId
-    ? []
-    : turn.items.map((item) => ({ turnId: turn.id, item })));
-  const ordered = params.sortDirection === "desc" ? [...items].reverse() : items;
-  const limit = Math.max(1, Math.min(params.limit ?? 50, 100));
-  const data = ordered.slice(offset, offset + limit);
-  return {
-    data,
-    nextCursor: offset + data.length < ordered.length ? `hyb-overlay-item:${offset + data.length}` : null,
-    backwardsCursor: data.length > 0 ? `hyb-overlay-item:${Math.max(0, offset - limit)}` : null,
-  };
+  return paginateItems(turns, params, ["hyb-overlay-item:"]);
 }
 
 interface InternalStockTurnState {
@@ -593,18 +580,16 @@ export class CrossProviderForks {
         const includeTurns = resume
           ? !resume.excludeTurns
           : (params as unknown as ThreadReadParams).includeTurns ?? false;
-        const backendTurns = resume?.initialTurnsPage && !includeTurns
+        const backendTurns = resume && !includeTurns
           ? (await stock.request("thread/read", {
               threadId: resolved.epoch.backendThreadId,
               includeTurns: true,
             }) as ThreadReadResponse).thread.turns
           : result.thread.turns;
+        const visible = resume ? await this.visibleTurns(publicThreadId, backendTurns, stock) : [];
         const initialTurnsPage = resume?.initialTurnsPage
-          ? pageTurns(await this.visibleTurns(publicThreadId, backendTurns, stock), {
-              threadId: publicThreadId,
-              ...resume.initialTurnsPage,
-            })
-          : "initialTurnsPage" in result ? result.initialTurnsPage : undefined;
+          ? pageTurns(visible, { threadId: publicThreadId, ...resume.initialTurnsPage })
+          : undefined;
         return {
           provider: "stock",
           result: {
@@ -615,7 +600,7 @@ export class CrossProviderForks {
               includeTurns,
               includeTurns ? (await this.historicalTurns(publicThreadId, stock)).map((entry) => entry.turn) : [],
             ),
-            ...(resume ? { initialTurnsPage } : {}),
+            ...(resume ? { initialTurnsPage, ...historyCursors(visible) } : {}),
           },
         };
       }
@@ -667,21 +652,18 @@ export class CrossProviderForks {
           ? (await this.historicalTurns(publicThreadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn)
           : [],
       );
-      const backendTurns = resume.initialTurnsPage && resume.excludeTurns
+      const backendTurns = resume.excludeTurns
         ? this.claude.readThread(threadId, true).thread.turns
         : response.thread.turns;
+      const visible = await this.visibleTurns(publicThreadId, backendTurns, this.daemonStock ?? clientStock);
       return {
         provider: "claude",
         result: {
           ...response,
           thread,
+          ...historyCursors(visible),
           ...(resume.initialTurnsPage ? {
-            initialTurnsPage: pageTurns(await this.visibleTurns(
-              publicThreadId, backendTurns, this.daemonStock ?? clientStock,
-            ), {
-              threadId: publicThreadId,
-              ...resume.initialTurnsPage,
-            }),
+            initialTurnsPage: pageTurns(visible, { threadId: publicThreadId, ...resume.initialTurnsPage }),
           } : {}),
         },
         after: async () => prepared.notifyGoalSnapshot((event, eventParams) => {
@@ -1071,11 +1053,7 @@ export class CrossProviderForks {
       if (keep === -1) throw invalidParams(`Unknown turn '${params.beforeTurnId}'.`);
       return keep;
     }, clientStock, connectionId);
-    return {
-      thread: { ...thread, turns: [] },
-      turnsBackwardsCursor: thread.turns.length ? turnCursor(thread.turns.at(-1)!.id, true) : null,
-      itemsBackwardsCursor: thread.turns.some((turn) => turn.items.length) ? "hyb-overlay-item:0" : null,
-    };
+    return { thread: { ...thread, turns: [] }, ...historyCursors(thread.turns) };
   }
 
   private async truncateLogicalThread(
@@ -1090,7 +1068,8 @@ export class CrossProviderForks {
     if (!unresolvedTarget) throw invalidParams(`Unknown logical thread '${params.threadId}'.`);
     const target = await this.hydrate(unresolvedTarget, this.daemonStock ?? clientStock);
     const pendingFork = selection?.status === "pending" ? selection : undefined;
-    const currentTurns = await this.currentBackendTurns(target, this.daemonStock ?? clientStock);
+    const backend = await this.backendThread(target, this.daemonStock ?? clientStock);
+    const currentTurns = backend?.turns ?? [];
     const turns = await this.snapshotTurns(
       params.threadId, currentTurns, this.daemonStock ?? clientStock,
     );
@@ -1109,32 +1088,12 @@ export class CrossProviderForks {
     }
     const selectedEpoch = await this.hydrateEpoch(selectedBoundary.epochId, this.daemonStock ?? clientStock);
     if (!pendingFork && selectedEpoch.id === target.epoch.id) {
-      if (numTurns === 0) {
-        const backend = target.epoch.provider === "claude"
-          ? this.claude.readThread(target.epoch.backendThreadId, true).thread
-          : (await clientStock.request("thread/read", {
-            threadId: target.epoch.backendThreadId,
-            includeTurns: true,
-          }) as ThreadReadResponse).thread;
-        return { thread: this.epochs.projectThread(
-          params.threadId,
-          projectItemIds(backend, target.epoch.id),
-          true,
-          (await this.historicalTurns(params.threadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn),
-        ) };
-      }
-      const rolled = target.epoch.provider === "claude"
-        ? await this.claude.rollbackThread({
-          threadId: target.epoch.backendThreadId,
-          numTurns,
-        })
-        : await clientStock.request("thread/rollback", {
-          threadId: target.epoch.backendThreadId,
-          numTurns,
-        }) as ThreadRollbackResponse;
+      const rolled = numTurns === 0
+        ? backend!
+        : await this.truncateBackend(target, backend!, turns[keep]!, numTurns, clientStock);
       return { thread: this.epochs.projectThread(
         params.threadId,
-        projectItemIds(rolled.thread, target.epoch.id),
+        projectItemIds(rolled, target.epoch.id),
         true,
         (await this.historicalTurns(params.threadId, this.daemonStock ?? clientStock)).map((entry) => entry.turn),
       ) };
@@ -1945,6 +1904,38 @@ export class CrossProviderForks {
     }
     this.store.setPending({ ...pending, expectedEpochId: resolved.epoch.id });
     return this.epochs.resolve(threadId)!;
+  }
+
+  private async backendThread(resolved: ResolvedProviderEpoch, stock: StockRpc): Promise<Thread | undefined> {
+    if (resolved.epoch.backendThreadId.startsWith("ccodex-provisional:")) return undefined;
+    if (resolved.epoch.provider === "claude") return this.claude.readThread(resolved.epoch.backendThreadId, true).thread;
+    return (await stock.request("thread/read", {
+      threadId: resolved.epoch.backendThreadId,
+      includeTurns: true,
+    }) as ThreadReadResponse).thread;
+  }
+
+  /** Drops the current epoch's trailing turns: `thread/revert` on paginated backends, `thread/rollback` on legacy ones. */
+  private async truncateBackend(
+    target: ResolvedProviderEpoch,
+    backend: Thread,
+    firstDropped: NewLogicalTurn,
+    numTurns: number,
+    clientStock: StockRpc,
+  ): Promise<Thread> {
+    const threadId = target.epoch.backendThreadId;
+    if (backend.historyMode !== "paginated") {
+      const rolled = target.epoch.provider === "claude"
+        ? await this.claude.rollbackThread({ threadId, numTurns })
+        : await clientStock.request("thread/rollback", { threadId, numTurns }) as ThreadRollbackResponse;
+      return rolled.thread;
+    }
+    if (!firstDropped.providerTurnId) throw invalidParams("Rollback has no provider-backed turn boundary.");
+    const revert = { threadId, beforeTurnId: firstDropped.providerTurnId };
+    const reverted = target.epoch.provider === "claude"
+      ? await this.claude.revertThread(revert)
+      : await clientStock.request("thread/revert", revert) as ThreadRevertResponse;
+    return { ...reverted.thread, turns: backend.turns.slice(0, backend.turns.length - numTurns) };
   }
 
   private async currentBackendTurns(resolved: ResolvedProviderEpoch, stock: StockRpc): Promise<Turn[]> {

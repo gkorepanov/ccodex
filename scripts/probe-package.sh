@@ -52,7 +52,7 @@ grep -q '^codex-cli 0\.149\.1$' "$UPDATE_RESULT"
 
 run_hybrid env \
   CODEX_HYBRID_CLI="$CLI" \
-  CODEX_HYBRID_EXPECT_CODEX_VERSION="0.149.1" \
+  CODEX_HYBRID_EXPECT_CODEX_VERSION="0.153.3" \
   node "$ROOT/scripts/probe-daemon.mjs"
 
 run_hybrid node "$ROOT/scripts/probe-claude-options.mjs"
@@ -82,4 +82,4 @@ INSTALLED=0
 test ! -e "$PREFIX/bin/codex-hybrid"
 test "$(realpath "$PREFIX/bin/codex")" = "$(realpath "$REAL_CODEX")"
 
-printf '%s\n' '{"packageGate":true,"codexVersion":"0.149.1"}'
+printf '%s\n' '{"packageGate":true,"codexVersion":"0.153.3"}'

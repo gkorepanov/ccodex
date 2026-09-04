@@ -46,7 +46,7 @@ describe("mapClaudeModel", () => {
     });
   });
 
-  it("maps the Fable 5.1 catalog entry observed on claude-code 2.1.258", () => {
+  it("maps the Fable 5.1 catalog entry observed on claude-code 2.1.261", () => {
     expect(mapClaudeModel({
       value: "claude-fable-5-1",
       resolvedModel: "claude-fable-5-1",

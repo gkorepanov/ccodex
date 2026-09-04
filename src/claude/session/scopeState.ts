@@ -116,6 +116,7 @@ export function newChildScope(
   const childName = `${fact.description.replace(/\s+/gu, " ").trim()} [${claudeModelLabel(childModel)}]`;
   const thread = {
     ...parent.thread, id: childThreadId, forkedFromId: parentThreadId, parentThreadId,
+    model: model?.modelPickerId ?? parent.modelPickerId,
     preview: text, createdAt, updatedAt: createdAt, recencyAt: createdAt,
     canAcceptDirectInput: false,
     status: { type: "active" as const, activeFlags: [] }, path: null,

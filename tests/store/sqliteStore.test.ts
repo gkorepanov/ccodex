@@ -28,7 +28,7 @@ function thread(id: string): Thread {
     ephemeral: false,
     section: null, sectionEnteredAt: null, projectId: null,
     historyMode: "legacy",
-    modelProvider: "claude",
+    modelProvider: "claude", model: null, reasoningEffort: null,
     createdAt: 10,
     updatedAt: 10,
     recencyAt: 10,
@@ -134,6 +134,24 @@ describe("SqliteHybridStore", () => {
     expect(migrated.getTurn("thread-1", "turn-1")?.items[0]).toEqual({
       type: "userMessage", id: "u1", clientId: "c1", content: [{ type: "text", text: "hi", text_elements: [] }],
     });
+    migrated.close();
+  });
+
+  it("backfills Thread.model and Thread.reasoningEffort from the record when migration 11 runs", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ccodex-store-thread-model-"));
+    directories.push(directory);
+    const path = join(directory, "state.sqlite");
+    const store = new SqliteHybridStore(path);
+    store.createThread({ ...record(), reasoningEffort: "high" });
+    store.close();
+
+    const legacy = new DatabaseSync(path);
+    legacy.prepare("UPDATE threads SET thread_json = json_remove(thread_json, '$.model', '$.reasoningEffort')").run();
+    legacy.prepare("DELETE FROM schema_migrations WHERE version = 11").run();
+    legacy.close();
+
+    const migrated = new SqliteHybridStore(path);
+    expect(migrated.getThreadRecord("thread-1")?.thread).toMatchObject({ model: "claude:sonnet", reasoningEffort: "high" });
     migrated.close();
   });
 
@@ -262,7 +280,7 @@ describe("SqliteHybridStore", () => {
     store.createThread(record("fork"));
     const sharedTurn: Turn = {
       id: "shared-turn",
-      items: [{ type: "agentMessage", id: "shared-item", text: "hello", phase: null, memoryCitation: null, delivery: null }],
+      items: [{ type: "agentMessage", id: "shared-item", text: "hello", phase: null, memoryCitation: null, questions: null, delivery: null }],
       itemsView: "full",
       status: "completed",
       error: null,
@@ -309,7 +327,7 @@ describe("SqliteHybridStore", () => {
     store.createThread(record("source"));
     const shared: Turn = {
       id: "shared-turn", items: [{
-        type: "agentMessage", id: "shared-item", text: "shared history", phase: null, memoryCitation: null, delivery: null,
+        type: "agentMessage", id: "shared-item", text: "shared history", phase: null, memoryCitation: null, questions: null, delivery: null,
       }],
       itemsView: "full", status: "completed", error: null,
       startedAt: 1, completedAt: 2, durationMs: 1_000,
@@ -379,14 +397,14 @@ describe("SqliteHybridStore", () => {
     first.createThread(root);
     const one: Turn = {
       id: "turn-1",
-      items: [{ type: "agentMessage", id: "item-1", text: "keep", phase: null, memoryCitation: null, delivery: null }],
+      items: [{ type: "agentMessage", id: "item-1", text: "keep", phase: null, memoryCitation: null, questions: null, delivery: null }],
       itemsView: "full", status: "completed", error: null,
       startedAt: 1, completedAt: 2, durationMs: 1_000,
     };
     const two: Turn = {
       ...one,
       id: "turn-2",
-      items: [{ type: "agentMessage", id: "item-2", text: "retract", phase: null, memoryCitation: null, delivery: null }],
+      items: [{ type: "agentMessage", id: "item-2", text: "retract", phase: null, memoryCitation: null, questions: null, delivery: null }],
     };
     first.createTurn("source", one);
     first.createTurn("source", two);
@@ -514,7 +532,7 @@ describe("SqliteHybridStore", () => {
     injector.close();
     const changed: Turn = {
       ...turn,
-      items: [{ type: "agentMessage", id: "item-1", text: "hello", phase: null, memoryCitation: null, delivery: null }],
+      items: [{ type: "agentMessage", id: "item-1", text: "hello", phase: null, memoryCitation: null, questions: null, delivery: null }],
     };
     expect(() => store.appendEvent(stored.thread.id, turn.id, "item/completed", { item: changed.items[0] }, {
       turn: changed, dedupKey: "item/completed:item-1",

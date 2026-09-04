@@ -8,7 +8,7 @@ function thread(id: string, createdAt: number, parentThreadId: string | null = n
   return {
     id, extra: null, sessionId: id, forkedFromId: null, parentThreadId,
     canAcceptDirectInput: parentThreadId === null, preview: id, ephemeral: false, section: null, sectionEnteredAt: null, projectId: null,
-    historyMode: "legacy", modelProvider: "claude", createdAt, updatedAt: createdAt, recencyAt: createdAt,
+    historyMode: "legacy", modelProvider: "claude", model: null, reasoningEffort: null, createdAt, updatedAt: createdAt, recencyAt: createdAt,
     status: { type: "idle" }, path: null, cwd: "/repo", cliVersion: "test", source: "appServer",
     threadSource: null, agentNickname: null, agentRole: null, gitInfo: null, name: id, turns: [],
   };

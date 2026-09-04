@@ -388,7 +388,7 @@ describe("CCodex status command", () => {
             planType: "pro", rateLimitReachedType: null,
           },
           rateLimitsByLimitId: null,
-          rateLimitResetCredits: null,
+          rateLimitResetCredits: null, accountId: null, rateLimitUpsell: null,
         },
       },
     }, now)).toBe([

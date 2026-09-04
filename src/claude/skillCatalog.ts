@@ -31,6 +31,7 @@ function mapSkill(config: HybridConfig, skill: SlashCommand) {
     path: join(config.dataDir, "virtual", "claude-skills", encodeURIComponent(skill.name), "SKILL.md"),
     scope: "user" as const,
     enabled: true,
+    pluginId: null,
   };
 }
 

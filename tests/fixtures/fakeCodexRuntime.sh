@@ -1,7 +1,7 @@
 #!/bin/sh
 [ -z "${FAKE_CODEX_LOG:-}" ] || printf '%s\n' "$*" >> "$FAKE_CODEX_LOG"
 case "${1:-}" in
-  --version) echo 'codex-cli 0.149.1' ;;
+  --version) echo 'codex-cli 0.153.3' ;;
   login)
     [ "${2:-}" = status ] && echo 'Logged in using ChatGPT' || exit 2
     ;;

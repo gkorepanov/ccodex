@@ -6,7 +6,7 @@ const cwd = "/workspace";
 const stockResult: SkillsListResponse = {
   data: [{
     cwd,
-    skills: [{ name: "pdf", description: "PDF", path: "/stock/pdf/SKILL.md", scope: "system", enabled: true }],
+    skills: [{ name: "pdf", description: "PDF", path: "/stock/pdf/SKILL.md", scope: "system", enabled: true , pluginId: null}],
     errors: [],
   }],
 };
@@ -18,7 +18,7 @@ const claudeResult: SkillsListResponse = {
       description: "Charts",
       path: "/claude/dataviz/SKILL.md",
       scope: "user",
-      enabled: true,
+      enabled: true, pluginId: null,
     }],
     errors: [],
   }],

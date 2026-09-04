@@ -736,7 +736,7 @@ export type ClaudeSessionCommand =
     readonly connectionId?: string;
   }
   | { readonly type: "threadAdmin"; readonly command: ThreadAdminCommand }
-  | { readonly type: "runShell"; readonly command: string }
+  | { readonly type: "runShell"; readonly command: string; readonly timeoutMs: number }
   | { readonly type: "startShell"; readonly command: string }
   | {
     readonly type: "shellOutput";

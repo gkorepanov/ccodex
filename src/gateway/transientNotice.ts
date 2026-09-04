@@ -38,7 +38,7 @@ export function transientAgentNotice(threadId: string, text: string, nowMs = Dat
     id: itemId,
     text: "",
     phase: null,
-    memoryCitation: null,
+    memoryCitation: null, questions: null,
     delivery: null,
   };
   const item: ThreadItem = { ...emptyItem, text };
@@ -84,7 +84,7 @@ export function transientSystemItemNotice(
     id: itemId,
     text: "",
     phase: "commentary",
-    memoryCitation: null,
+    memoryCitation: null, questions: null,
     delivery: null,
   };
   const item: ThreadItem = { ...emptyItem, text: systemNoticeText(text, kind) };
@@ -111,7 +111,7 @@ export function transientCommandNotice(
   };
   const agentId = uuidv7({ msecs: nowMs });
   const emptyAgent: Extract<ThreadItem, { type: "agentMessage" }> = {
-    type: "agentMessage", id: agentId, text: "", phase: null, memoryCitation: null, delivery: null,
+    type: "agentMessage", id: agentId, text: "", phase: null, memoryCitation: null, questions: null, delivery: null,
   };
   const agent: ThreadItem = { ...emptyAgent, text, phase: "final_answer" };
   const startedAt = Math.floor(nowMs / 1_000);
@@ -185,7 +185,7 @@ export function providerMigrationFailed(
   const turn: Turn = {
     ...started,
     status: "failed",
-    error: { message, codexErrorInfo: "badRequest", additionalDetails: null },
+    error: { message, codexErrorInfo: "badRequest", additionalDetails: null , misalignment: null},
     completedAt: Math.floor(nowMs / 1_000),
     durationMs: Math.max(0, nowMs - (started.startedAt ?? Math.floor(nowMs / 1_000)) * 1_000),
   };

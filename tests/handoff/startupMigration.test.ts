@@ -27,7 +27,7 @@ function thread(id: string): Thread {
     ephemeral: false,
     section: null, sectionEnteredAt: null, projectId: null,
     historyMode: "legacy",
-    modelProvider: "openai",
+    modelProvider: "openai", model: null, reasoningEffort: null,
     createdAt: 1,
     updatedAt: 2,
     recencyAt: 2,

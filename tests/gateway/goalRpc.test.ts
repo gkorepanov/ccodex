@@ -530,7 +530,7 @@ describe("Claude goal gateway RPC", () => {
     if (!address || typeof address === "string") throw new Error("Fork gateway did not bind TCP.");
     const client = await RpcClient.connect(`ws://127.0.0.1:${address.port}`);
 
-    const started = await client.request("thread/start", { model: "claude:haiku", cwd: root });
+    const started = await client.request("thread/start", { model: "claude:haiku", cwd: root, historyMode: "legacy" });
     const sourceId = (started.result as { thread: { id: string } }).thread.id;
     const turnAResponse = await client.request("turn/start", {
       threadId: sourceId,
@@ -652,7 +652,7 @@ describe("Claude goal gateway RPC", () => {
     expect(reverted.result).toMatchObject({
       thread: { id: revertTargetId, turns: [] },
       turnsBackwardsCursor: turnCursor(turnAId, true),
-      itemsBackwardsCursor: "hyb-item:0",
+      itemsBackwardsCursor: expect.stringContaining('"includeAnchor":true'),
     });
     const afterRevert = client.messages.slice(beforeRevert);
     const revertedAt = afterRevert.findIndex((message) => message.method === "thread/reverted");

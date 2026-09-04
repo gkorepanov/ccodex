@@ -1123,6 +1123,19 @@ export class SqliteHybridStore implements HybridStore {
         }
         this.database.exec("INSERT INTO schema_migrations(version) VALUES (10)");
       }
+      const threadModel = this.database.prepare("SELECT 1 FROM schema_migrations WHERE version = 11").get();
+      if (!threadModel) {
+        // Codex 0.153 made Thread.model / Thread.reasoningEffort required.
+        if (["thread_json", "model_picker_id", "runtime_settings_json"].every((column) => threadColumns.has(column))) this.database.exec(`
+          UPDATE threads
+          SET thread_json = json_set(
+            thread_json,
+            '$.model', model_picker_id,
+            '$.reasoningEffort', json_extract(coalesce(runtime_settings_json, '{}'), '$.reasoningEffort')
+          );
+        `);
+        this.database.exec("INSERT INTO schema_migrations(version) VALUES (11)");
+      }
       this.database.exec("DROP TABLE IF EXISTS items");
     });
   }

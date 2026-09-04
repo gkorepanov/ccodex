@@ -70,7 +70,7 @@ export function withSettingsFrom(
 ): ClaudeThreadRecord {
   return {
     ...base,
-    thread: { ...base.thread, cwd: settings.thread.cwd },
+    thread: { ...base.thread, cwd: settings.thread.cwd, model: settings.modelPickerId, reasoningEffort: settings.reasoningEffort },
     runtimeWorkspaceRoots: runtimeWorkspaceRoots(settings),
     modelPickerId: settings.modelPickerId,
     claudeModelValue: settings.claudeModelValue,

@@ -71,7 +71,7 @@ describe("provider availability", () => {
   });
 
   it("keeps pinned Codex structural but treats a missing Claude CLI as optional", async () => {
-    const codex = executable("printf '%s\\n' 'codex-cli 0.149.1'");
+    const codex = executable("printf '%s\\n' 'codex-cli 0.153.3'");
     await expect(probeHostCompatibility({
       realCodex: codex,
       claudeBinary: join(tmpdir(), "ccodex-definitely-missing-claude"),

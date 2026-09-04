@@ -18,7 +18,7 @@ function databasePath(): string {
 function turn(id: string, text = id): Turn {
   return {
     id,
-    items: [{ type: "agentMessage", id: `${id}-item`, text, phase: "final_answer", memoryCitation: null, delivery: null }],
+    items: [{ type: "agentMessage", id: `${id}-item`, text, phase: "final_answer", memoryCitation: null, questions: null, delivery: null }],
     itemsView: "full",
     status: "completed",
     error: null,
@@ -40,7 +40,7 @@ function thread(id: string): Thread {
     ephemeral: false,
     section: null, sectionEnteredAt: null, projectId: null,
     historyMode: "legacy",
-    modelProvider: "openai",
+    modelProvider: "openai", model: null, reasoningEffort: null,
     createdAt: 1,
     updatedAt: 2,
     recencyAt: 2,

@@ -27,7 +27,7 @@ function thread(id: string, name: string, modelProvider = "openai"): Thread {
     ephemeral: false,
     section: null, sectionEnteredAt: null, projectId: null,
     historyMode: "paginated",
-    modelProvider,
+    modelProvider, model: null, reasoningEffort: null,
     createdAt: 1_700_000_000,
     updatedAt: 1_700_000_100,
     recencyAt: 1_700_000_100,

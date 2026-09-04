@@ -38,7 +38,7 @@ export function probeAppServer(socketPath: string): Promise<ProbeInfo> {
         id: 1,
         method: "initialize",
         params: {
-          clientInfo: { name: "codex_app_server_daemon", title: "Codex App Server Daemon", version: "0.149.1" },
+          clientInfo: { name: "codex_app_server_daemon", title: "Codex App Server Daemon", version: "0.153.3" },
         },
       }));
     });

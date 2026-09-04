@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Ajv } from "ajv";
 
-// The pinned 0.149.1 experimental protocol bundle. CCodex synthesizes Claude
+// The pinned 0.153.3 experimental protocol bundle. CCodex synthesizes Claude
 // responses by hand, so contract tests validate them against the same schemas
 // the stock app-server is generated from.
 const bundle = JSON.parse(readFileSync(
