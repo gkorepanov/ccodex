@@ -596,6 +596,32 @@ describe("provider switch service", () => {
     service.close();
   });
 
+  it("searches occurrences across a logical Claude thread's visible history", async () => {
+    const first = turn("claude-turn-1", "the needle answer");
+    const backend = thread("claude-backend", "claude", [first]);
+    const publicThread = { ...backend, id: "public-thread", sessionId: "public-thread" };
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    store.createLogicalThread({
+      thread: publicThread,
+      epoch: { id: "claude-epoch", provider: "claude", backendThreadId: backend.id, model: "claude:sonnet", settings: {} },
+    });
+    const claude = {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: (id: string) => id === backend.id,
+      readThread: vi.fn(() => ({ thread: backend })),
+    };
+    const service = new CrossProviderForks(store, claude as never);
+    const found = await service.requestLogical("thread/searchOccurrences", { threadId: publicThread.id, searchTerm: "Needle" }, { request: vi.fn() } as never);
+    expect(found.result).toEqual({
+      data: [expect.objectContaining({
+        turnId: first.id, snippet: "the needle answer", snippetMatchRange: { start: 4, end: 10 },
+        turnCursor: JSON.stringify({ turnId: first.id, includeAnchor: true }),
+      })],
+      nextCursor: null,
+    });
+    expect((found.result as { data: Array<{ itemId: string }> }).data[0]!.itemId).toMatch(/^ccodex-item-/u);
+  });
+
   it("reverts a paginated logical Claude thread through the backend's thread/revert", async () => {
     const first = turn("claude-turn-1", "first answer");
     const second = turn("claude-turn-2", "answer being edited");

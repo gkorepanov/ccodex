@@ -4,6 +4,7 @@ import { WebSocket as WebSocketState } from "ws";
 import type { ModelListParams } from "../codex/generated/v2/ModelListParams.js";
 import type { SkillsListParams } from "../codex/generated/v2/SkillsListParams.js";
 import type { ThreadListParams } from "../codex/generated/v2/ThreadListParams.js";
+import type { ThreadSearchParams } from "../codex/generated/v2/ThreadSearchParams.js";
 import type { Thread } from "../codex/generated/v2/Thread.js";
 import type { ThreadLoadedListParams } from "../codex/generated/v2/ThreadLoadedListParams.js";
 import type { ThreadReadParams } from "../codex/generated/v2/ThreadReadParams.js";
@@ -171,6 +172,7 @@ export function attachClientConnection(
           clientInfo?: { name?: unknown };
         }
       : undefined;
+    if (message.method === "initialize" && typeof params?.clientInfo?.name === "string") clientName = params.clientInfo.name;
     const systemEphemeral = (message.method === "thread/start" || message.method === "thread/fork")
       && params?.ephemeral === true
       && (params.threadSource === "system" || (message.method === "thread/start" && params.threadSource !== "user"));
@@ -238,11 +240,22 @@ export function attachClientConnection(
     completeLatency(id, "claude");
     sendJson({ id, result });
   };
+  // Stock sends these before the response, on every qualifying call.
+  const deprecationNotice = (summary: string) => sendJson({ method: "deprecationNotice", params: { summary, details: null } });
+  const rollbackDeprecated = () => {
+    if (clientName !== "codex-tui") deprecationNotice("thread/rollback is deprecated and will be removed soon");
+  };
+  const fullHistoryDeprecated = (threadId: string, hint: string) => {
+    if (claude.readThread(threadId, false).thread.historyMode === "paginated") {
+      deprecationNotice(`Full-history hydration is deprecated for paginated threads; ${hint}, then page with \`thread/turns/list\` and \`thread/items/list\`.`);
+    }
+  };
   const sendError = (id: string | number, code: number, error: unknown) => {
     completeLatency(id, "claude");
     sendJson({ id, error: { code, message: error instanceof Error ? error.message : String(error) } });
   };
   let foreground: { provider: ForegroundProvider; threadId: string } | undefined;
+  let clientName: string | undefined;
   let skillsProvider: ForegroundProvider | undefined;
   let foregroundGeneration = 0;
   let unknownStatusDiagnosed = false;
@@ -828,6 +841,10 @@ export function attachClientConnection(
           sendResult(message.id, await catalog.loaded((message.params ?? {}) as ThreadLoadedListParams));
           return;
         }
+        if (message.method === "thread/search") {
+          sendResult(message.id, await catalog.search((message.params ?? {}) as ThreadSearchParams));
+          return;
+        }
         if (message.method === "thread/start") {
           const params = (message.params ?? {}) as ThreadStartParams;
           if (params.model && claude.ownsModel(params.model)) {
@@ -1225,6 +1242,7 @@ export function attachClientConnection(
           return;
         }
         if (params.threadId && message.method === "thread/rollback" && handoffs.logical?.(params.threadId)) {
+          rollbackDeprecated();
           sendResult(message.id, await handoffs.rollbackLogicalThread(
             (message.params ?? {}) as ThreadRollbackParams,
             stockRpc,
@@ -1289,10 +1307,12 @@ export function attachClientConnection(
           if (message.method === "thread/resume") {
             muteClaudeDuringSnapshot(params.threadId);
             try {
-              const prepared = await claude.prepareResume((message.params ?? {}) as ThreadResumeParams);
+              const resume = (message.params ?? {}) as ThreadResumeParams;
+              const prepared = await claude.prepareResume(resume);
               const result = prepared.response;
               const snapshotHighWatermark = claude.eventHighWatermark(params.threadId);
               const tokenUsage = claude.latestTokenUsage(params.threadId);
+              if (!resume.excludeTurns) fullHistoryDeprecated(params.threadId, "use `excludeTurns: true`");
               sendResult(message.id, result);
               selectForeground("claude", params.threadId);
               subscriptions.unmute(params.threadId, connectionId);
@@ -1319,6 +1339,7 @@ export function attachClientConnection(
           }
           if (message.method === "thread/read") {
             const read = (message.params ?? {}) as ThreadReadParams;
+            if (read.includeTurns) fullHistoryDeprecated(params.threadId, "omit `includeTurns` or set it to `false`");
             sendResult(message.id, claude.readThread(read.threadId, read.includeTurns ?? false));
             const failedFork = handoffs.claimFailedFork(params.threadId);
             if (failedFork) emitTransientNotice(
@@ -1385,9 +1406,9 @@ export function attachClientConnection(
             return;
           }
           if (message.method === "thread/fork") {
-            const result = await claude.forkThread(
-              normalizeUserSideFork((message.params ?? {}) as ThreadForkParams),
-            );
+            const fork = (message.params ?? {}) as ThreadForkParams;
+            const result = await claude.forkThread(normalizeUserSideFork(fork));
+            if (!fork.excludeTurns && !fork.ephemeral) fullHistoryDeprecated(params.threadId, "use `excludeTurns: true`");
             sendResult(message.id, result);
             selectForeground("claude", result.thread.id);
             subscribeClaude(result.thread.id);
@@ -1395,6 +1416,7 @@ export function attachClientConnection(
             return;
           }
           if (message.method === "thread/rollback") {
+            rollbackDeprecated();
             sendResult(message.id, await claude.rollbackThread((message.params ?? {}) as ThreadRollbackParams));
             return;
           }

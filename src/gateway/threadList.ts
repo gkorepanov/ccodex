@@ -4,10 +4,13 @@ import type { ThreadListParams } from "../codex/generated/v2/ThreadListParams.js
 import type { ThreadListResponse } from "../codex/generated/v2/ThreadListResponse.js";
 import type { ThreadLoadedListParams } from "../codex/generated/v2/ThreadLoadedListParams.js";
 import type { ThreadLoadedListResponse } from "../codex/generated/v2/ThreadLoadedListResponse.js";
+import type { ThreadSearchParams } from "../codex/generated/v2/ThreadSearchParams.js";
+import type { ThreadSearchResponse } from "../codex/generated/v2/ThreadSearchResponse.js";
+import type { ThreadSearchResult } from "../codex/generated/v2/ThreadSearchResult.js";
 import type { ClaudeService } from "../claude/service.js";
 import type { StockRpc } from "./stockRpc.js";
 import { CursorCodec, queryFingerprint } from "../protocol/cursor.js";
-import { invalidParams } from "../protocol/errors.js";
+import { invalidParams, invalidRequest } from "../protocol/errors.js";
 import type { StockSideThreads } from "./stockSideThreads.js";
 import { cwdIdentity, filterSortThreads } from "../store/threadFilter.js";
 
@@ -15,6 +18,7 @@ export interface ThreadCatalogProjection {
   projectThreadCatalog(stock: Thread[], claude: Thread[], params?: ThreadListParams): Thread[];
   projectLoadedThreadIds(stock: string[], claude: string[]): string[];
   hiddenBackendIds?(provider?: "stock" | "claude"): Set<string>;
+  currentBackendId?(publicThreadId: string): string | undefined;
   catalogTombstones?(): string[];
 }
 
@@ -67,6 +71,17 @@ function compareThreads(left: Thread, right: Thread, key: ThreadCursor["key"], d
   return ((((left[key] ?? 0) - (right[key] ?? 0)) || left.id.localeCompare(right.id)) * sign);
 }
 
+async function allStockSearchResults(stock: StockRpc, params: ThreadSearchParams): Promise<ThreadSearchResult[]> {
+  const results: ThreadSearchResult[] = [];
+  let cursor: string | null = null;
+  do {
+    const page = await stock.request("thread/search", { ...params, cursor, limit: 100 }) as ThreadSearchResponse;
+    results.push(...page.data);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return results;
+}
+
 async function allStockThreads(stock: StockRpc, params: ThreadListParams): Promise<Thread[]> {
   const threads: Thread[] = [];
   let cursor: string | null = null;
@@ -113,26 +128,65 @@ export class ThreadCatalog {
   }
 
   public async list(params: ThreadListParams): Promise<ThreadListResponse> {
-    const key = threadKey(params);
+    return this.paginate("thread", await this.projected(params), (thread) => thread, params, threadQuery(params), threadKey(params));
+  }
+
+  /** `thread/search`: stock matches plus Claude matches, projected onto public threads and sorted by time like stock. */
+  public async search(params: ThreadSearchParams): Promise<ThreadSearchResponse> {
+    const searchTerm = params.searchTerm?.trim();
+    if (!searchTerm) throw invalidRequest("thread/search requires a non-empty searchTerm");
+    const providerParams: ThreadSearchParams = {
+      searchTerm, archived: params.archived ?? false, ...(params.sourceKinds?.length ? { sourceKinds: params.sourceKinds } : {}),
+    };
+    const [stockResults, claudeResults] = await Promise.all([
+      allStockSearchResults(this.stock, providerParams),
+      Promise.resolve(this.claude.searchThreads(providerParams)),
+    ]);
+    const snippets = new Map([...stockResults, ...claudeResults].map((result) => [result.thread.id, result.snippet]));
+    const stockThreads = stockResults.map((result) => result.thread);
+    const claudeThreads = claudeResults.map((result) => result.thread);
+    const listParams: ThreadListParams = {
+      archived: params.archived ?? false, sourceKinds: params.sourceKinds ?? null,
+      sortKey: params.sortKey ?? "created_at", sortDirection: params.sortDirection ?? "desc",
+    };
+    const projected = this.logical
+      ? this.logical.projectThreadCatalog(this.sideThreads?.filterThreads?.(stockThreads) ?? stockThreads, claudeThreads, listParams)
+      : [...stockThreads, ...claudeThreads];
+    const results = filterSortThreads(projected, listParams)
+      .filter((thread) => params.sourceKinds?.length || !thread.parentThreadId)
+      .flatMap((thread) => {
+        const snippet = snippets.get(thread.id) ?? snippets.get(this.logical?.currentBackendId?.(thread.id) ?? "");
+        return snippet === undefined ? [] : [{ thread: { ...thread, turns: [] }, snippet }];
+      });
+    const query = queryFingerprint({ searchTerm, ...listParams });
+    return this.paginate("thread-search", results, (result) => result.thread, params, query, threadKey(listParams));
+  }
+
+  private paginate<T>(
+    scope: string,
+    entries: readonly T[],
+    threadOf: (entry: T) => Thread,
+    params: { cursor?: string | null; limit?: number | null; sortDirection?: "asc" | "desc" | null },
+    query: string,
+    key: ThreadCursor["key"],
+  ): { data: T[]; nextCursor: string | null; backwardsCursor: string | null } {
     const direction = params.sortDirection === "asc" ? "asc" : "desc";
-    const query = threadQuery(params);
-    const cursor = this.cursors.decode<ThreadCursor>("thread", params.cursor);
+    const cursor = this.cursors.decode<ThreadCursor>(scope, params.cursor);
     if (cursor && (cursor.query !== query || cursor.direction !== direction || cursor.key !== key
       || typeof cursor.value !== "number" || typeof cursor.id !== "string")) {
       throw invalidParams("Thread pagination query changed; restart pagination.");
     }
     const anchor: Thread | undefined = cursor ? { [key]: cursor.value, id: cursor.id } as unknown as Thread : undefined;
-    const catalog = (await this.projected(params))
-      .filter((thread) => !anchor || compareThreads(thread, anchor, key, direction) > 0);
-    const limit = Math.max(1, Math.min(params.limit ?? 50, 100));
+    const catalog = entries.filter((entry) => !anchor || compareThreads(threadOf(entry), anchor, key, direction) > 0);
+    const limit = Math.max(1, Math.min(params.limit ?? (scope === "thread" ? 50 : 25), 100));
     const data = catalog.slice(0, limit);
-    const cursorFor = (thread: Thread, cursorDirection: ThreadCursor["direction"]) => this.cursors.encode("thread", {
+    const cursorFor = (thread: Thread, cursorDirection: ThreadCursor["direction"]) => this.cursors.encode(scope, {
       query, direction: cursorDirection, key, value: thread[key] ?? 0, id: thread.id,
     });
     return {
       data,
-      nextCursor: data.length < catalog.length ? cursorFor(data[data.length - 1]!, direction) : null,
-      backwardsCursor: data.length > 0 ? cursorFor(data[0]!, direction === "asc" ? "desc" : "asc") : null,
+      nextCursor: data.length < catalog.length ? cursorFor(threadOf(data[data.length - 1]!), direction) : null,
+      backwardsCursor: data.length > 0 ? cursorFor(threadOf(data[0]!), direction === "asc" ? "desc" : "asc") : null,
     };
   }
 

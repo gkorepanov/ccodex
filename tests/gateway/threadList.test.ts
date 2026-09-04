@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Thread } from "../../src/codex/generated/v2/Thread.js";
-import { mergedThreadList } from "../../src/gateway/threadList.js";
+import { ThreadCatalog, mergedThreadList } from "../../src/gateway/threadList.js";
 import { CursorCodec } from "../../src/protocol/cursor.js";
 import { filterSortThreads } from "../../src/store/threadFilter.js";
 
@@ -52,5 +52,29 @@ describe("merged thread listing", () => {
     const backwards = await mergedThreadList({ limit: 2, sortDirection: "asc", cursor: second.backwardsCursor }, stock as never, claude as never, cursors);
     expect(backwards.data.map((item) => item.id)).toEqual(["claude-3", "stock-4"]);
     await expect(mergedThreadList({ limit: 2, sortDirection: "desc", cursor: `${first.nextCursor}x` }, stock as never, claude as never, cursors)).rejects.toThrow("signature");
+  });
+
+  it("merges stock and Claude search results onto public threads with snippets", async () => {
+    const stockThreads = [thread("stock-4", 4), thread("backend-2", 2)];
+    const stock = {
+      request: async (method: string) => method === "thread/search"
+        ? { data: stockThreads.map((entry) => ({ thread: entry, snippet: `stock ${entry.id}` })), nextCursor: null, backwardsCursor: null }
+        : { data: [], nextCursor: null, backwardsCursor: null },
+    };
+    const claude = { searchThreads: () => [{ thread: thread("claude-3", 3), snippet: "claude hit" }] };
+    const logical = {
+      projectThreadCatalog: (stockList: Thread[], claudeList: Thread[]) => [
+        ...stockList.filter((entry) => entry.id !== "backend-2"), ...claudeList, { ...thread("public-2", 2), id: "public-2" },
+      ],
+      projectLoadedThreadIds: () => [],
+      currentBackendId: (publicId: string) => publicId === "public-2" ? "backend-2" : undefined,
+    };
+    const catalog = new ThreadCatalog(stock as never, claude as never, new CursorCodec(Buffer.alloc(32, 9)), logical);
+    const first = await catalog.search({ searchTerm: " hit ", limit: 2 });
+    expect(first.data.map((entry) => [entry.thread.id, entry.snippet])).toEqual([["stock-4", "stock stock-4"], ["claude-3", "claude hit"]]);
+    const second = await catalog.search({ searchTerm: " hit ", limit: 2, cursor: first.nextCursor });
+    expect(second.data.map((entry) => [entry.thread.id, entry.snippet])).toEqual([["public-2", "stock backend-2"]]);
+    expect(second.nextCursor).toBeNull();
+    await expect(catalog.search({ searchTerm: "  " })).rejects.toThrow("thread/search requires a non-empty searchTerm");
   });
 });

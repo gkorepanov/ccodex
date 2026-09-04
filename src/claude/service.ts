@@ -77,6 +77,9 @@ import type { Model } from "../codex/generated/v2/Model.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
 import { invalidParams, invalidRequest } from "../protocol/errors.js";
 import { historyCursors, paginateItems, paginateTurns, turnCursor } from "../protocol/turnPagination.js";
+import { searchTurnOccurrences, threadSearchSnippet } from "../protocol/search.js";
+import type { ThreadSearchParams } from "../codex/generated/v2/ThreadSearchParams.js";
+import type { ThreadSearchResult } from "../codex/generated/v2/ThreadSearchResult.js";
 import { MetricsRegistry } from "../observability/metrics.js";
 import {
   SdkTranscriptBrancher,
@@ -1178,6 +1181,8 @@ export class ClaudeService {
     let reviewThreadId = params.threadId;
     let forkedThread: Thread | undefined;
     if (params.delivery === "detached") {
+      if (this.requireRecord(params.threadId, false).thread.historyMode === "paginated")
+        throw invalidRequest("paginated threads do not support detached review");
       const fork = await this.forkThread({ threadId: params.threadId, excludeTurns: false });
       reviewThreadId = fork.thread.id;
       forkedThread = fork.thread;
@@ -1395,38 +1400,17 @@ export class ClaudeService {
 
   public searchOccurrences(params: ThreadSearchOccurrencesParams): ThreadSearchOccurrencesResponse {
     this.assertThreadAvailable(params.threadId);
+    return searchTurnOccurrences(params.threadId, this.store.listTurns(params.threadId), params);
+  }
+
+  /** `thread/search` over durable Claude threads: one result per thread with the first matching snippet. */
+  public searchThreads(params: ThreadSearchParams): ThreadSearchResult[] {
     const searchTerm = params.searchTerm.trim();
-    if (!searchTerm) throw invalidParams("thread/searchOccurrences requires a non-empty searchTerm.");
-    if (params.cursor && !params.cursor.startsWith("hyb-search:"))
-      throw invalidParams("Invalid Claude search cursor.");
-    const offset = params.cursor ? Number(params.cursor.slice("hyb-search:".length)) : 0;
-    if (!Number.isInteger(offset) || offset < 0) throw invalidParams("Invalid Claude search cursor.");
-    const turns = this.store.listTurns(params.threadId);
-    const needle = searchTerm.toLocaleLowerCase();
-    const occurrences = turns.flatMap((turn) => turn.items.flatMap((item) => {
-      const text = item.type === "userMessage"
-        ? item.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n")
-        : item.type === "agentMessage" && item.phase !== "commentary" ? item.text : undefined;
-      if (text === undefined) return [];
-      const haystack = text.toLocaleLowerCase();
-      const matches = [];
-      for (let start = haystack.indexOf(needle); start >= 0; start = haystack.indexOf(needle, start + needle.length)) {
-        matches.push({
-          turnId: turn.id,
-          itemId: item.id,
-          snippet: text,
-          snippetMatchRange: { start, end: start + needle.length },
-          turnCursor: turnCursor(turn.id, true),
-        });
-      }
-      return matches;
-    }));
-    const limit = Math.max(1, Math.min(params.limit ?? 50, 100));
-    const data = occurrences.slice(offset, offset + limit);
-    return {
-      data,
-      nextCursor: offset + data.length < occurrences.length ? `hyb-search:${offset + data.length}` : null,
-    };
+    return this.listThreads({ archived: params.archived ?? false }).flatMap((thread) => {
+      if (thread.ephemeral) return [];
+      const snippet = threadSearchSnippet(this.store.listTurns(thread.id), searchTerm);
+      return snippet === undefined ? [] : [{ thread: { ...thread, turns: [] }, snippet }];
+    });
   }
 
   public async forkThread(
@@ -1446,6 +1430,8 @@ export class ClaudeService {
       : undefined;
     const source = await this.sessions.submit<SessionBranchSnapshot>(params.threadId, { type: "snapshotBranch" });
     const sourceRecord = source.record;
+    if (sourceRecord.thread.historyMode === "paginated" && params.ephemeral && !params.excludeTurns)
+      throw invalidRequest("ephemeral paginated thread/fork requires `excludeTurns: true`");
     const sidePromotion = Boolean(
       (this.config.features?.sideChatPromotion ?? true)
       && sourceRecord.thread.ephemeral

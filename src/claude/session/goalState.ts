@@ -33,6 +33,8 @@ interface GoalOperation {
 
 export interface GoalState {
   turn?: GoalTurn;
+  /** Stock's execution breaker: consecutive goal turns whose only tool activity was failed commands. */
+  execFailures?: { goalId: string; count: number };
   operation?: GoalOperation;
   pendingTurns: number;
   pendingNotifications: number;
@@ -70,6 +72,21 @@ const updated = (context: GoalContext, turnId: string | null, goal: InternalGoal
 function clear(state: GoalState): void {
   delete state.turn;
   delete state.operation;
+  delete state.execFailures;
+}
+
+const TOOL_ITEMS = new Set(["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "collabAgentToolCall"]);
+const EXEC_FAILURE_THRESHOLD = 3;
+
+/** Mirrors stock's failed-`exec` breaker: a successful tool resets, a turn with failed commands and no success counts. */
+function accountExecFailures(state: GoalState, context: GoalContext, goal: InternalGoal, turn: Turn): void {
+  const statuses = turn.items.flatMap((item) => TOOL_ITEMS.has(item.type) && "status" in item ? [item.status] : []);
+  if (statuses.includes("completed")) { delete state.execFailures; return; }
+  if (!turn.items.some((item) => item.type === "commandExecution" && item.status === "failed")) return;
+  const count = (state.execFailures?.goalId === goal.goalId ? state.execFailures.count : 0) + 1;
+  if (count < EXEC_FAILURE_THRESHOLD) { state.execFailures = { goalId: goal.goalId, count }; return; }
+  delete state.execFailures;
+  updated(context, turn.id, context.repository.setGoal(context.threadId, { status: "blocked" }), `exec-unavailable:${turn.id}`);
 }
 
 export function invalidateGoalEffect(state: GoalState): void {
@@ -163,7 +180,9 @@ export function finishGoalTurn(state: GoalState, context: GoalContext, turn: Tur
       context.repository.setGoal(context.threadId, { status }),
       `terminal-status:${turn.id}`,
     );
+    return;
   }
+  accountExecFailures(state, context, goal, turn);
 }
 
 export function goalEffects(state: GoalState, context: GoalContext): GoalEffect[] {

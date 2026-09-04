@@ -51,6 +51,8 @@ import {
 } from "../gateway/logicalThreadProjection.js";
 import { invalidParams } from "../protocol/errors.js";
 import { historyCursors, paginateItems, paginateTurns } from "../protocol/turnPagination.js";
+import { searchTurnOccurrences } from "../protocol/search.js";
+import type { ThreadSearchOccurrencesParams } from "../codex/generated/v2/ThreadSearchOccurrencesParams.js";
 import { filterSortThreads } from "../store/threadFilter.js";
 import { v7 as uuidv7 } from "uuid";
 import {
@@ -296,6 +298,24 @@ function pageTurns(turns: Turn[], params: ThreadTurnsListParams): ThreadTurnsLis
   return paginateTurns(turns, params, ["hyb-overlay-turn:", "hyb-turn:"]);
 }
 
+/** Full stock history without the deprecated paginated `includeTurns` hydration: page `thread/turns/list` instead. */
+async function readStockThread(stock: StockRpc, threadId: string): Promise<Thread> {
+  const { thread } = await stock.request("thread/read", { threadId, includeTurns: false }) as ThreadReadResponse;
+  if (thread.historyMode !== "paginated") {
+    return (await stock.request("thread/read", { threadId, includeTurns: true }) as ThreadReadResponse).thread;
+  }
+  const turns: Turn[] = [];
+  let cursor: string | null = null;
+  do {
+    const page = await stock.request("thread/turns/list", {
+      threadId, cursor, limit: 100, sortDirection: "asc", itemsView: "full",
+    }) as ThreadTurnsListResponse;
+    turns.push(...page.data);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return { ...thread, turns };
+}
+
 function pageItems(turns: Turn[], params: ThreadItemsListParams): ThreadItemsListResponse {
   return paginateItems(turns, params, ["hyb-overlay-item:"]);
 }
@@ -382,6 +402,10 @@ export class CrossProviderForks {
 
   public pending(threadId: string): PendingProviderSwitch | undefined { return this.store.getPending(threadId); }
   public logical(threadId: string): ResolvedProviderEpoch | undefined { return this.epochs.resolve(threadId); }
+
+  public currentBackendId(publicThreadId: string): string | undefined {
+    return this.epochs.resolve(publicThreadId)?.epoch.backendThreadId;
+  }
   public hiddenBackendIds(provider?: ProviderKind): Set<string> { return this.epochs.hiddenBackendIds(provider); }
   public catalogTombstones(): string[] { return this.store.remoteCatalogTombstones(); }
 
@@ -559,6 +583,16 @@ export class CrossProviderForks {
         return { provider: resolved.epoch.provider, result: {} };
       }
     }
+    if (method === "thread/searchOccurrences") {
+      const stock = this.daemonStock ?? clientStock;
+      const turns = resolved.epoch.backendThreadId.startsWith("ccodex-provisional:")
+        ? this.store.listLogicalTurns(publicThreadId).map((value) => value.turn)
+        : await this.visibleTurns(publicThreadId, await this.currentBackendTurns(resolved, stock), stock);
+      return {
+        provider: resolved.epoch.provider,
+        result: searchTurnOccurrences(publicThreadId, turns, publicParams as unknown as ThreadSearchOccurrencesParams),
+      };
+    }
     if (resolved.epoch.backendThreadId.startsWith("ccodex-provisional:")) {
       return this.requestProvisionalLogical(method, publicParams, resolved);
     }
@@ -581,10 +615,7 @@ export class CrossProviderForks {
           ? !resume.excludeTurns
           : (params as unknown as ThreadReadParams).includeTurns ?? false;
         const backendTurns = resume && !includeTurns
-          ? (await stock.request("thread/read", {
-              threadId: resolved.epoch.backendThreadId,
-              includeTurns: true,
-            }) as ThreadReadResponse).thread.turns
+          ? (await readStockThread(stock, resolved.epoch.backendThreadId)).turns
           : result.thread.turns;
         const visible = resume ? await this.visibleTurns(publicThreadId, backendTurns, stock) : [];
         const initialTurnsPage = resume?.initialTurnsPage
@@ -605,11 +636,8 @@ export class CrossProviderForks {
         };
       }
       if (method === "thread/turns/list" || method === "thread/items/list") {
-        const read = await stock.request("thread/read", {
-          threadId: resolved.epoch.backendThreadId,
-          includeTurns: true,
-        }) as ThreadReadResponse;
-        const turns = await this.visibleTurns(publicThreadId, read.thread.turns, stock);
+        const read = await readStockThread(stock, resolved.epoch.backendThreadId);
+        const turns = await this.visibleTurns(publicThreadId, read.turns, stock);
         return {
           provider: "stock",
           result: method === "thread/turns/list"
@@ -859,10 +887,12 @@ export class CrossProviderForks {
     }
     if (method === "thread/resume") {
       const settings = resolved.epoch.settings;
+      const resume = params as unknown as ThreadResumeParams;
       return {
         provider: resolved.epoch.provider,
         result: {
-          thread: thread(!(params as unknown as ThreadResumeParams).excludeTurns),
+          thread: thread(!resume.excludeTurns),
+          ...historyCursors(turns),
           model: resolved.epoch.model,
           modelProvider: resolved.epoch.provider === "claude" ? "claude" : "openai",
           serviceTier: typeof settings.serviceTier === "string" ? settings.serviceTier : null,
@@ -876,7 +906,9 @@ export class CrossProviderForks {
           activePermissionProfile: settings.activePermissionProfile ?? null,
           reasoningEffort: settings.reasoningEffort ?? settings.effort ?? null,
           multiAgentMode: settings.multiAgentMode ?? "explicitRequestOnly",
-          initialTurnsPage: null,
+          initialTurnsPage: resume.initialTurnsPage
+            ? pageTurns(turns, { threadId: resolved.logical.publicThreadId, ...resume.initialTurnsPage })
+            : null,
         },
       };
     }
@@ -1419,10 +1451,7 @@ export class CrossProviderForks {
     if (job.targetBackendThreadId && job.targetProviderTurnId) {
       const target = job.targetProvider === "claude"
         ? this.claude.readThread(job.targetBackendThreadId, true).thread
-        : (await stock.request("thread/read", {
-            threadId: job.targetBackendThreadId,
-            includeTurns: true,
-          }) as ThreadReadResponse).thread;
+        : await readStockThread(stock, job.targetBackendThreadId);
       if (target.turns.some((turn) => turn.id === job.targetProviderTurnId)) {
         const material = await this.providerSwitchMaterial(
           job,
@@ -1888,11 +1917,11 @@ export class CrossProviderForks {
         );
       } else {
         const [read, resume] = await Promise.all([
-          stock.request("thread/read", { threadId, includeTurns: true }) as Promise<ThreadReadResponse>,
+          readStockThread(stock, threadId),
           stock.request("thread/resume", { threadId, excludeTurns: true }) as Promise<ThreadResumeResponse>,
         ]);
         resolved = this.epochs.seed(
-          read.thread,
+          read,
           "stock",
           resume.model,
           resume as unknown as Record<string, unknown>,
@@ -1909,10 +1938,7 @@ export class CrossProviderForks {
   private async backendThread(resolved: ResolvedProviderEpoch, stock: StockRpc): Promise<Thread | undefined> {
     if (resolved.epoch.backendThreadId.startsWith("ccodex-provisional:")) return undefined;
     if (resolved.epoch.provider === "claude") return this.claude.readThread(resolved.epoch.backendThreadId, true).thread;
-    return (await stock.request("thread/read", {
-      threadId: resolved.epoch.backendThreadId,
-      includeTurns: true,
-    }) as ThreadReadResponse).thread;
+    return readStockThread(stock, resolved.epoch.backendThreadId);
   }
 
   /** Drops the current epoch's trailing turns: `thread/revert` on paginated backends, `thread/rollback` on legacy ones. */
@@ -1939,15 +1965,7 @@ export class CrossProviderForks {
   }
 
   private async currentBackendTurns(resolved: ResolvedProviderEpoch, stock: StockRpc): Promise<Turn[]> {
-    if (resolved.epoch.backendThreadId.startsWith("ccodex-provisional:")) return [];
-    if (resolved.epoch.provider === "claude") {
-      return this.claude.readThread(resolved.epoch.backendThreadId, true).thread.turns;
-    }
-    const read = await stock.request("thread/read", {
-      threadId: resolved.epoch.backendThreadId,
-      includeTurns: true,
-    }) as ThreadReadResponse;
-    return read.thread.turns;
+    return (await this.backendThread(resolved, stock))?.turns ?? [];
   }
 
   private async hydrate(
@@ -2043,10 +2061,7 @@ export class CrossProviderForks {
       if (!turns) {
         turns = epoch.provider === "claude"
           ? this.claude.readThread(epoch.backendThreadId, true).thread.turns
-          : (await stock.request("thread/read", {
-            threadId: epoch.backendThreadId,
-            includeTurns: true,
-          }) as ThreadReadResponse).thread.turns;
+          : (await readStockThread(stock, epoch.backendThreadId)).turns;
         loaded.set(epoch.epochId, turns);
       }
       const start = turns.findIndex((turn) => turn.id === segment.startTurnId);
@@ -2168,19 +2183,16 @@ export class CrossProviderForks {
       };
     }
     const [read, resume] = await Promise.all([
-      stock.request("thread/read", {
-        threadId: resolved.epoch.backendThreadId,
-        includeTurns: true,
-      }) as Promise<ThreadReadResponse>,
+      readStockThread(stock, resolved.epoch.backendThreadId),
       stock.request("thread/resume", {
         threadId: resolved.epoch.backendThreadId,
         excludeTurns: true,
       }) as Promise<ThreadResumeResponse>,
     ]);
     return {
-      thread: read.thread,
-      backendTurns: read.thread.turns,
-      turns: await this.visibleTurns(job.publicThreadId, read.thread.turns, stock),
+      thread: read,
+      backendTurns: read.turns,
+      turns: await this.visibleTurns(job.publicThreadId, read.turns, stock),
       settings: resume as unknown as Record<string, unknown>,
     };
   }
@@ -2572,7 +2584,7 @@ export class CrossProviderForks {
   }
 
   private async fullOverlayTurns(threadId: string, overlay: StockHistoryOverlay, stock: StockRpc): Promise<Turn[]> {
-    const read = await stock.request("thread/read", { threadId, includeTurns: true }) as ThreadReadResponse;
-    return [...overlay.inheritedTurns, ...read.thread.turns];
+    const read = await readStockThread(stock, threadId);
+    return [...overlay.inheritedTurns, ...read.turns];
   }
 }

@@ -1045,6 +1045,26 @@ describe("provider-aware rate-limit gateway routing", () => {
     }
   });
 
+  it("sends stock deprecation notices before full-history hydration and rollback responses", async () => {
+    const harness = await makeHarness();
+    harness.client.request("start-claude", "thread/start", { model: "claude:haiku", cwd: "/tmp" });
+    await settle();
+    const threadId = (messages(harness, "start-claude")[0] as any).result.thread.id;
+    const before = harness.client.sent.length;
+    harness.client.request("read-full", "thread/read", { threadId, includeTurns: true });
+    await settle();
+    harness.client.request("rollback", "thread/rollback", { threadId, numTurns: 1 });
+    await settle();
+    const sent = harness.client.sent.slice(before) as any[];
+    const order = sent.map((message) => message.method ?? message.id);
+    expect(order.indexOf("deprecationNotice")).toBeLessThan(order.indexOf("read-full"));
+    expect(sent.filter((message) => message.method === "deprecationNotice").map((message) => message.params)).toEqual([
+      { summary: "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.", details: null },
+      { summary: "thread/rollback is deprecated and will be removed soon", details: null },
+    ]);
+    expect(order.indexOf("rollback")).toBeGreaterThan(order.lastIndexOf("deprecationNotice"));
+  });
+
   it("relays stock app/list failures without a chat banner", async () => {
     const harness = await makeHarness();
     const threadId = randomUUID();

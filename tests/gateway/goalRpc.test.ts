@@ -768,7 +768,8 @@ describe("Claude goal gateway RPC", () => {
         message.method === "warning"
         && (message.params as { message?: string } | undefined)?.message === postWatermarkMessage);
       const goalIndex = frames.findIndex((message) => message.method === "thread/goal/updated");
-      expect(responseIndex).toBe(0);
+      // Full-history resume of a paginated thread is preceded only by the stock deprecation notice.
+      expect(frames.slice(0, responseIndex).map((message) => message.method)).toEqual(["deprecationNotice"]);
       expect(usageIndexes).toHaveLength(1);
       expect(usageIndexes[0]).toBeGreaterThan(responseIndex);
       expect(postWatermarkIndex).toBeGreaterThan(usageIndexes[0]!);

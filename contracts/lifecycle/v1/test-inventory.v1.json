@@ -17,8 +17,8 @@
     ]
   },
   "counts": {
-    "architecture-invariant": 142,
-    "external-contract": 378,
+    "architecture-invariant": 143,
+    "external-contract": 380,
     "provider-mapping": 72,
     "old-implementation-detail": 32
   },
@@ -1885,6 +1885,12 @@
     },
     {
       "path": "tests/claude/service.test.ts",
+      "title": "searches durable Claude threads and applies the paginated fork and detached review gates",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
       "title": "validates and enforces the thread/shellCommand timeout",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
@@ -2120,6 +2126,12 @@
     {
       "path": "tests/claude/session/compaction.test.ts",
       "title": "admits only session-owned durable idle state",
+      "classification": "architecture-invariant",
+      "rationale": "Freezes bounded mailbox, single-owner session routing, ordering, backpressure, and shutdown invariants required by the lifecycle rewrite."
+    },
+    {
+      "path": "tests/claude/session/goalState.test.ts",
+      "title": "blocks the goal after three goal turns whose only tool activity failed",
       "classification": "architecture-invariant",
       "rationale": "Freezes bounded mailbox, single-owner session routing, ordering, backpressure, and shutdown invariants required by the lifecycle rewrite."
     },
@@ -3284,6 +3296,12 @@
     {
       "path": "tests/gateway/providerRateLimits.test.ts",
       "title": "answers app/list and mcpServerStatus/list for Claude threads with empty pages",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/gateway/providerRateLimits.test.ts",
+      "title": "sends stock deprecation notices before full-history hydration and rollback responses",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },

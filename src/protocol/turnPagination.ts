@@ -1,3 +1,4 @@
+import type { ThreadItem } from "../codex/generated/v2/ThreadItem.js";
 import type { ThreadItemsListParams } from "../codex/generated/v2/ThreadItemsListParams.js";
 import type { ThreadItemsListResponse } from "../codex/generated/v2/ThreadItemsListResponse.js";
 import type { ThreadTurnsListParams } from "../codex/generated/v2/ThreadTurnsListParams.js";
@@ -86,6 +87,20 @@ function paginate<T>(
   };
 }
 
+/** The agent item stock treats as a turn's final answer: latest final_answer, else a phase-less message on a finished turn. */
+export function finalAgentItem(turn: Turn): ThreadItem | undefined {
+  const agent = turn.items.filter((item) => item.type === "agentMessage");
+  return agent.findLast((item) => item.type === "agentMessage" && item.phase === "final_answer")
+    ?? (turn.status === "inProgress" ? undefined : agent.findLast((item) => item.type === "agentMessage" && item.phase === null));
+}
+
+/** `itemsView: "summary"`: the first user message and the final agent message, in rollout order. */
+export function summaryItems(turn: Turn): ThreadItem[] {
+  const first = turn.items.find((item) => item.type === "userMessage");
+  const final = finalAgentItem(turn);
+  return turn.items.filter((item) => item === first || item === final);
+}
+
 export function paginateTurns(
   turns: readonly Turn[],
   params: Omit<ThreadTurnsListParams, "threadId">,
@@ -95,7 +110,11 @@ export function paginateTurns(
   const itemsView = params.itemsView ?? "summary";
   return {
     ...page,
-    data: page.data.map((turn) => ({ ...turn, itemsView, ...(itemsView === "notLoaded" ? { items: [] } : {}) })),
+    data: page.data.map((turn) => ({
+      ...turn,
+      itemsView,
+      items: itemsView === "notLoaded" ? [] : itemsView === "summary" ? summaryItems(turn) : turn.items,
+    })),
   };
 }
 

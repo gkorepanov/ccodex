@@ -1425,7 +1425,7 @@ Keep this summary.
         turnId, itemId: "user", snippet: "😀 Needle",
         snippetMatchRange: { start: 3, end: 9 }, turnCursor: JSON.stringify({ turnId, includeAnchor: true }),
       }],
-      nextCursor: "hyb-search:1",
+      nextCursor: expect.any(String),
     });
     expect(service.searchOccurrences({
       threadId: started.thread.id, searchTerm: "needle", cursor: first.nextCursor, limit: 1,
@@ -3174,7 +3174,7 @@ You are in a side conversation, not the main thread.`,
       new SqliteHybridStore(join(directory, "state.sqlite")),
       (() => { throw new Error("review runtime failed"); }) as never,
     );
-    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory, historyMode: "legacy" });
     await expect(service.prepareReview({
       threadId: started.thread.id,
       target: { type: "uncommittedChanges" },
@@ -7930,6 +7930,25 @@ describe("ClaudeService submission queue", () => {
       threadId: started.thread.id, input: [{ type: "text", text: "hi", text_elements: [] }],
       toolOutput: { name: "tool", namespace: null, output: { type: "text", text: "x" } as never },
     })).rejects.toThrow("Claude threads do not support toolOutput.");
+    await service.close();
+  });
+
+  it("searches durable Claude threads and applies the paginated fork and detached review gates", async () => {
+    const fake = new FakeClaudeQuery();
+    const { directory, service } = makeService("ccodex-thread-search-", fake);
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const threadId = started.thread.id;
+    const prepared = await service.prepareTurn({ threadId, input: [{ type: "text", text: "find the needle", text_elements: [] }] });
+    await prepared.announce();
+    await prepared.startAndWait();
+    await waitFor(() => turns(service, threadId)[0]?.status === "completed", "turn completed");
+    expect(service.searchThreads({ searchTerm: "NEEDLE" })).toEqual([
+      { thread: expect.objectContaining({ id: threadId, turns: [] }), snippet: "find the needle" },
+    ]);
+    expect(service.searchThreads({ searchTerm: "absent" })).toEqual([]);
+    await expect(service.forkThread({ threadId, ephemeral: true })).rejects.toThrow("ephemeral paginated thread/fork requires `excludeTurns: true`");
+    await expect(service.prepareReview({ threadId, target: { type: "uncommittedChanges" }, delivery: "detached" }))
+      .rejects.toThrow("paginated threads do not support detached review");
     await service.close();
   });
 
