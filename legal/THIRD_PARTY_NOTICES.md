@@ -154,7 +154,7 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:codex-api | 0.153.3 | Apache-2.0 |
 | cargo:codex-app-server-protocol | 0.153.3 | Apache-2.0 |
 | cargo:codex-app-server-protocol-noop-macros | 0.153.3 | Apache-2.0 |
-| cargo:codex-app-server-transport | 0.149.1 | Apache-2.0 |
+| cargo:codex-app-server-transport | 0.153.3 | Apache-2.0 |
 | cargo:codex-apply-patch | 0.153.3 | Apache-2.0 |
 | cargo:codex-async-utils | 0.153.3 | Apache-2.0 |
 | cargo:codex-aws-auth | 0.153.3 | Apache-2.0 |
