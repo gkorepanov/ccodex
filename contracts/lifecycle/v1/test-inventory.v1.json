@@ -18,9 +18,9 @@
   },
   "counts": {
     "architecture-invariant": 142,
-    "external-contract": 375,
-    "provider-mapping": 71,
-    "old-implementation-detail": 30
+    "external-contract": 376,
+    "provider-mapping": 72,
+    "old-implementation-detail": 31
   },
   "cases": [
     {
@@ -673,7 +673,13 @@
     },
     {
       "path": "tests/claude/rateLimits.test.ts",
-      "title": "keeps null values null and maps exact supported subscription labels only",
+      "title": "drops windows without utilization instead of sending usedPercent null and maps exact subscription labels only",
+      "classification": "provider-mapping",
+      "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
+    },
+    {
+      "path": "tests/claude/rateLimits.test.ts",
+      "title": "ignores unknown window fields such as locked_reason",
       "classification": "provider-mapping",
       "rationale": "Freezes Claude SDK/control/tool input into normalized Codex semantics."
     },
@@ -1862,6 +1868,12 @@
     {
       "path": "tests/claude/service.test.ts",
       "title": "queues a submission during an active turn and starts it after completion with the client message id",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "stores text input without text_elements in stock shape for turns, steers and queued submissions",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
@@ -3608,6 +3620,12 @@
     {
       "path": "tests/store/sqliteStore.test.ts",
       "title": "repairs duplicated catalog identities only for top-level threads",
+      "classification": "old-implementation-detail",
+      "rationale": "Freezes the current broad-record/SQLite implementation; retain as migration evidence, not reducer parity."
+    },
+    {
+      "path": "tests/store/sqliteStore.test.ts",
+      "title": "backfills text_elements on stored user messages when migration 10 runs",
       "classification": "old-implementation-detail",
       "rationale": "Freezes the current broad-record/SQLite implementation; retain as migration evidence, not reducer parity."
     },

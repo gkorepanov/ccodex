@@ -1034,9 +1034,13 @@ describe("provider-aware rate-limit gateway routing", () => {
     const threadId = (messages(harness, "start-claude")[0] as any).result.thread.id;
     harness.client.request("apps-claude", "app/list", { threadId, limit: 1000, forceRefetch: false });
     harness.client.request("mcp-claude", "mcpServerStatus/list", { threadId, limit: 100, detail: "toolsAndAuthOnly" });
+    harness.client.request("installed-claude", "app/installed", { threadId });
     await settle();
     for (const id of ["apps-claude", "mcp-claude"]) {
       expect(messages(harness, id)[0]).toEqual({ id, result: { data: [], nextCursor: null } });
+    }
+    expect(messages(harness, "installed-claude")[0]).toEqual({ id: "installed-claude", result: { apps: [] } });
+    for (const id of ["apps-claude", "mcp-claude", "installed-claude"]) {
       expect(harness.stockRequests.some((request) => request.id === id)).toBe(false);
     }
   });

@@ -660,6 +660,8 @@ describe("provider switch service", () => {
       expect(await service.requestLogical(method, { threadId: publicThread.id }, stock as never))
         .toMatchObject({ provider: "claude", result: { data: [], nextCursor: null } });
     }
+    expect(await service.requestLogical("app/installed", { threadId: publicThread.id }, stock as never))
+      .toMatchObject({ provider: "claude", result: { apps: [] } });
     expect(stock.request).not.toHaveBeenCalled();
     service.close();
   });

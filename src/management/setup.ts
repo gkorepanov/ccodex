@@ -2,10 +2,10 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   cpSync, existsSync, lstatSync, readFileSync, readlinkSync, renameSync, rmSync, statSync,
-  unlinkSync, realpathSync,
+  unlinkSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { compatibilityManifest } from "../compatibility/probe.js";
 import { defaultConfigToml, delegatedCodexExecutable, loadConfig } from "../config/config.js";
@@ -318,6 +318,15 @@ export function activate(layout: InstallLayout, version: string): string | null 
     : null;
 }
 
+/**
+ * Resolves one symlink level only: a standalone entrypoint like ~/.local/bin/codex points at
+ * .../standalone/current/bin/codex, which must keep following Codex self-updates (issue #18).
+ * A full realpath would pin the release directory of the moment.
+ */
+export function stableDelegate(path: string): string {
+  return lstatSync(path).isSymbolicLink() ? resolve(dirname(path), readlinkSync(path)) : path;
+}
+
 export async function setup(args: readonly string[]): Promise<number> {
   if (process.getuid?.() === 0) throw new Error("Do not run CCodex setup as root or with sudo.");
   const stagedIndex = args.indexOf("--staged");
@@ -352,7 +361,7 @@ export async function setup(args: readonly string[]): Promise<number> {
   }
   migrateLegacyState(layout);
   const discoveredDelegate = delegatedCodexExecutable(layout.home, pinnedCodexExecutable());
-  let delegateCodex = discoveredDelegate ? realpathSync(discoveredDelegate) : undefined;
+  let delegateCodex = discoveredDelegate ? stableDelegate(discoveredDelegate) : undefined;
   const publicSocket = loadConfig().publicSocket;
   await stagedDoctor(staged, layout);
   await startupSmoke(staged, layout);

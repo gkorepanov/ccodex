@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,6 +10,7 @@ import {
   installManagedShims,
   repairManagedCcodexShim,
 } from "../../src/management/shims.js";
+import { stableDelegate } from "../../src/management/setup.js";
 
 const roots: string[] = [];
 const sha256 = (content: string) => createHash("sha256").update(content).digest("hex");
@@ -29,6 +30,27 @@ function fixture(): { root: string; home: string; shim: string; manifest: string
 }
 
 describe("managed CCodex launcher", () => {
+  it("keeps a delegated standalone Codex on its current symlink so self-updates are followed", () => {
+    const root = mkdtempSync(join(tmpdir(), "ccodex-stable-delegate-"));
+    roots.push(root);
+    for (const release of ["0.148.0", "0.153.0"]) {
+      mkdirSync(join(root, "releases", release, "bin"), { recursive: true });
+      writeFileSync(join(root, "releases", release, "bin", "codex"), release);
+    }
+    symlinkSync(join("releases", "0.148.0"), join(root, "current"));
+    const entry = join(root, "codex");
+    symlinkSync(join(root, "current", "bin", "codex"), entry);
+
+    const delegate = stableDelegate(entry);
+    expect(delegate).toBe(join(root, "current", "bin", "codex"));
+    expect(readFileSync(delegate, "utf8")).toBe("0.148.0");
+    unlinkSync(join(root, "current"));
+    symlinkSync(join("releases", "0.153.0"), join(root, "current"));
+    expect(readFileSync(delegate, "utf8")).toBe("0.153.0");
+    expect(realpathSync(delegate)).toBe(join(realpathSync(root), "releases", "0.153.0", "bin", "codex"));
+    expect(stableDelegate(join(root, "releases", "0.153.0", "bin", "codex"))).toBe(join(root, "releases", "0.153.0", "bin", "codex"));
+  });
+
   it("compares release and prerelease versions", () => {
     expect(compareSemver("0.4.1", "0.3.6")).toBe(1);
     expect(compareSemver("0.4.1", "0.4.1")).toBe(0);

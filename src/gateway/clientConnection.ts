@@ -79,7 +79,7 @@ import { projectRpcToPublicThread } from "./logicalThreadProjection.js";
 import { isUserSideFork, normalizeUserSideFork } from "./sideFork.js";
 
 /** Stock RPC failures the App handles itself; a chat banner would only add noise (e.g. app/list 403 from Cloudflare). */
-const BANNERLESS_STOCK_ERRORS = new Set(["thread/read", "turn/steer", "app/list", "mcpServerStatus/list"]);
+const BANNERLESS_STOCK_ERRORS = new Set(["thread/read", "turn/steer", "app/list", "app/installed", "mcpServerStatus/list"]);
 
 type ForegroundProvider = "codex" | "claude";
 type FastSettings = Pick<ThreadSettings, "model" | "serviceTier">;
@@ -1475,6 +1475,10 @@ export function attachClientConnection(
           if (message.method === "app/list" || message.method === "mcpServerStatus/list") {
             // Codex apps and MCP servers never apply to a Claude runtime.
             sendResult(message.id, { data: [], nextCursor: null });
+            return;
+          }
+          if (message.method === "app/installed") {
+            sendResult(message.id, { apps: [] });
             return;
           }
           if (message.method === "thread/queue/add") {

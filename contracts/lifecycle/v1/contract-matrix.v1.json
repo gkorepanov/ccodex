@@ -35,6 +35,7 @@
     "thread/queue/reorder",
     "thread/queue/start",
     "app/list",
+    "app/installed",
     "mcpServerStatus/list",
     "thread/goal/set",
     "thread/goal/get",
