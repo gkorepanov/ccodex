@@ -34,6 +34,20 @@ describe("anchor pagination", () => {
     expect(() => paginateItems(turns, { cursor: itemCursor("gone", true) })).toThrow("anchor is no longer present");
   });
 
+  it("resolves item anchors across the whole thread so one tail cursor loads every turn, like stock ordinals", () => {
+    const tail = historyCursors(turns).itemsBackwardsCursor;
+    const perTurn = (turnId: string, sortDirection: "asc" | "desc") =>
+      paginateItems(turns, { turnId, cursor: tail, limit: 100, sortDirection }).data.map((entry) => entry.item.id);
+    expect(perTurn("t3", "desc")).toEqual(["i5", "i4", "i3"]);
+    expect(perTurn("t1", "desc")).toEqual(["i2", "i1"]);
+    expect(perTurn("t2", "desc")).toEqual([]);
+    expect(perTurn("t1", "asc")).toEqual([]);
+    expect(paginateItems(turns, { turnId: "t3", cursor: itemCursor("i2", false) }).data.map((entry) => entry.item.id))
+      .toEqual(["i3", "i4", "i5"]);
+    expect(paginateItems(turns, { turnId: "t1", cursor: "hyb-item:1" }, ["hyb-item:"]).data.map((entry) => entry.item.id))
+      .toEqual(["i2"]);
+  });
+
   it("pages turns newest-first by default and reports inclusive top-level cursors", () => {
     const page = paginateTurns(turns, { limit: 2 });
     expect(page.data.map((entry) => entry.id)).toEqual(["t3", "t2"]);

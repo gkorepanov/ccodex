@@ -948,3 +948,116 @@ describe("Claude goal gateway RPC", () => {
     await closeServer(stockServer);
   });
 });
+
+describe("paginated history replay", () => {
+  // Request sequences copied from the rpc capture of Codex iOS 1.2026.237 and Codex Desktop 26.901.22334
+  // opening a paginated Claude thread (2026-09-05). Both clients page with the top-level resume cursors.
+  it("replays the iOS and Desktop history-loading sequences on a paginated Claude thread", async () => {
+    const root = directory();
+    const cfg = config(root);
+    const stockSocket = join(root, "stock.sock");
+    const stockServer = createServer();
+    new WebSocketServer({ server: stockServer });
+    await listen(stockServer, stockSocket);
+    const store = new SqliteHybridStore(join(root, "state.sqlite"));
+    const subscriptions = new SubscriptionHub();
+    const logger = new Logger("error");
+    const metrics = new MetricsRegistry();
+    const claude = new ClaudeService(cfg, subscriptions, logger, store, new FakeClaudeQuery().factory);
+    const handoffs = new CrossProviderForks(new HandoffStore(join(root, "handoffs.sqlite")), claude);
+    const models = { list: async () => [] } as unknown as ClaudeModelCatalog;
+    const gatewayServer = createServer();
+    new WebSocketServer({ server: gatewayServer }).on("connection", (socket) => attachClientConnection(
+      socket, stockSocket, models, claude, handoffs, subscriptions, logger,
+      CursorCodec.load(root), metrics, new RpcRecorder(cfg),
+    ));
+    await listen(gatewayServer);
+    const address = gatewayServer.address();
+    if (!address || typeof address === "string") throw new Error("Replay gateway did not bind TCP.");
+    const desktop = await RpcClient.connect(`ws://127.0.0.1:${address.port}`);
+    const phone = await RpcClient.connect(`ws://127.0.0.1:${address.port}`);
+
+    type Item = { type: string; id: string };
+    type TurnView = { id: string; itemsView: string; items: Item[] };
+    type Page = { data: TurnView[]; nextCursor: string | null; backwardsCursor: string | null };
+    const started = await desktop.request("thread/start", { model: "claude:haiku", cwd: root });
+    const threadId = (started.result as { thread: { id: string } }).thread.id;
+    const turnIds: string[] = [];
+    for (let index = 1; index <= 5; index += 1) {
+      const turn = await desktop.request("turn/start", {
+        threadId, turnTrigger: "composer", clientUserMessageId: randomUUID(),
+        input: [{ type: "text", text: `тест ${index}\n`, text_elements: [] }],
+      });
+      const turnId = (turn.result as { turn: { id: string } }).turn.id;
+      turnIds.push(turnId);
+      await desktop.waitFor((message) =>
+        message.method === "turn/completed" && (message.params as { turn: { id: string } }).turn.id === turnId,
+      `turn ${index} completion`);
+    }
+    const newestFirst = [...turnIds].reverse();
+
+    // iOS: resume without turns, then one turns page and one items/list per turn, all from the resume cursors.
+    const resumed = await phone.request("thread/resume", { threadId, excludeTurns: true });
+    expect(resumed.error).toBeUndefined();
+    const { turnsBackwardsCursor, itemsBackwardsCursor, initialTurnsPage, thread } = resumed.result as {
+      turnsBackwardsCursor: string; itemsBackwardsCursor: string; initialTurnsPage: Page | null;
+      thread: { historyMode: string; turns: unknown[] };
+    };
+    expect(thread).toMatchObject({ historyMode: "paginated", turns: [] });
+    expect(initialTurnsPage).toBeNull();
+    expect(turnsBackwardsCursor).toBe(turnCursor(turnIds[4]!, true));
+    expect(itemsBackwardsCursor).toMatch(/"includeAnchor":true/);
+    const turnsPage = await phone.request("thread/turns/list", {
+      threadId, cursor: turnsBackwardsCursor, itemsView: "notLoaded", limit: 5, sortDirection: "desc",
+    });
+    const turnsData = (turnsPage.result as Page).data;
+    expect(turnsData.map((turn) => turn.id)).toEqual(newestFirst);
+    expect(turnsData.every((turn) => turn.itemsView === "notLoaded" && turn.items.length === 0)).toBe(true);
+    expect((turnsPage.result as Page).nextCursor).toBeNull();
+    const fullTurns = (await phone.request("thread/turns/list", { threadId, itemsView: "full", limit: 100 })).result as Page;
+    for (const turnId of newestFirst) {
+      const items = await phone.request("thread/items/list", {
+        threadId, turnId, cursor: itemsBackwardsCursor, limit: 100, sortDirection: "desc",
+      });
+      expect(items.error, `items/list for turn ${turnId}`).toBeUndefined();
+      const page = items.result as { data: Array<{ turnId: string; item: Item }>; nextCursor: string | null };
+      const expected = fullTurns.data.find((turn) => turn.id === turnId)!.items.map((item) => item.id).reverse();
+      expect(page.data.map((entry) => entry.item.id)).toEqual(expected);
+      expect(page.data.every((entry) => entry.turnId === turnId)).toBe(true);
+      expect(page.data.map((entry) => entry.item.type)).toContain("userMessage");
+      expect(page.nextCursor).toBeNull();
+    }
+    const read = await phone.request("thread/read", { threadId, includeTurns: false });
+    expect((read.result as { thread: { turns: unknown[] } }).thread.turns).toEqual([]);
+    const withPage = await phone.request("thread/resume", {
+      threadId, excludeTurns: true, initialTurnsPage: { itemsView: "full", limit: 5, sortDirection: "desc" },
+    });
+    const initial = (withPage.result as { initialTurnsPage: Page }).initialTurnsPage;
+    expect(initial.data.map((turn) => turn.id)).toEqual(newestFirst);
+    expect(initial.data.every((turn) => turn.itemsView === "full" && turn.items.length >= 2)).toBe(true);
+    expect(initial.nextCursor).toBeNull();
+
+    // Desktop: the whole turn index without items, then summary pages from an anchor, then the poll flip.
+    const index = (await desktop.request("thread/turns/list", {
+      threadId, cursor: null, limit: 100, itemsView: "notLoaded", sortDirection: "desc",
+    })).result as Page;
+    expect(index.data.map((turn) => turn.id)).toEqual(newestFirst);
+    expect(index).toMatchObject({ nextCursor: null, backwardsCursor: turnCursor(turnIds[4]!, true) });
+    const older = (await desktop.request("thread/turns/list", {
+      threadId, cursor: turnCursor(turnIds[2]!, false), limit: 5, sortDirection: "desc",
+    })).result as Page;
+    expect(older.data.map((turn) => turn.id)).toEqual([turnIds[1], turnIds[0]]);
+    expect(older.data.map((turn) => [turn.itemsView, ...turn.items.map((item) => item.type)]))
+      .toEqual([["summary", "userMessage", "agentMessage"], ["summary", "userMessage", "agentMessage"]]);
+    const poll = (await desktop.request("thread/turns/list", {
+      threadId, cursor: index.backwardsCursor, sortDirection: "asc",
+    })).result as Page;
+    expect(poll.data.map((turn) => turn.id)).toEqual([turnIds[4]]);
+
+    await phone.close();
+    await desktop.close();
+    await claude.close();
+    await closeServer(gatewayServer);
+    await closeServer(stockServer);
+  });
+});

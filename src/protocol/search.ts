@@ -23,12 +23,26 @@ interface Match { readonly start: number; readonly end: number }
 
 /** Non-overlapping, case-insensitive literal matches (UTF-16 offsets into `text`). */
 export function findMatches(text: string, searchTerm: string): Match[] {
-  const haystack = text.toLowerCase();
   const needle = searchTerm.toLowerCase();
-  if (!needle || haystack.length !== text.length) return needle && haystack.includes(needle) ? [{ start: 0, end: 0 }] : [];
+  if (!needle) return [];
+  // Lower-case per code point so offsets map back to `text` even where case folding changes length (e.g. "İ").
+  let haystack = "";
+  const starts: number[] = [];
+  const ends: number[] = [];
+  for (let index = 0; index < text.length;) {
+    const codePoint = text.codePointAt(index)!;
+    const next = index + (codePoint > 0xffff ? 2 : 1);
+    const lowered = String.fromCodePoint(codePoint).toLowerCase();
+    for (let unit = 0; unit < lowered.length; unit += 1) {
+      starts.push(index);
+      ends.push(next);
+    }
+    haystack += lowered;
+    index = next;
+  }
   const matches: Match[] = [];
   for (let start = haystack.indexOf(needle); start >= 0; start = haystack.indexOf(needle, start + needle.length)) {
-    matches.push({ start, end: start + needle.length });
+    matches.push({ start: starts[start]!, end: ends[start + needle.length - 1]! });
   }
   return matches;
 }

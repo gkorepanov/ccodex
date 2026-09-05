@@ -49,7 +49,7 @@ import {
   projectRpcToBackendThread,
   projectRpcToPublicThread,
 } from "../gateway/logicalThreadProjection.js";
-import { invalidParams } from "../protocol/errors.js";
+import { invalidParams, invalidRequest } from "../protocol/errors.js";
 import { historyCursors, paginateItems, paginateTurns } from "../protocol/turnPagination.js";
 import { searchTurnOccurrences } from "../protocol/search.js";
 import type { ThreadSearchOccurrencesParams } from "../codex/generated/v2/ThreadSearchOccurrencesParams.js";
@@ -949,10 +949,14 @@ export class CrossProviderForks {
     const visible = await this.snapshotTurns(
       params.threadId, currentTurns, this.daemonStock ?? clientStock,
     );
-    const boundaryIndex = visible.findLastIndex((turn) =>
-      turn.turn.status === "completed" && turn.epochId && turn.providerTurnId);
+    const requested = params.lastTurnId ?? params.beforeTurnId;
+    const requestedIndex = requested ? visible.findIndex((turn) => turn.turn.id === requested) : undefined;
+    if (requestedIndex === -1) throw invalidRequest(`turn not found: ${requested}`);
+    const boundaryIndex = requestedIndex === undefined
+      ? visible.findLastIndex((turn) => turn.turn.status === "completed" && turn.epochId && turn.providerTurnId)
+      : params.lastTurnId ? requestedIndex : requestedIndex - 1;
     const boundary = visible[boundaryIndex];
-    if (!boundary?.epochId || !boundary.providerTurnId) {
+    if (!boundary?.epochId || !boundary.providerTurnId || boundary.turn.status !== "completed") {
       throw invalidParams("Cannot fork before the task has a completed provider turn.");
     }
     const selectedBoundary = this.lineage.getEpoch(boundary.epochId);
@@ -1872,6 +1876,7 @@ export class CrossProviderForks {
     const full = await this.fullOverlayTurns(params.threadId, overlay, stock);
     return {
       ...result,
+      ...historyCursors(full),
       thread: this.patchThread(result.thread, overlay, !params.excludeTurns, full),
       initialTurnsPage: params.initialTurnsPage ? pageTurns(full, {
         threadId: params.threadId,

@@ -59,24 +59,26 @@ function paginate<T>(
   params: PageParams,
   legacyPrefixes: readonly string[],
   defaultDirection: SortDirection,
+  selected: (entry: T) => boolean = () => true,
 ): { data: T[]; nextCursor: string | null; backwardsCursor: string | null } {
   if (entries.length === 0) return { data: [], nextCursor: null, backwardsCursor: null };
   const direction = params.sortDirection ?? defaultDirection;
   let keyed = entries.map((entry, index) => ({ entry, index }));
   if (direction === "desc") keyed.reverse();
-  if (params.cursor !== undefined && params.cursor !== null) {
-    const anchor = anchorCursor(key, params.cursor);
-    if (anchor) {
-      const anchorIndex = entries.findIndex((entry) => idOf(entry) === anchor.anchor);
-      if (anchorIndex < 0) throw invalidRequest("invalid cursor: anchor is no longer present");
-      keyed = keyed.filter(({ index }) => direction === "asc"
-        ? anchor.includeAnchor ? index >= anchorIndex : index > anchorIndex
-        : anchor.includeAnchor ? index <= anchorIndex : index < anchorIndex);
-    } else {
-      const offset = legacyOffset(params.cursor, legacyPrefixes);
-      if (offset === undefined) throw invalidRequest(`invalid cursor: ${params.cursor}`);
-      keyed = keyed.slice(offset);
-    }
+  // Like stock, anchors are positions in the whole list; `selected` (e.g. a turn filter) applies on top.
+  const anchor = params.cursor ? anchorCursor(key, params.cursor) : undefined;
+  if (anchor) {
+    const anchorIndex = entries.findIndex((entry) => idOf(entry) === anchor.anchor);
+    if (anchorIndex < 0) throw invalidRequest("invalid cursor: anchor is no longer present");
+    keyed = keyed.filter(({ index }) => direction === "asc"
+      ? anchor.includeAnchor ? index >= anchorIndex : index > anchorIndex
+      : anchor.includeAnchor ? index <= anchorIndex : index < anchorIndex);
+  }
+  keyed = keyed.filter(({ entry }) => selected(entry));
+  if (params.cursor && !anchor) {
+    const offset = legacyOffset(params.cursor, legacyPrefixes);
+    if (offset === undefined) throw invalidRequest(`invalid cursor: ${params.cursor}`);
+    keyed = keyed.slice(offset);
   }
   const limit = Math.max(1, Math.min(params.limit ?? 25, 100));
   const page = keyed.slice(0, limit).map(({ entry }) => entry);
@@ -94,10 +96,10 @@ export function finalAgentItem(turn: Turn): ThreadItem | undefined {
     ?? (turn.status === "inProgress" ? undefined : agent.findLast((item) => item.type === "agentMessage" && item.phase === null));
 }
 
-/** `itemsView: "summary"`: the first user message and the final agent message, in rollout order. */
+/** `itemsView: "summary"`: the first user message and the final agent message, in rollout order. Stock's live view of a running turn shows its latest agent message regardless of phase. */
 export function summaryItems(turn: Turn): ThreadItem[] {
   const first = turn.items.find((item) => item.type === "userMessage");
-  const final = finalAgentItem(turn);
+  const final = turn.status === "inProgress" ? turn.items.findLast((item) => item.type === "agentMessage") : finalAgentItem(turn);
   return turn.items.filter((item) => item === first || item === final);
 }
 
@@ -123,10 +125,9 @@ export function paginateItems(
   params: Omit<ThreadItemsListParams, "threadId">,
   legacyPrefixes: readonly string[] = [],
 ): ThreadItemsListResponse {
-  const entries = turns.flatMap((turn) => params.turnId && turn.id !== params.turnId
-    ? []
-    : turn.items.map((item) => ({ turnId: turn.id, item })));
-  return paginate(entries, "itemId", (entry) => entry.item.id, params, legacyPrefixes, "asc");
+  const entries = turns.flatMap((turn) => turn.items.map((item) => ({ turnId: turn.id, item })));
+  return paginate(entries, "itemId", (entry) => entry.item.id, params, legacyPrefixes, "asc",
+    (entry) => !params.turnId || entry.turnId === params.turnId);
 }
 
 /** Top-level resume/read/revert cursors: point inclusively at the newest turn and item, like stock paginated threads. */

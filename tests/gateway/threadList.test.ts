@@ -75,6 +75,9 @@ describe("merged thread listing", () => {
     const second = await catalog.search({ searchTerm: " hit ", limit: 2, cursor: first.nextCursor });
     expect(second.data.map((entry) => [entry.thread.id, entry.snippet])).toEqual([["public-2", "stock backend-2"]]);
     expect(second.nextCursor).toBeNull();
+    // The App polls for newer results by flipping direction on the backwards cursor.
+    const newer = await catalog.search({ searchTerm: " hit ", cursor: first.backwardsCursor, sortDirection: "asc" });
+    expect(newer.data).toEqual([]);
     await expect(catalog.search({ searchTerm: "  " })).rejects.toThrow("thread/search requires a non-empty searchTerm");
   });
 });

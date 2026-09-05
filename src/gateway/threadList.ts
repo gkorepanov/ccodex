@@ -158,7 +158,7 @@ export class ThreadCatalog {
         const snippet = snippets.get(thread.id) ?? snippets.get(this.logical?.currentBackendId?.(thread.id) ?? "");
         return snippet === undefined ? [] : [{ thread: { ...thread, turns: [] }, snippet }];
       });
-    const query = queryFingerprint({ searchTerm, ...listParams });
+    const query = queryFingerprint({ searchTerm, ...listParams, sortDirection: null });
     return this.paginate("thread-search", results, (result) => result.thread, params, query, threadKey(listParams));
   }
 

@@ -18,7 +18,7 @@
   },
   "counts": {
     "architecture-invariant": 143,
-    "external-contract": 380,
+    "external-contract": 381,
     "provider-mapping": 72,
     "old-implementation-detail": 32
   },
@@ -3200,6 +3200,12 @@
     {
       "path": "tests/gateway/goalRpc.test.ts",
       "title": "queues an App submission during an active turn, drains it after completion, and answers a stale steer with a plain error",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/gateway/goalRpc.test.ts",
+      "title": "replays the iOS and Desktop history-loading sequences on a paginated Claude thread",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },

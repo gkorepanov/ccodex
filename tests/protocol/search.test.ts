@@ -27,6 +27,10 @@ describe("search", () => {
     const astral = "😀😀 needle";
     const range = snippetAround(astral, findMatches(astral, "needle")[0]!);
     expect(range).toEqual({ snippet: astral, start: 5, end: 11 });
+    // Case folding that changes length ("İ" lower-cases to two UTF-16 units) still reports original offsets.
+    expect(findMatches("İstanbul İ", "i")).toEqual([{ start: 0, end: 1 }, { start: 9, end: 10 }]);
+    expect(findMatches("İstanbul", "istanbul")).toEqual([]);
+    expect(findMatches("ǅemal", "ǆemal")).toEqual([{ start: 0, end: 5 }]);
   });
 
   it("indexes user messages and each turn's final agent message, one occurrence per match", () => {
@@ -60,6 +64,7 @@ describe("search", () => {
     const items = [user("u1", "a"), user("u2", "b"), agent("c", "c", "commentary"), agent("f", "f", "final_answer"), agent("l", "l", null)];
     expect(summaryItems(turn("t", items)).map((item) => item.id)).toEqual(["u1", "f"]);
     expect(summaryItems(turn("t", [user("u1", "a"), agent("l", "l", null)])).map((item) => item.id)).toEqual(["u1", "l"]);
-    expect(summaryItems(turn("t", [user("u1", "a"), agent("l", "l", null)], "inProgress")).map((item) => item.id)).toEqual(["u1"]);
+    const running = [user("u1", "a"), agent("f", "f", "final_answer"), agent("c", "c", "commentary")];
+    expect(summaryItems(turn("t", running, "inProgress")).map((item) => item.id)).toEqual(["u1", "c"]);
   });
 });

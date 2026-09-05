@@ -91,6 +91,22 @@ describe("provider switch service", () => {
     expect(second.data.map((value) => value.id))
       .toEqual(["overlay-15", "overlay-14", "overlay-13", "overlay-12", "overlay-11"]);
     expect(new Set([...first.data, ...second.data].map((value) => value.id)).size).toBe(10);
+
+    // Resume hands out cursors our pagers understand, not the stock ordinals, so the App's follow-up pages work.
+    stock.request.mockImplementation(async (method: string) => method === "thread/read"
+      ? { thread: { ...target, turns: liveTurns } }
+      : { thread: { ...target, turns: [] }, turnsBackwardsCursor: "stock-ordinal", itemsBackwardsCursor: "stock-ordinal" });
+    const resumed = await service.resumeOverlay({ threadId: target.id, excludeTurns: true }, stock as never);
+    expect(resumed.turnsBackwardsCursor).toBe(JSON.stringify({ turnId: "overlay-29", includeAnchor: true }));
+    const latest = await service.turnsOverlay({
+      threadId: target.id, cursor: resumed.turnsBackwardsCursor, limit: 5, sortDirection: "desc",
+    }, stock as never);
+    expect(latest.data.map((value) => value.id)).toEqual(["overlay-29", "overlay-28", "overlay-27", "overlay-26", "overlay-25"]);
+    const items = await service.itemsOverlay({
+      threadId: target.id, turnId: "overlay-3", cursor: resumed.itemsBackwardsCursor, sortDirection: "desc", limit: 100,
+    }, stock as never);
+    expect(items.data.map((entry) => entry.turnId)).toEqual(items.data.map(() => "overlay-3"));
+    expect(items.data.length).toBeGreaterThan(0);
     service.close();
   });
 
@@ -394,6 +410,10 @@ describe("provider switch service", () => {
     }, source.id);
     expect(forked.thread.turns.map((value) => value.id)).toEqual([sourceTurn.id]);
     expect(forked.thread.sessionId).toBe(forked.thread.id);
+    await expect(service.forkLogical({ threadId: source.id, lastTurnId: "missing" }, stock as never))
+      .rejects.toThrow("turn not found: missing");
+    await expect(service.forkLogical({ threadId: source.id, beforeTurnId: sourceTurn.id }, stock as never))
+      .rejects.toThrow("Cannot fork before the task has a completed provider turn.");
     expect(forked.thread.sessionId).not.toBe(source.sessionId);
     expect(service.logical(forked.thread.id)?.epoch).toMatchObject({
       provider: "claude",
