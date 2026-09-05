@@ -1001,6 +1001,12 @@ describe("paginated history replay", () => {
         && (message.params as { item: Item }).item.type === "userMessage",
       `turn ${index} user item`);
       expect(userStarted.params).toMatchObject({ item: { content: [{ type: "text", text: `тест ${index}\n` }] } });
+      // Stock never streams a phase-less agent message; the iOS app leaves such messages blank.
+      const agentStarted = await desktop.waitFor((message) =>
+        message.method === "item/started" && (message.params as { turnId: string; item: Item }).turnId === turnId
+        && (message.params as { item: Item }).item.type === "agentMessage",
+      `turn ${index} agent item`);
+      expect(agentStarted.params).toMatchObject({ item: { phase: "final_answer" } });
       await desktop.waitFor((message) =>
         message.method === "turn/completed" && (message.params as { turn: { id: string } }).turn.id === turnId,
       `turn ${index} completion`);

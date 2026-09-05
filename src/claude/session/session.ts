@@ -8310,7 +8310,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
           }
         }
         if (item.type === "agentMessage") {
-          item.phase = completeAsCommentary ? "commentary" : null;
+          item.phase = completeAsCommentary ? "commentary" : "final_answer";
           if (completeAsCommentary) {
             state.pendingAgentItemIds.delete(item.id);
             this.completeStreamItem(turn, state, item.id, source);
@@ -8350,7 +8350,8 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     state.blockItems.delete(index);
     if (block === "text") {
       const item: ThreadItem = {
-        type: "agentMessage", id: uuidv7(), text: "", phase: null, memoryCitation: null, questions: null, delivery: null,
+        // Stock never announces a phase-less message; stream as the answer and relabel to commentary if tools follow.
+        type: "agentMessage", id: uuidv7(), text: "", phase: "final_answer", memoryCitation: null, questions: null, delivery: null,
       };
       state.blockItems.set(index, item.id);
       turn.items.push(item);
