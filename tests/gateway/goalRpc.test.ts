@@ -990,6 +990,17 @@ describe("paginated history replay", () => {
       });
       const turnId = (turn.result as { turn: { id: string } }).turn.id;
       turnIds.push(turnId);
+      // Like stock, the response and turn/started carry no items; the user message arrives via item/started.
+      expect(turn.result).toMatchObject({ turn: { items: [], itemsView: "notLoaded", status: "inProgress" } });
+      const announced = await desktop.waitFor((message) =>
+        message.method === "turn/started" && (message.params as { turn: { id: string } }).turn.id === turnId,
+      `turn ${index} announcement`);
+      expect(announced.params).toMatchObject({ turn: { items: [], itemsView: "notLoaded" } });
+      const userStarted = await desktop.waitFor((message) =>
+        message.method === "item/started" && (message.params as { turnId: string; item: Item }).turnId === turnId
+        && (message.params as { item: Item }).item.type === "userMessage",
+      `turn ${index} user item`);
+      expect(userStarted.params).toMatchObject({ item: { content: [{ type: "text", text: `тест ${index}\n` }] } });
       await desktop.waitFor((message) =>
         message.method === "turn/completed" && (message.params as { turn: { id: string } }).turn.id === turnId,
       `turn ${index} completion`);

@@ -76,7 +76,7 @@ import { claudeEnvironment } from "./environment.js";
 import type { Model } from "../codex/generated/v2/Model.js";
 import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
 import { invalidParams, invalidRequest } from "../protocol/errors.js";
-import { historyCursors, paginateItems, paginateTurns, turnCursor } from "../protocol/turnPagination.js";
+import { historyCursors, paginateItems, paginateTurns, startedTurn, turnCursor } from "../protocol/turnPagination.js";
 import { searchTurnOccurrences, threadSearchSnippet } from "../protocol/search.js";
 import type { ThreadSearchParams } from "../codex/generated/v2/ThreadSearchParams.js";
 import type { ThreadSearchResult } from "../codex/generated/v2/ThreadSearchResult.js";
@@ -840,6 +840,8 @@ export class ClaudeService {
     review?: { label: string; display: string },
   ): Promise<{
     response: TurnStartResponse;
+    /** The full turn, including the user item the wire response omits like stock. */
+    turn: Turn;
     announce: () => Promise<void>;
     start: () => void;
     startAndWait: () => Promise<void>;
@@ -876,7 +878,8 @@ export class ClaudeService {
       let announcement: Promise<void> | undefined;
       const startAndWait = () => announcement ? announcement.then(startRuntime) : startRuntime();
       return {
-        response: { turn: prepared.turn },
+        response: { turn: startedTurn(prepared.turn) },
+        turn: prepared.turn,
         announce: () => announcement ??= this.sessions.submit(
           params.threadId,
           { type: "announceTurn", turnId: prepared.turn.id },
@@ -1192,7 +1195,7 @@ export class ClaudeService {
         threadId: reviewThreadId,
         input: [{ type: "text", text: prompt, text_elements: [] }],
       }, { label: review, display: review });
-      const userItem = prepared.response.turn.items.find((item) => item.type === "userMessage");
+      const userItem = prepared.turn.items.find((item) => item.type === "userMessage");
       return {
         response: {
           turn: {

@@ -13,6 +13,7 @@ import type {
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { ThreadItem } from "../../codex/generated/v2/ThreadItem.js";
 import type { Turn } from "../../codex/generated/v2/Turn.js";
+import { startedTurn } from "../../protocol/turnPagination.js";
 import type { UserInput } from "../../codex/generated/v2/UserInput.js";
 import type { QueuedSubmission } from "../../codex/generated/v2/QueuedSubmission.js";
 import type {
@@ -6282,7 +6283,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
   private announceTurn(turn: Turn, completeItems: boolean): void {
     if (this.announcedTurns.has(turn.id)) return;
     this.announcedTurns.add(turn.id);
-    this.publish(turn.id, "turn/started", { threadId: this.threadId, turn }, `turn/started:${turn.id}`);
+    this.publish(turn.id, "turn/started", { threadId: this.threadId, turn: startedTurn(turn) }, `turn/started:${turn.id}`);
     for (const item of turn.items) {
       this.publish(turn.id, "item/started", {
         item, threadId: this.threadId, turnId: turn.id, startedAtMs: Date.now(),
@@ -7521,13 +7522,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       lastCompletedTurnId: turn.id,
       thread: { ...record.thread, updatedAt: now, recencyAt: now },
     };
-    const started = {
-      ...turn,
-      items: [],
-      status: "inProgress" as const,
-      completedAt: null,
-      durationMs: null,
-    };
+    const started = startedTurn({ ...turn, status: "inProgress", completedAt: null, durationMs: null });
     this.commitState(updated, [
       { turnId: turn.id, method: "turn/started", params: { threadId: this.threadId, turn: started } },
       {
@@ -8192,7 +8187,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     const state = newMainStreamState(childThreadId, turn.id, record);
     state.completedItems.add(item.id); this.scopes.set(childThreadId, state);
     this.publishAt(childThreadId, turn.id, "thread/started", { thread }, source);
-    this.publishAt(childThreadId, turn.id, "turn/started", { threadId: childThreadId, turn }, source);
+    this.publishAt(childThreadId, turn.id, "turn/started", { threadId: childThreadId, turn: startedTurn(turn) }, source);
     this.publishAt(childThreadId, turn.id, "item/started",
       { item, threadId: childThreadId, turnId: turn.id, startedAtMs: Date.now() }, source);
     this.publishAt(childThreadId, turn.id, "item/completed",
@@ -8238,7 +8233,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     const state = newMainStreamState(childThreadId, turn.id, updated);
     state.completedItems.add(item.id);
     this.scopes.set(childThreadId, state);
-    this.publishAt(childThreadId, turn.id, "turn/started", { threadId: childThreadId, turn }, source);
+    this.publishAt(childThreadId, turn.id, "turn/started", { threadId: childThreadId, turn: startedTurn(turn) }, source);
     this.publishAt(childThreadId, turn.id, "item/started", {
       item, threadId: childThreadId, turnId: turn.id, startedAtMs: Date.now(),
     }, source);

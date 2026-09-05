@@ -130,6 +130,11 @@ export function paginateItems(
     (entry) => !params.turnId || entry.turnId === params.turnId);
 }
 
+/** The turn shape stock returns from `turn/start` and announces in `turn/started`: no items, `notLoaded`; items follow via `item/started`. */
+export function startedTurn(turn: Turn): Turn {
+  return { ...turn, items: [], itemsView: "notLoaded" };
+}
+
 /** Top-level resume/read/revert cursors: point inclusively at the newest turn and item, like stock paginated threads. */
 export function historyCursors(turns: readonly Turn[]): {
   turnsBackwardsCursor: string | null;
