@@ -211,7 +211,7 @@ jobs:
         run: |
           version=$(node -p 'require("./package.json").version')
           for attempt in 1 2 3 4 5; do
-            npm install --package-lock-only --ignore-scripts
+            npm install --package-lock-only --ignore-scripts --prefer-online
             grep -q "ccodex-relay-linux-x64-gnu-${version}.tgz" package-lock.json && break
             sleep 30
           done
