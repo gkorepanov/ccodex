@@ -123,7 +123,7 @@ afterEach(() => {
 });
 
 describe("ClaudeService", () => {
-  it("projects title, cwd, and timestamps from native Claude session metadata", async () => {
+  it.each([undefined, "🌊 Native title"])("projects native metadata consistently through list, read, and resume (%s)", async (customTitle) => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-native-metadata-"));
     directories.push(directory);
     const store = new SqliteHybridStore(join(directory, "state.sqlite"));
@@ -144,7 +144,7 @@ describe("ClaudeService", () => {
       async () => [{
         sessionId: store.getThreadRecord(threadId, false)!.claudeSessionId,
         summary: "Native summary",
-        customTitle: "🌊 Native title",
+        ...(customTitle ? { customTitle } : {}),
         firstPrompt: "native first prompt",
         cwd: directory,
         createdAt: 1_700_000_000_000,
@@ -156,7 +156,7 @@ describe("ClaudeService", () => {
     await service.refreshNativeMetadata();
 
     expect(service.readThread(threadId, false).thread).toMatchObject({
-      name: "🌊 Native title",
+      name: customTitle ?? "Native summary",
       preview: "native first prompt",
       cwd: directory,
       createdAt: 1_700_000_000,
@@ -164,8 +164,10 @@ describe("ClaudeService", () => {
       recencyAt: 1_700_000_123,
     });
     expect(service.listThreads({})).toEqual([
-      expect.objectContaining({ id: threadId, name: "🌊 Native title" }),
+      expect.objectContaining({ id: threadId, name: customTitle ?? "Native summary" }),
     ]);
+    const resumed = await service.resumeThread({ threadId, excludeTurns: true });
+    expect(resumed.thread).toEqual(service.readThread(threadId, false).thread);
     await service.close();
   });
 
@@ -213,6 +215,8 @@ describe("ClaudeService", () => {
     expect(service.listThreads({})).toContainEqual(
       expect.objectContaining({ id: threadId, name: "❤️ XRP MM (Fable v3)" }),
     );
+    expect((await service.resumeThread({ threadId, excludeTurns: true })).thread.name)
+      .toBe("❤️ XRP MM (Fable v3)");
     await service.close();
   });
 

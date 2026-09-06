@@ -20,9 +20,32 @@ done
 
 if ! command -v claude >/dev/null 2>&1; then
   echo "codex MCP server: skipped (claude CLI not found)" >&2
-elif claude mcp get codex >/dev/null 2>&1; then
-  echo "codex MCP server: already registered"
 else
-  claude mcp add --scope user codex -- codex mcp-server
-  echo "codex MCP server: registered (user scope)"
+  # Inherited tools take precedence over the agent's inline server declaration.
+  node --input-type=module <<'NODE'
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const configDir = process.env.CLAUDE_CONFIG_DIR;
+const legacyPath = join(configDir || join(homedir(), ".claude"), ".config.json");
+const configPath = existsSync(legacyPath) ? legacyPath : join(configDir || homedir(), ".claude.json");
+const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf8")) : {};
+const server = config.mcpServers?.codex;
+const timeout = Math.max(server?.timeout ?? 0, 86_400_000);
+if (server) {
+  if (server.timeout !== timeout) {
+    server.timeout = timeout;
+    const temporaryPath = `${configPath}.${process.pid}.tmp`;
+    writeFileSync(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { mode: statSync(configPath).mode & 0o777 });
+    renameSync(temporaryPath, configPath);
+  }
+} else {
+  execFileSync("claude", ["mcp", "add-json", "--scope", "user", "codex", JSON.stringify({
+    type: "stdio", command: "codex", args: ["mcp-server"], timeout,
+  })], { stdio: "inherit" });
+}
+console.log("codex MCP server: configured (user scope, timeout at least 24 hours)");
+NODE
 fi

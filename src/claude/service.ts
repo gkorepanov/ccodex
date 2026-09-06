@@ -753,6 +753,7 @@ export class ClaudeService {
     if (!record) throw invalidParams(`Unknown Claude thread '${threadId}'.`);
     if (record.thread.parentThreadId) {
       record = this.withCatalogModel(record);
+      record = { ...record, thread: this.withNativeMetadata(record) };
       return {
         ...threadResponse(record, !resume.excludeTurns),
         ...historyCursors(record.thread.turns),
@@ -782,6 +783,7 @@ export class ClaudeService {
       { type: "readThread", includeTurns: true },
     );
     record = this.withCatalogModel(record);
+    record = { ...record, thread: this.withNativeMetadata(record) };
     if (this.store.listQueuedSubmissions(threadId).length) this.scheduleQueueDrain(threadId);
     return {
       ...threadResponse(record, !resume.excludeTurns),

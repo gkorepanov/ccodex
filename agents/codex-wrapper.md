@@ -7,6 +7,7 @@ mcpServers:
       type: stdio
       command: codex
       args: ["mcp-server"]
+      timeout: 86400000
 model: sonnet
 effort: low
 permissionMode: bypassPermissions
