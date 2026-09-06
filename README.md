@@ -180,6 +180,8 @@ claude_skills = true # expose Claude skills in the Codex App `$` autocomplete
 ```
 
 Remove or comment out `rename_prompt` for byte-compatible stock Codex title generation.
+With it enabled, CCodex saves generated names for unnamed Claude threads even if
+the App omits its rename request; manual names take priority.
 Setup never restores a prompt removed from an existing config. These settings never
 disable provider routing, lifecycle/protocol fidelity, permission mapping, or visible errors.
 

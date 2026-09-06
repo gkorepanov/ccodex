@@ -341,6 +341,7 @@ interface InternalStockBuild extends StockTargetBuild {
 
 interface SystemEphemeralThread {
   readonly durableProvider: ProviderKind;
+  readonly durableThreadId?: string | undefined;
 }
 
 function messageThreadId(message: { params?: unknown }): string | undefined {
@@ -375,7 +376,7 @@ export class CrossProviderForks {
   private readonly titleTurns = new Map<string, TitleTurn>();
   private readonly stockServerRequests = new Map<string, string | number>();
   private readonly stockServerRequestAliases = new Map<string, string>();
-  private readonly recentDurableProviders = new Map<string, ProviderKind>();
+  private readonly recentDurableThreads = new Map<string, SystemEphemeralThread>();
   private readonly adminTails = new Map<string, Promise<void>>();
   private readonly lineage: LineageStore;
   private readonly legacyMirror: boolean;
@@ -1609,7 +1610,7 @@ export class CrossProviderForks {
       const items = stockTitleContext(source.turns);
       if (items.length > 0) await stock.request("thread/inject_items", { threadId: created.thread.id, items });
       const threads = this.systemEphemeralThreads.get(connectionId) ?? new Map<string, SystemEphemeralThread>();
-      threads.set(created.thread.id, { durableProvider: "claude" });
+      threads.set(created.thread.id, { durableProvider: "claude", durableThreadId: params.threadId });
       this.systemEphemeralThreads.set(connectionId, threads);
       return {
         ...created,
@@ -1663,21 +1664,21 @@ export class CrossProviderForks {
   ): void {
     const directStart = !("threadId" in params);
     if (params.ephemeral !== true) return;
-    const durableProvider: ProviderKind = "threadId" in params
-      ? this.claude.ownsThread(params.threadId) ? "claude" : "stock"
-      : this.recentDurableProviders.get(connectionId) ?? "stock";
+    const owner: SystemEphemeralThread = "threadId" in params
+      ? { durableProvider: this.claude.ownsThread(params.threadId) ? "claude" : "stock", durableThreadId: params.threadId }
+      : this.recentDurableThreads.get(connectionId) ?? { durableProvider: "stock" };
     const candidates = directStart && params.threadSource !== "system" && params.threadSource !== "user"
       ? this.directTitleCandidates
       : params.threadSource === "system" ? this.systemEphemeralThreads : undefined;
     if (!candidates) return;
     const threads = candidates.get(connectionId) ?? new Map<string, SystemEphemeralThread>();
     if (threads.size >= 64 && !threads.has(threadId)) threads.delete(threads.keys().next().value!);
-    threads.set(threadId, { durableProvider });
+    threads.set(threadId, owner);
     candidates.set(connectionId, threads);
   }
 
-  public observeDurableThread(connectionId: string, provider: ProviderKind): void {
-    this.recentDurableProviders.set(connectionId, provider);
+  public observeDurableThread(connectionId: string, provider: ProviderKind, threadId?: string): void {
+    this.recentDurableThreads.set(connectionId, { durableProvider: provider, durableThreadId: threadId });
   }
 
   public observeDurableTurn(connectionId: string, params: TurnStartParams): void {
@@ -1687,7 +1688,9 @@ export class CrossProviderForks {
     if (!text || titlePrompt(params)) return;
     const durableProvider: ProviderKind = this.claude.ownsThread(params.threadId) ? "claude" : "stock";
     const turn = [...this.titleTurns.values()].reverse()
-      .find((candidate) => candidate.connectionId === connectionId && candidate.userPrompt.trim() === text);
+      .find((candidate) => candidate.connectionId === connectionId
+        && (!candidate.durableThreadId || candidate.durableThreadId === params.threadId)
+        && candidate.userPrompt.trim() === text);
     if (turn) turn.durableProvider = durableProvider;
   }
 
@@ -1709,6 +1712,7 @@ export class CrossProviderForks {
     if (!renamePrompt) return params;
     const turn = {
       durableProvider: owner.durableProvider,
+      durableThreadId: owner.durableThreadId,
       connectionId,
       userPrompt: prompt.userPrompt,
       outputSchema: prompt.outputSchema,
@@ -1718,6 +1722,18 @@ export class CrossProviderForks {
       ? { ...item, text: rewrittenTitlePrompt(prompt.text, renamePrompt) }
       : item);
     return { ...params, input };
+  }
+
+  public async persistGeneratedTitle(message: { method: string; params?: unknown }): Promise<void> {
+    if (message.method !== "turn/completed") return;
+    const params = message.params as { threadId: string; turn: { status: string } };
+    const title = this.titleTurns.get(params.threadId);
+    if (params.turn.status !== "completed" || title?.durableProvider !== "claude"
+      || !title.durableThreadId || !title.output) return;
+    await this.claude.setGeneratedThreadName({
+      threadId: title.durableThreadId,
+      name: (JSON.parse(title.output) as { title: string }).title,
+    }, title.userPrompt);
   }
 
   public rewriteTitleMessages(message: { method: string; params?: unknown }): Array<{ method: string; params?: unknown }> | undefined {
@@ -1832,7 +1848,7 @@ export class CrossProviderForks {
     const threads = this.systemEphemeralThreads.get(connectionId) ?? new Map<string, SystemEphemeralThread>();
     this.systemEphemeralThreads.delete(connectionId);
     this.directTitleCandidates.delete(connectionId);
-    this.recentDurableProviders.delete(connectionId);
+    this.recentDurableThreads.delete(connectionId);
     for (const threadId of threads.keys()) this.titleTurns.delete(threadId);
     await Promise.allSettled([...threads.keys()].map((threadId) => stock.request("thread/delete", { threadId })));
   }

@@ -179,6 +179,7 @@ function handoffs(activePublic: Thread, archivedPublic: Thread, readable = activ
     }),
     ownsSystemEphemeral: vi.fn(() => false),
     captureInternalStockMessage: vi.fn(() => false),
+    persistGeneratedTitle: vi.fn(async () => undefined),
     rewriteTitleMessages: vi.fn(() => undefined),
     suppressStockTargetMessage: vi.fn(() => false),
     ownsStockBackendMessage: vi.fn(() => false),

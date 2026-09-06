@@ -1256,6 +1256,15 @@ export class ClaudeService {
     return read;
   }
 
+  public async setGeneratedThreadName(params: ThreadSetNameParams, userPrompt: string): Promise<void> {
+    const record = this.requireRecord(params.threadId, false);
+    if (record.thread.parentThreadId || this.nativeMetadata.get(record.claudeSessionId)?.customTitle) return;
+    await this.sessions.submit(params.threadId, {
+      type: "threadAdmin",
+      command: { kind: "generatedName", name: params.name, userPrompt },
+    });
+  }
+
   public async setThreadName(params: ThreadSetNameParams): Promise<Record<string, never>> {
     const record = this.requireRecord(params.threadId, false);
     if (record.thread.parentThreadId) {

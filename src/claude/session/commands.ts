@@ -280,6 +280,7 @@ export type ThreadAdminCommand =
   | { readonly kind: "prepare"; readonly operation: ThreadAdminOperation; readonly name?: string }
   | { readonly kind: "finish" | "abort"; readonly operationId: string }
   | { readonly kind: "renameProjection"; readonly threadId: string; readonly name: string }
+  | { readonly kind: "generatedName"; readonly name: string; readonly userPrompt: string }
   | { readonly kind: "beginRemoval"; readonly removalKind: ThreadRemovalKind }
   | { readonly kind: "recoverRemoval" }
   | { readonly kind: "providerSucceeded"; readonly operationId: string }

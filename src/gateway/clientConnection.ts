@@ -849,7 +849,7 @@ export function attachClientConnection(
           const params = (message.params ?? {}) as ThreadStartParams;
           if (params.model && claude.ownsModel(params.model)) {
             const result = await claude.startThread(params);
-            handoffs.observeDurableThread(connectionId, "claude");
+            if (!result.thread.ephemeral) handoffs.observeDurableThread(connectionId, "claude", result.thread.id);
             sendResult(message.id, result);
             selectForeground("claude", result.thread.id);
             subscribeClaude(result.thread.id);
@@ -1702,7 +1702,7 @@ export function attachClientConnection(
             : undefined;
           const resultThreadId = typeof result?.thread?.id === "string" ? result.thread.id : forwarded.threadId;
           if (forwarded.foreground && resultThreadId) {
-            handoffs.observeDurableThread(connectionId, "stock");
+            handoffs.observeDurableThread(connectionId, "stock", resultThreadId);
             foregroundAfterForward = () => selectForeground(forwarded.foreground!, resultThreadId);
           } else if (forwarded.clearForeground && forwarded.threadId) {
             foregroundAfterForward = () => clearForeground(forwarded.threadId!);
@@ -1720,6 +1720,11 @@ export function attachClientConnection(
         if (handoffs.captureInternalStockMessage(connectionId, message)) {
           if (isRequest(message)) stock.send(JSON.stringify({ id: message.id, result: { decision: "decline" } }));
           return;
+        }
+        if (message.method === "turn/completed") {
+          void handoffs.persistGeneratedTitle(message).catch((error: unknown) => {
+            logger.warn("thread.generated-title.failed", { connectionId, error: String(error) });
+          });
         }
         const rewritten = handoffs.rewriteTitleMessages(message);
         if (rewritten) {

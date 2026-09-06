@@ -462,6 +462,7 @@ async function makeHarness(
     sideSnapshot: () => undefined,
     resumeOverlay: async (params: { threadId: string }) => ({ thread: { id: params.threadId } }),
     clearThread() {}, prepareTitleTurn: (_id: string, params: unknown) => params,
+    persistGeneratedTitle: async () => undefined,
     rewriteTitleMessages: () => undefined, suppressStockTargetMessage: () => false, ownsInternalStockThread: () => false,
     captureInternalStockMessage: () => false, recordInternalStockMessage() {},
     detachConnection: async () => undefined,
@@ -1928,6 +1929,22 @@ describe("provider-aware rate-limit gateway routing", () => {
       path: null,
       threadSource: "user",
     } } });
+  });
+
+  it("persists a completed title before clearing its worker state without blocking delivery", async () => {
+    const calls: string[] = [];
+    let finish!: () => void;
+    const saved = new Promise<void>((resolve) => { finish = resolve; });
+    const harness = await makeHarness(fakeClaude(), undefined, undefined, DEFAULT_FEATURES, {
+      persistGeneratedTitle: async () => { calls.push("persist"); await saved; },
+      rewriteTitleMessages: () => { calls.push("rewrite"); return undefined; },
+    });
+    const completed = { method: "turn/completed", params: { threadId: "title-worker", turn: { status: "completed" } } };
+    for (const stock of harness.stockClients) stock.send(JSON.stringify(completed));
+    await settle();
+    expect(calls).toEqual(["persist", "rewrite"]);
+    expect(messages(harness, "turn/completed")).toEqual([completed]);
+    finish();
   });
 
   it("returns the provider-owned title without fabricating a rename event", async () => {

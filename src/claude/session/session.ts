@@ -6926,6 +6926,22 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
   }
 
   private dispatchThreadAdmin(command: ThreadAdminCommand): unknown {
+    if (command.kind === "generatedName") {
+      const record = this.requireRecord(false);
+      if (record.thread.name || record.thread.ephemeral || this.adminOperation) return;
+      const user = this.requireRecord(true).thread.turns[0]?.items.find((item) => item.type === "userMessage");
+      const text = user?.content.flatMap((input) => input.type === "text" ? [input.text] : []).join("\n").trim();
+      // iOS truncates the title worker's user prompt to 2,000 characters.
+      const prompt = command.userPrompt.trim();
+      if (!prompt || (text !== prompt && !(command.userPrompt.length >= 2_000 && text?.startsWith(prompt)))) return;
+      const updated = {
+        ...record,
+        thread: { ...record.thread, name: command.name, updatedAt: Math.floor(Date.now() / 1_000) },
+      };
+      const params = { threadId: this.threadId, threadName: command.name };
+      this.commitState(updated, [{ turnId: null, method: "thread/name/updated", params }]);
+      return;
+    }
     if (command.kind === "renameProjection") {
       const record = this.repository.read(command.threadId, false);
       if (!record?.thread.parentThreadId

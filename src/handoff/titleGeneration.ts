@@ -3,6 +3,7 @@ import type { ProviderKind } from "./store.js";
 
 export interface TitleTurn {
   durableProvider: ProviderKind;
+  readonly durableThreadId?: string | undefined;
   readonly connectionId: string;
   readonly userPrompt: string;
   readonly outputSchema: TitleOutputSchema;
