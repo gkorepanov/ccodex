@@ -2,7 +2,13 @@
 FROM rust:1.95-bullseye AS build
 
 ARG TARGET
-RUN apt-get update \
+# Keep the glibc 2.31 baseline reproducible when Bullseye packages leave mirrors.
+RUN printf '%s\n' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260830T000000Z bullseye main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260830T000000Z bullseye-security main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260830T000000Z bullseye-updates main' \
+      > /etc/apt/sources.list \
+    && apt-get update \
     && apt-get install -y --no-install-recommends clang cmake perl pkg-config \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add "$TARGET"
