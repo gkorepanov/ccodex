@@ -57,7 +57,7 @@ codex-utils-absolute-path = { git = "https://github.com/openai/codex.git", rev =
 codex-utils-rustls-provider = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
 anyhow = "1"
 axum = { version = "0.8", default-features = false }
-base64 = "0.22.1"
+base64 = "0.23.1"
 clap = "4"
 constant_time_eq = "0.3.1"
 futures = { version = "0.3", default-features = false }
