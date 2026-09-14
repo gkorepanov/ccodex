@@ -2278,10 +2278,13 @@ export class CrossProviderForks {
     if (!unresolved) throw new Error(`Unknown logical thread '${job.publicThreadId}'.`);
     const resolved = await this.hydrate(unresolved, stock);
     if (resolved.epoch.provider === "claude") {
+      // The hidden compaction fork only needs its id; paginated Claude
+      // threads reject ephemeral forks that would echo the full history.
       const hidden = await this.claude.forkThread({
         threadId: resolved.epoch.backendThreadId,
         model: resolved.epoch.model,
         ephemeral: true,
+        excludeTurns: true,
         threadSource: "subAgent",
       });
       try {
