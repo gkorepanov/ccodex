@@ -231,6 +231,17 @@ function childProjectionIds(turns: readonly Turn[]): Set<string> {
 /** Stock app-server caps the per-thread submission queue at 100 entries. */
 const MAX_QUEUED_SUBMISSIONS = 100;
 
+/**
+ * System notices the pinned Claude Code binary already emits ahead of the
+ * SDK typings. Claude Code itself never renders them (they only feed its own
+ * VCS awareness), so they are journaled without a visible diagnostic instead
+ * of tripping the unsupported-event fallback on every commit, push, or PR.
+ */
+const AHEAD_OF_SDK_SILENT_SYSTEM_SUBTYPES: ReadonlySet<string> = new Set([
+  "vcs_state_changed",
+  "code_change_published",
+]);
+
 function commandLane(command: SessionMailboxCommand): ClaudeMailboxLane {
   if (command.type === "runtimeLineage"
     || command.type === "completeSynthetic" || command.type === "resolveInteraction"
@@ -2474,6 +2485,9 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
     }
     if (message.type === "system" && message.subtype === "files_persisted") {
       return "stateOnly";
+    }
+    if (message.type === "system" && AHEAD_OF_SDK_SILENT_SYSTEM_SUBTYPES.has(message.subtype)) {
+      return "retainedOnly";
     }
     switch (message.type) {
       case "prompt_suggestion":
