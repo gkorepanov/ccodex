@@ -7,6 +7,7 @@ import {
   type McpSdkServerConfigWithInstance,
   type Options,
 } from "@anthropic-ai/claude-agent-sdk";
+import type { NativeMcpBridge } from "../nativeMcp.js";
 import type { Logger } from "../../observability/logger.js";
 import type { ClaudeQueryFactory } from "../queryFactory.js";
 import { invalidParams } from "../../protocol/errors.js";
@@ -153,6 +154,7 @@ export function createProviderRuntime(
   submitFact: (fact: ProviderRuntimeFact) => Promise<void>,
   callbacks: ProviderRuntimeCallbacks,
   goalEvents?: GoalRuntimeEvents,
+  nativeMcp?: NativeMcpBridge,
 ): ProviderRuntime {
   const transportSettings = runtimeTransportSettings(startup);
   const append = appendInstructions(startup);
@@ -179,7 +181,13 @@ export function createProviderRuntime(
           ? unsupportedProviderReviewTools
           : [...unsupportedProviderReviewTools, "AskUserQuestion"],
         settingSources: ["user", "project", "local"],
-        ...(goalEvents ? { mcpServers: { ccodex_goal: goalEvents.mcpServer } } : {}),
+        ...(nativeMcp || goalEvents ? {
+          ...(nativeMcp ? { strictMcpConfig: true } : {}),
+          mcpServers: {
+            ...(goalEvents ? { ccodex_goal: goalEvents.mcpServer } : {}),
+            ...(nativeMcp ? { codex: nativeMcp.mcpServer } : {}),
+          },
+        } : {}),
         systemPrompt: { type: "preset", preset: "claude_code", ...(append ? { append } : {}) },
         permissionMode: selectedPermissionMode,
         ...(startup.ephemeral || selectedPermissionMode === "bypassPermissions"
@@ -224,5 +232,6 @@ export function createProviderRuntime(
     },
     queryFactory,
     submitFact,
+    () => nativeMcp?.close(),
   );
 }

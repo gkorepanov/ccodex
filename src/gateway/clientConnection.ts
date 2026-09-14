@@ -1495,7 +1495,8 @@ export function attachClientConnection(
             return;
           }
           if (message.method === "app/list" || message.method === "mcpServerStatus/list") {
-            // Codex apps and MCP servers never apply to a Claude runtime.
+            // Claude receives native MCP tools through its SDK server. The desktop
+            // management catalog is not projected onto Claude thread IDs yet.
             sendResult(message.id, { data: [], nextCursor: null });
             return;
           }

@@ -49,7 +49,7 @@ export class StockRpc {
     return true;
   }
 
-  public async request(method: string, params: unknown): Promise<unknown> {
+  public async request(method: string, params: unknown, timeoutMs = 15_000): Promise<unknown> {
     await this.opened;
     if (this.connectionError) throw this.connectionError;
     if (this.socket.readyState !== WebSocketState.OPEN) {
@@ -60,7 +60,7 @@ export class StockRpc {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Stock request '${method}' timed out.`));
-      }, 15_000);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timeout });
       this.socket.send(JSON.stringify({ method, id, params }), (error) => {
         if (!error) return;
