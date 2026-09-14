@@ -18,7 +18,7 @@
   },
   "counts": {
     "architecture-invariant": 143,
-    "external-contract": 381,
+    "external-contract": 383,
     "provider-mapping": 72,
     "old-implementation-detail": 32
   },
@@ -1063,7 +1063,7 @@
     },
     {
       "path": "tests/claude/service.test.ts",
-      "title": "projects title, cwd, and timestamps from native Claude session metadata",
+      "title": "projects native metadata consistently through list, read, and resume (%s)",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
@@ -1532,6 +1532,12 @@
     {
       "path": "tests/claude/service.test.ts",
       "title": "surfaces and journals an unknown future provider event",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/claude/service.test.ts",
+      "title": "silently journals VCS awareness notices the Claude binary emits ahead of the SDK typings",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },
@@ -3470,6 +3476,12 @@
     {
       "path": "tests/gateway/providerRateLimits.test.ts",
       "title": "routes /side on a logical stock task through the hidden native rollout",
+      "classification": "external-contract",
+      "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
+    },
+    {
+      "path": "tests/gateway/providerRateLimits.test.ts",
+      "title": "persists a completed title before clearing its worker state without blocking delivery",
       "classification": "external-contract",
       "rationale": "Freezes App-visible RPC, durable snapshot, event ordering/cardinality, or restart behavior."
     },

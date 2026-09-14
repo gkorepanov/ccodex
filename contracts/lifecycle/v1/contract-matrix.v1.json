@@ -86,7 +86,9 @@
       "memory_recall",
       "elicitation_complete",
       "thinking_tokens",
-      "commands_changed"
+      "commands_changed",
+      "vcs_state_changed",
+      "code_change_published"
     ],
     "unknownDisposition": "journal first, emit one explicit unsupportedVisible diagnostic, never silently drop"
   },
