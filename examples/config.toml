@@ -36,6 +36,7 @@ side_chat_promotion = true # allow Fork to promote a temporary `/side` chat into
 optimistic_side_startup = true # open `/side` immediately while its provider context is prepared in the background
 interactive_questions = true # render Claude's structured questions as native Codex App controls
 claude_skills = true # expose Claude skills in Codex App's `$` autocomplete
+native_mcp = true # use native Codex connectors; false retains independent Claude MCP configuration
 
 # No aliases are configured by default. Every `gpt-*` model id stays stock.
 # Current Codex Mobile selects Claude through namespaced `claude:*` catalog ids.

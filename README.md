@@ -210,3 +210,30 @@ trusted publishing with provenance.
 <div align="center">
 <sub>Claude Code'x is an independent open-source project — not affiliated with, sponsored, or endorsed by OpenAI or Anthropic.</sub>
 </div>
+
+### Native Codex connectors in Claude tasks
+
+Claude tasks receive the current native Codex MCP tool inventory through the
+`codex` SDK MCP server. Configure and authenticate connectors in Codex once;
+CCodex uses its existing stock app-server for discovery and tool execution.
+It does not copy OAuth credentials or maintain a separate connector list, and
+it does not start a Codex inference turn to execute a connector.
+
+Each Claude runtime owns a separate ephemeral native thread, preserving REPL
+isolation, working directories, workspace roots and permission settings.
+Calls include the actual Claude task/session/turn metadata, including for
+ephemeral tasks. Native approval requests remain explicit native UI interactions;
+unsupported requests and unsupported sandbox mappings fail closed. Changes to
+permission settings replace the native helper before its next operation.
+
+Native MCP is enabled by default. It uses strict SDK MCP configuration, keeping
+CCodex's goal tools while excluding independent user/project Claude MCP servers.
+Set `features.native_mcp = false` in `~/.ccodex/config.toml` and reconnect to retain
+the previous independent Claude MCP behavior. Neither mode rewrites Claude's or
+Codex's configuration files.
+
+This covers model-visible MCP **tools**, not Codex-only built-ins such as image
+generation or collaboration, MCP resources/prompts, or the desktop connector
+management catalog. Connectors unavailable or signed out in native Codex stay
+unavailable to Claude. MCP tools refresh on discovery; reconnect after changing
+Codex connector configuration.

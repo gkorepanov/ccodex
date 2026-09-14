@@ -1,3 +1,5 @@
+import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
+import { NativeMcpBridge } from "../../src/claude/nativeMcp.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   createProviderRuntime,
@@ -36,6 +38,26 @@ const startup: RuntimeStartup = {
 };
 
 describe("Claude provider projection boundary", () => {
+  it("uses strict native MCP configuration while retaining goal tools and closes its bridge", async () => {
+    const query = new FakeClaudeQuery();
+    const bridge = new NativeMcpBridge(async () => { throw new Error("not called"); }, async () => ({}), () => { throw new Error("not called"); });
+    const close = vi.spyOn(bridge, "close");
+    const goal = createSdkMcpServer({ name: "ccodex_goal", tools: [] });
+    const runtime = createProviderRuntime(startup, new Logger("error"), query.factory, async () => undefined, {
+      canUseTool: async () => null,
+      onElicitation: async () => ({ action: "cancel" }),
+      beforeToolUse: async () => ({ continue: true }),
+      captureFileAfter: async () => ({ continue: true }),
+      afterCompact: async () => ({ continue: true }),
+    }, { mcpServer: goal }, bridge);
+    runtime.start();
+    try {
+      await vi.waitFor(() => expect(query.inputs).toHaveLength(1));
+      expect(query.inputs[0]!.options.strictMcpConfig).toBe(true);
+      expect(query.inputs[0]!.options.mcpServers).toEqual({ codex: bridge.mcpServer, ccodex_goal: goal });
+    } finally { runtime.beginClose(); await runtime.close(); }
+    expect(close).toHaveBeenCalled();
+  });
   it("emits normalized facts without owning Session projection", async () => {
     const query = new FakeClaudeQuery();
     const facts: ClaudeProviderFact[] = [];

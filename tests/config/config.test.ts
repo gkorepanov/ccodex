@@ -77,18 +77,20 @@ describe("opinionated feature configuration", () => {
       sideChatPromotion: true,
       optimisticSideStartup: true,
       interactiveQuestions: true,
-      claudeSkills: true,
+      claudeSkills: true, nativeMcp: true,
     });
     expect(configured().renamePrompt).toBeUndefined();
+    expect(configured("[features]\nnative_mcp = false\n").features?.nativeMcp).toBe(false);
+    expect(() => configured('[features]\nnative_mcp = "yes"\n')).toThrow("features.native_mcp must be a boolean");
     expect(configured("[features]\nstatus_command = false\n").features)
       .toEqual({
         statusCommand: false, sideChatPromotion: true, optimisticSideStartup: true, interactiveQuestions: true,
-        claudeSkills: true,
+        claudeSkills: true, nativeMcp: true,
       });
     expect(configured("[features]\ninteractive_questions = false\n").features)
       .toEqual({
         statusCommand: true, sideChatPromotion: true, optimisticSideStartup: true, interactiveQuestions: false,
-        claudeSkills: true,
+        claudeSkills: true, nativeMcp: true,
       });
     expect(configured("[features]\nclaude_skills = false\n").features?.claudeSkills).toBe(false);
   });
@@ -105,7 +107,7 @@ status_command = true
       renamePrompt: "Use one rare emoji and a vivid title.",
       features: {
         statusCommand: true, sideChatPromotion: true, optimisticSideStartup: true, interactiveQuestions: true,
-        claudeSkills: true,
+        claudeSkills: true, nativeMcp: true,
       },
     });
     expect(configured(`
@@ -115,7 +117,7 @@ status_command = false
 `)).toMatchObject({
       features: {
         statusCommand: false, sideChatPromotion: true, optimisticSideStartup: true, interactiveQuestions: true,
-        claudeSkills: true,
+        claudeSkills: true, nativeMcp: true,
       },
     });
     expect(configured(`
