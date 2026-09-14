@@ -1006,7 +1006,7 @@ export function attachClientConnection(
               }
               if (pending.sourceProvider === "claude") {
                 const hidden = await claude.forkThread({
-                  threadId: params.threadId!, ephemeral: true, threadSource: "subAgent",
+                  threadId: params.threadId!, ephemeral: true, excludeTurns: true, threadSource: "subAgent",
                 } as ThreadForkParams);
                 await claude.compactThread(hidden.thread.id);
                 const target = await stockRpc.request("thread/start", {
