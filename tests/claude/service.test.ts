@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -254,7 +254,11 @@ describe("ClaudeService", () => {
   it("lists a legacy native session alias once under its public thread id", async () => {
     const directory = mkdtempSync(join(tmpdir(), "ccodex-native-alias-"));
     directories.push(directory);
-    const cfg = { ...config(directory), claudeProjectsDir: fixtureProjects };
+    const projects = join(directory, "projects");
+    cpSync(fixtureProjects, projects, { recursive: true });
+    const transcript = join(projects, "-home-user-project", `${foreignSessionId}.jsonl`);
+    writeFileSync(transcript, readFileSync(transcript, "utf8").replaceAll("/home/user/project", directory));
+    const cfg = { ...config(directory), claudeProjectsDir: projects };
     const path = join(directory, "state.sqlite");
     const store = new SqliteHybridStore(path);
     const seed = new ClaudeService(cfg, new SubscriptionHub(), new Logger("error"), store, new FakeClaudeQuery().factory);
@@ -6692,6 +6696,39 @@ You are in a side conversation, not the main thread.`,
     await expect(service.startThread({ model: "claude:claude-fable-5", cwd: missing }))
       .rejects.toThrow(`Claude thread cwd '${missing}' does not exist or is not a directory.`);
     expect(fake.inputs).toHaveLength(0);
+    await service.close();
+  });
+
+  it("validates a resumed thread cwd before passing its options to the SDK", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-resume-cwd-"));
+    directories.push(directory);
+    const projects = join(directory, "projects");
+    cpSync(fixtureProjects, projects, { recursive: true });
+    const transcript = join(projects, "-home-user-project", `${foreignSessionId}.jsonl`);
+    const workspace = join(directory, "moved-project");
+    mkdirSync(workspace);
+    writeFileSync(transcript, readFileSync(transcript, "utf8").replaceAll("/home/user/project", workspace));
+    const fake = new FakeClaudeQuery();
+    const service = new ClaudeService(
+      { ...config(directory), claudeProjectsDir: projects }, new SubscriptionHub(), new Logger("error"),
+      new SqliteHybridStore(join(directory, "state.sqlite")), fake.factory,
+    );
+    await service.ready();
+    rmSync(workspace, { recursive: true });
+
+    await expect(service.resumeThread(foreignSessionId))
+      .rejects.toThrow(`Claude thread cwd '${workspace}' does not exist or is not a directory.`);
+    expect(fake.inputs).toHaveLength(0);
+
+    mkdirSync(workspace);
+    await service.resumeThread(foreignSessionId);
+    expect(fake.inputs[0]?.options).toMatchObject({
+      cwd: workspace,
+      model: "claude-opus-5",
+      effort: "high",
+      permissionMode: "bypassPermissions",
+      resume: foreignSessionId,
+    });
     await service.close();
   });
 

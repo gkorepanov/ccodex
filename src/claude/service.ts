@@ -1236,6 +1236,7 @@ export class ClaudeService {
           : {}),
       });
     }
+    existingThreadCwd(record.thread.cwd);
     await this.selectCurrentCatalogModel(threadId);
     await (await this.sessions.getOrCreate(threadId)).materializeRuntime();
     await this.sessions.submit<ClaudeThreadRecord>(
