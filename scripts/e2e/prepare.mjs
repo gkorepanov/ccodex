@@ -10,17 +10,15 @@ const gid = Number(process.env.E2E_GID ?? 1000);
 const directories = new Set();
 
 async function transcriptCwd(path) {
+  let cwd;
   const lines = createInterface({ input: createReadStream(path), crlfDelay: Infinity });
   for await (const line of lines) {
     try {
       const record = JSON.parse(line);
-      if (typeof record.cwd === "string" && isAbsolute(record.cwd)) {
-        lines.close();
-        return record.cwd;
-      }
+      if (typeof record.cwd === "string" && isAbsolute(record.cwd)) cwd = record.cwd;
     } catch {}
   }
-  return undefined;
+  return cwd;
 }
 
 for (const project of readdirSync(projects, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
