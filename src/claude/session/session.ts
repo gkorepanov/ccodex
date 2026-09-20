@@ -280,6 +280,7 @@ export interface ClaudeSessionRuntimeDependencies {
   readonly isClosing: () => boolean;
   readonly persistUserSideSessions: boolean;
   readonly interactiveQuestions?: boolean;
+  readonly ultraEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
   readonly resolveChildModel?: (model: string) => {
     readonly modelPickerId: string;
     readonly claudeModelValue: string;
@@ -1097,6 +1098,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       collaborationMode: record.collaborationMode,
       outputSchema: record.outputSchema,
       interactiveQuestions: this.runtimeDependencies!.interactiveQuestions ?? true,
+      ultraEffort: this.runtimeDependencies!.ultraEffort ?? null,
     };
   }
 
@@ -1257,7 +1259,9 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         continue;
       }
       try {
-        await expectedOwner.runtime.applySettings(providerRuntimeSettings(settings));
+        await expectedOwner.runtime.applySettings(
+          providerRuntimeSettings(settings, this.runtimeDependencies?.ultraEffort ?? null),
+        );
         if (!await this.submitLineage<boolean>({
           type: "runtimeLineage",
           action: "settingsApplied",

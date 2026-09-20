@@ -1,6 +1,6 @@
 import { query, type ModelInfo, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Model } from "../codex/generated/v2/Model.js";
-import type { HybridConfig } from "../config/config.js";
+import { DEFAULT_ULTRA_EFFORT, type HybridConfig } from "../config/config.js";
 import type { Logger } from "../observability/logger.js";
 import { MetricsRegistry } from "../observability/metrics.js";
 import { modelCatalogValue, normalizeClaudeModelIdentifier } from "./modelSelection.js";
@@ -12,6 +12,7 @@ const effortDescriptions: Record<string, string> = {
   high: "Deep reasoning for complex work.",
   xhigh: "Extra-high reasoning effort.",
   max: "Maximum available reasoning effort.",
+  ultra: "Automatic task delegation to Claude sub-agents.",
 };
 
 const requiredControls = ["initializationResult", "supportedModels", "reinitialize", "interrupt", "setModel", "close"] as const;
@@ -42,8 +43,15 @@ export function claudeModelDisplayName(model: ModelInfo): string {
   return `${displayName} · ${label}`;
 }
 
-export function mapClaudeModel(model: ModelInfo, prefix: string): Model {
-  const efforts = model.supportsEffort ? (model.supportedEffortLevels ?? []) : [];
+/**
+ * `ultraEffort` is the Claude effort that backs the Codex `ultra` level; the level is offered only on
+ * models that support that effort, so picking it can never request an effort the model rejects.
+ */
+export function mapClaudeModel(model: ModelInfo, prefix: string, ultraEffort: string | null = null): Model {
+  const nativeEfforts: readonly string[] = model.supportsEffort ? (model.supportedEffortLevels ?? []) : [];
+  const efforts = ultraEffort && nativeEfforts.includes(ultraEffort) && !nativeEfforts.includes("ultra")
+    ? [...nativeEfforts, "ultra"]
+    : nativeEfforts;
   const serviceTiers = model.supportsFastMode
     ? [
         { id: "default", name: "Default", description: "Standard Claude execution." },
@@ -76,9 +84,13 @@ export function mapClaudeModel(model: ModelInfo, prefix: string): Model {
   };
 }
 
-export function mapClaudeModels(models: readonly ModelInfo[], prefix: string): Model[] {
+export function mapClaudeModels(
+  models: readonly ModelInfo[],
+  prefix: string,
+  ultraEffort: string | null = null,
+): Model[] {
   return models.filter((model) => model.value !== "default")
-    .map((model) => mapClaudeModel(model, prefix));
+    .map((model) => mapClaudeModel(model, prefix, ultraEffort));
 }
 
 export function claudeDefaultModelValue(models: readonly ModelInfo[]): string | undefined {
@@ -172,7 +184,11 @@ export class ClaudeModelCatalog {
       ]);
       await sdkQuery.reinitialize();
       await sdkQuery.interrupt();
-      const mapped = mapClaudeModels(models, this.config.modelPrefix);
+      const mapped = mapClaudeModels(
+        models,
+        this.config.modelPrefix,
+        this.config.ultraEffort === undefined ? DEFAULT_ULTRA_EFFORT : this.config.ultraEffort,
+      );
       this.pickerIds = claudeModelPickerIds(models, this.config.modelPrefix);
       this.defaultValue = claudeDefaultModelValue(models);
       this.cache = {

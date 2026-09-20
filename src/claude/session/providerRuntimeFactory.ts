@@ -20,6 +20,7 @@ import {
 import type { RuntimeTransportSettings } from "./commands.js";
 import {
   CCODEX_APP_UI_INSTRUCTIONS,
+  CCODEX_ULTRA_INSTRUCTIONS,
   claudeDeveloperInstructions,
 } from "../developerInstructions.js";
 export type { RuntimeTransportSettings } from "./commands.js";
@@ -57,13 +58,15 @@ function appendInstructions(startup: RuntimeStartup): string | undefined {
     startup.baseInstructions,
     claudeDeveloperInstructions(startup.developerInstructions),
   ];
+  if (startup.reasoningEffort === "ultra" && startup.ultraEffort) parts.push(CCODEX_ULTRA_INSTRUCTIONS);
   if (startup.personality === "friendly") parts.push("Use a friendly, collaborative communication style.");
   if (startup.personality === "pragmatic") parts.push("Be direct, pragmatic, and focused on concrete outcomes.");
   const value = parts.filter((part): part is string => Boolean(part)).join("\n\n");
   return value || undefined;
 }
 
-function effort(value: string | null | undefined): Options["effort"] {
+function effort(value: string | null | undefined, ultraEffort: Options["effort"] | null = null): Options["effort"] {
+  if (value === "ultra") return ultraEffort ?? undefined;
   return value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max"
     ? value
     : undefined;
@@ -99,8 +102,9 @@ export function runtimeTransportSettings(startup: RuntimeStartup): RuntimeTransp
 
 export function providerRuntimeSettings(
   settings: RuntimeTransportSettings,
+  ultraEffort: Options["effort"] | null = null,
 ): ProviderRuntimeSettings {
-  const selectedEffort = effort(settings.reasoningEffort);
+  const selectedEffort = effort(settings.reasoningEffort, ultraEffort);
   return {
     model: normalizeClaudeModelIdentifier(settings.model),
     permissionMode: providerPermissionMode(settings),
@@ -144,6 +148,8 @@ export interface RuntimeStartup {
   readonly collaborationMode: unknown | null;
   readonly outputSchema: unknown | null;
   readonly interactiveQuestions: boolean;
+  /** Claude effort behind Codex `ultra`; null when `ultra` is not offered. */
+  readonly ultraEffort: Options["effort"] | null;
 }
 
 export function createProviderRuntime(
@@ -157,7 +163,7 @@ export function createProviderRuntime(
   const transportSettings = runtimeTransportSettings(startup);
   const append = appendInstructions(startup);
   const selectedPermissionMode = providerPermissionMode(transportSettings);
-  const selectedEffort = effort(startup.reasoningEffort);
+  const selectedEffort = effort(startup.reasoningEffort, startup.ultraEffort);
   if (startup.reasoningEffort && !selectedEffort) throw new Error(`Unsupported Claude effort '${startup.reasoningEffort}'.`);
   const outputSchema = claudeOutputSchema(startup.outputSchema);
   const additionalDirectories = startup.runtimeWorkspaceRoots.filter((root) => root !== startup.cwd);

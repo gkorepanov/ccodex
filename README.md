@@ -110,6 +110,10 @@ commands to your global Codex installation:
   runtime; everything else goes to your external Codex CLI.
 - Native `gpt-*` models remain completely stock; `claude:*` entries run on Claude Code.
   Claude effort and fast mode map from Codex reasoning / priority settings.
+- Codex's `ultra` effort is offered on Claude models too: the thread runs at the Claude
+  effort named by `ultra_effort` (default `max`) and is told to delegate proactively to
+  sub-agents, mirroring stock Codex. It is not Claude Code's Workflow-based ultracode.
+  Pick it before the first message; set `ultra_effort = "off"` to hide it.
 - Switching providers on the next message creates a compact context handoff behind
   the scenes; same-provider model changes stay in-place.
 - Codex approval modes map cleanly onto Claude permissions: *Full Access* →
