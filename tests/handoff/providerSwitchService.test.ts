@@ -1405,6 +1405,72 @@ describe("provider switch service", () => {
     service.close();
   });
 
+  it("compacts a paginated Claude source through an ephemeral fork that excludes turns", async () => {
+    const sourceTurn = turn("paginated-turn", "paginated answer");
+    const source = { ...thread("paginated-public", "claude", [sourceTurn]), historyMode: "paginated" as const };
+    const hidden = { ...thread("paginated-hidden", "claude", []), ephemeral: true, threadSource: "subAgent" };
+    const claude = {
+      ownsModel: (model: string) => model.startsWith("claude:"),
+      ownsThread: (id: string) => id === source.id || id === hidden.id,
+      readThread: vi.fn((id: string) => ({ thread: id === hidden.id ? hidden : source })),
+      handoffSource: vi.fn(async () => ({
+        thread: source,
+        turns: source.turns,
+        settings: {
+          model: "claude:sonnet", sandboxPolicy: { type: "readOnly" },
+          collaborationMode: { mode: "default", settings: {} },
+        },
+      })),
+      currentThreadSettings: vi.fn(() => ({
+        model: "claude:sonnet", sandboxPolicy: { type: "readOnly" },
+        collaborationMode: { mode: "default", settings: {} },
+      })),
+      // Mirror ClaudeService.forkThread: a paginated source refuses an
+      // ephemeral fork unless the caller opts out of echoing its history.
+      forkThread: vi.fn(async (params: { threadId: string; ephemeral?: boolean; excludeTurns?: boolean }) => {
+        if (params.ephemeral && !params.excludeTurns) {
+          throw new Error("ephemeral paginated thread/fork requires `excludeTurns: true`");
+        }
+        return { thread: hidden };
+      }),
+      compactForHandoff: vi.fn(async () => "paginated portable summary"),
+      summarizeHandoff: vi.fn(),
+      discardHandoffThread: vi.fn(async () => undefined),
+      deleteThread: vi.fn(async () => ({})),
+    };
+    const target = thread("paginated-stock-target", "openai");
+    const targetTurn = turn("paginated-stock-turn", "stock answer");
+    const stock = {
+      request: vi.fn(async (method: string) => {
+        if (method === "thread/start") return { thread: target };
+        if (method === "turn/start") return { turn: { id: targetTurn.id } };
+        return {};
+      }),
+    };
+    const store = new HandoffStore(join(mkdtempSync(join(tmpdir(), "ccodex-switch-")), "handoffs.sqlite"));
+    const service = new CrossProviderForks(store, claude as never);
+    service.interceptSettings({ threadId: source.id, model: "gpt-5.6-sol" });
+
+    await service.switchProviderTurn({
+      threadId: source.id,
+      model: "gpt-5.6-sol",
+      input: [{ type: "text", text: "continue", text_elements: [] }],
+    }, {
+      ...turn("paginated-compact", ""), status: "inProgress", completedAt: null, durationMs: null,
+    }, stock as never, "client", vi.fn());
+
+    expect(claude.forkThread).toHaveBeenCalledWith(expect.objectContaining({
+      threadId: source.id, ephemeral: true, excludeTurns: true, threadSource: "subAgent",
+    }));
+    expect(claude.compactForHandoff).toHaveBeenCalledWith(hidden.id, expect.stringContaining("/compact"));
+    expect(claude.summarizeHandoff).not.toHaveBeenCalled();
+    expect(claude.discardHandoffThread).toHaveBeenCalledWith(hidden.id);
+    expect(service.logical(source.id)?.epoch).toMatchObject({
+      provider: "stock", backendThreadId: target.id,
+    });
+    service.close();
+  });
+
   it("commits an already-delivered target turn after gateway restart without sending it twice", async () => {
     const sourceTurn = turn("source-turn", "source answer");
     const source = thread("public-recovery", "openai", [sourceTurn]);

@@ -5165,6 +5165,45 @@ You are in a side conversation, not the main thread.`,
     await service.close();
   });
 
+  it("silently journals VCS awareness notices the Claude binary emits ahead of the SDK typings", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-vcs-awareness-"));
+    directories.push(directory);
+    const vcsStateChanged = {
+      type: "system", subtype: "vcs_state_changed", kind: "commit", branch: "main", cwd: directory,
+      uuid: randomUUID(), session_id: "session",
+    } as unknown as SDKMessage;
+    const codeChangePublished = {
+      type: "system", subtype: "code_change_published", provider: "github",
+      url: "https://github.com/acme/repo/pull/7", repo: "acme/repo", identifier: "7", action: "created",
+      uuid: randomUUID(), session_id: "session",
+    } as unknown as SDKMessage;
+    const store = new SqliteHybridStore(join(directory, "state.sqlite"));
+    const fake = new FakeClaudeQuery(
+      undefined, undefined, [], false, undefined, undefined, undefined, [vcsStateChanged, codeChangePublished],
+    );
+    const service = new ClaudeService(config(directory), new SubscriptionHub(), new Logger("error"), store, fake.factory);
+    const started = await service.startThread({ model: "claude:haiku", cwd: directory });
+    const prepared = await service.prepareTurn({
+      threadId: started.thread.id,
+      input: [{ type: "text", text: "commit and open a PR", text_elements: [] }],
+    });
+    prepared.announce();
+    prepared.start();
+    await new Promise<void>((resolve) => {
+      const poll = () => service.readThread(started.thread.id, true).thread.turns[0]?.status === "completed" ? resolve() : setTimeout(poll, 5);
+      poll();
+    });
+    const messages = service.readThread(started.thread.id, true).thread.turns[0]!.items
+      .flatMap((item) => item.type === "agentMessage" ? [item.text] : []);
+    expect(messages.filter((text) => text.includes("Unsupported Claude provider event"))).toEqual([]);
+    expect(store.listProviderEvents(started.thread.id, "unsupportedVisible")).toEqual([]);
+    expect(store.listProviderEvents(started.thread.id, "retainedOnly")).toMatchObject([
+      { providerEventType: "system/vcs_state_changed", payload: vcsStateChanged },
+      { providerEventType: "system/code_change_published", payload: codeChangePublished },
+    ]);
+    await service.close();
+  });
+
   it("evicts refusal-fallback partial items and emits the native reroute event", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-hybrid-refusal-fallback-"));
     directories.push(directory);
