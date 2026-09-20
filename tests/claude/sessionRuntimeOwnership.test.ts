@@ -56,7 +56,7 @@ describe("Codex ultra effort on Claude runtimes", () => {
     await vi.waitFor(() => expect(query.inputs).toHaveLength(1));
     const options = query.inputs[0]!.options;
     expect(options.effort).toBe("high");
-    expect(JSON.stringify(options.systemPrompt)).toContain("selected the Ultra effort");
+    expect(JSON.stringify(options.systemPrompt)).toContain("Proactive multi-agent delegation is active");
     expect(options.settings).not.toHaveProperty("ultracode");
     runtime.beginClose();
     await runtime.close();
@@ -71,7 +71,7 @@ describe("Codex ultra effort on Claude runtimes", () => {
     runtime.start();
     await vi.waitFor(() => expect(query.inputs).toHaveLength(1));
     expect(query.inputs[0]!.options.effort).toBe("max");
-    expect(JSON.stringify(query.inputs[0]!.options.systemPrompt)).not.toContain("selected the Ultra effort");
+    expect(JSON.stringify(query.inputs[0]!.options.systemPrompt)).not.toContain("Proactive multi-agent delegation is active");
     runtime.beginClose();
     await runtime.close();
   });

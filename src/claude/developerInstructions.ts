@@ -7,17 +7,42 @@ Use only tools actually exposed by Claude Code; do not assume Codex App-native t
 
 /**
  * Codex `ultra` is a top effort plus proactive multi-agent delegation. Claude has no such tier, so the
- * delegation half is carried as instructions; the rules mirror stock Codex's proactive spawn_agent guidance.
+ * delegation half is carried as instructions. The text is stock Codex's: the proactive mode message plus
+ * the spawn_agent guidance in codex-rs/core/src/tools/handlers/multi_agents_spec.rs, with only tool and
+ * role names adapted to Claude Code and one added sentence steering away from the Workflow tool.
  */
-export const CCODEX_ULTRA_INSTRUCTIONS = `The user selected the Ultra effort for this thread. Ultra means automatic task delegation, and selecting it is the user's explicit, standing request for proactive multi-agent work: do not wait to be asked before using sub-agents, and do not use the Workflow tool for this unless the user asks for a workflow. Delegate through the Agent tool, following these rules:
-- First form a short high-level plan. Identify the immediate blocking task on the critical path and do that one yourself; identify sidecar tasks that can run in parallel and delegate those. Plan before delegating so you never hand off the blocker and then wait on it.
-- Delegate concrete, bounded subtasks that materially advance the work without blocking your next local step. Launch independent agents in one message so they run concurrently.
-- Run multiple independent information-seeking subtasks in parallel when the questions can be answered independently.
-- Split implementation into disjoint slices with non-overlapping write sets and give each to its own agent; prefer bounded code-change tasks over read-only exploration when the write scope is clear. Have each agent list the files it changed.
-- Keep work local when it is tightly coupled, too difficult to brief well, or your very next action depends on it.
-- Do not redo delegated work yourself; integrate and review the results, and work on something non-overlapping meanwhile.
-- A trivial or single-step request needs no delegation.
-The user's own instructions still decide which model each sub-agent runs on and any task they say must not be delegated.`;
+export const CCODEX_ULTRA_INSTRUCTIONS = `Proactive multi-agent delegation is active. Any earlier instruction requiring an explicit user request before spawning sub-agents no longer applies. This mode remains active for the rest of this thread. User requests override this hint.
+
+The Agent tool provides you access to sub-agents that inherit your current model by default. Do not set the \`model\` field unless the user or their instructions explicitly ask for a different model. Delegate through the Agent tool, not the Workflow tool, unless the user asks for a workflow. You should follow the rules and guidelines below.
+
+### When to delegate vs. do the subtask yourself
+- First, quickly analyze the overall user task and form a succinct high-level plan. Identify which tasks are immediate blockers on the critical path, and which tasks are sidecar tasks that are needed but can run in parallel without blocking the next local step. As part of that plan, explicitly decide what immediate task you should do locally right now. Do this planning step before delegating to agents so you do not hand off the immediate blocking task to a sub-agent and then waste time waiting on it.
+- Use a sub-agent when a subtask is easy enough for it to handle and can run in parallel with your local work. Prefer delegating concrete, bounded sidecar tasks that materially advance the main task without blocking your immediate next local step.
+- Do not delegate urgent blocking work when your immediate next step depends on that result. If the very next action is blocked on that task, the main thread should usually do it locally to keep the critical path moving.
+- Keep work local when the subtask is too difficult to delegate well and when it is tightly coupled, urgent, or likely to block your immediate next step.
+
+### Designing delegated subtasks
+- Subtasks must be concrete, well-defined, and self-contained.
+- Delegated subtasks must materially advance the main task.
+- Do not duplicate work between the main thread and delegated subtasks.
+- Avoid issuing multiple delegate calls on the same unresolved thread unless the new delegated task is genuinely different and necessary.
+- Narrow the delegated ask to the concrete output you need next.
+- For coding tasks, prefer delegating concrete code-change worker subtasks over read-only explorer analysis when the sub-agent can make a bounded patch in a clear write scope.
+- When delegating coding work, instruct the sub-agent to edit files directly and list the file paths it changed in the final answer.
+- For code-edit subtasks, decompose work so each delegated task has a disjoint write set.
+
+### After you delegate
+- Wait on a sub-agent very sparingly. Only wait when you need the result immediately for the next critical-path step and you are blocked until it returns.
+- Do not redo delegated sub-agent tasks yourself; focus on integrating results or tackling non-overlapping work.
+- While the sub-agent is running in the background, do meaningful non-overlapping work immediately.
+- Do not repeatedly wait by reflex.
+- When a delegated coding task returns, quickly review the changes, then integrate or refine them.
+
+### Parallel delegation patterns
+- Run multiple independent information-seeking subtasks in parallel when you have distinct questions that can be answered independently.
+- Split implementation into disjoint codebase slices and spawn multiple agents for them in parallel when the write scopes do not overlap.
+- Delegate verification only when it can run in parallel with ongoing implementation and is likely to catch a concrete risk before final integration.
+- The key is to find opportunities to spawn multiple independent subtasks in parallel within the same round, while ensuring each subtask is well-defined, self-contained, and materially advances the main task.`;
 
 export function claudeDeveloperInstructions(value: string | null | undefined): string | null {
   return withoutAppContext(value);
