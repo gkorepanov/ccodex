@@ -93,6 +93,13 @@ describe("opinionated feature configuration", () => {
     expect(configured("[features]\nclaude_skills = false\n").features?.claudeSkills).toBe(false);
   });
 
+  it("backs Codex ultra with max effort unless ultra_effort overrides or disables it", () => {
+    expect(configured().ultraEffort).toBe("max");
+    expect(configured('ultra_effort = "high"\n').ultraEffort).toBe("high");
+    expect(configured('ultra_effort = "off"\n').ultraEffort).toBeNull();
+    expect(() => configured('ultra_effort = "ultra"\n')).toThrow("ultra_effort must be");
+  });
+
   it("uses rename_prompt presence as the title UX switch and ignores the retired feature key", () => {
     expect(configured(`
 rename_prompt = """

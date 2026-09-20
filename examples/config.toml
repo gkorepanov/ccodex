@@ -29,6 +29,10 @@ Keep the complete title, including emoji, within 36 characters.
 Return only the title.
 """
 
+# Claude effort behind Codex's `ultra` level (proactive sub-agent delegation) on Claude models:
+# "low" | "medium" | "high" | "xhigh" | "max", or "off" to hide `ultra` there. Default: "max".
+# ultra_effort = "max"
+
 # Optional status command interception. This does not affect provider routing or lifecycle.
 [features]
 status_command = true # intercept `/ccstatus`, `/ccstate`, and legacy status aliases without a model turn

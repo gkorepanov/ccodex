@@ -62,7 +62,7 @@ import type { ThreadBackgroundTerminalsListParams } from "../codex/generated/v2/
 import type { ThreadBackgroundTerminalsListResponse } from "../codex/generated/v2/ThreadBackgroundTerminalsListResponse.js";
 import type { ThreadBackgroundTerminalsTerminateParams } from "../codex/generated/v2/ThreadBackgroundTerminalsTerminateParams.js";
 import type { ThreadBackgroundTerminalsTerminateResponse } from "../codex/generated/v2/ThreadBackgroundTerminalsTerminateResponse.js";
-import type { HybridConfig } from "../config/config.js";
+import { DEFAULT_ULTRA_EFFORT, type HybridConfig } from "../config/config.js";
 import type { SubscriptionHub } from "../gateway/subscriptions.js";
 import type { Logger } from "../observability/logger.js";
 import type {
@@ -488,6 +488,7 @@ export class ClaudeService {
           isClosing: () => this.closing,
           persistUserSideSessions: true,
           interactiveQuestions: this.config.features?.interactiveQuestions ?? true,
+          ultraEffort: this.config.ultraEffort === undefined ? DEFAULT_ULTRA_EFFORT : this.config.ultraEffort,
           resolveChildModel: (model) => {
             const value = normalizeClaudeModelIdentifier(model);
             const modelPickerId = value.startsWith(this.config.modelPrefix) ? value : `${this.config.modelPrefix}${value}`;
@@ -2307,7 +2308,7 @@ export class ClaudeService {
   ): Promise<void> {
     if (params.permissions && params.sandboxPolicy)
       throw invalidParams("Claude thread settings cannot combine permissions with sandboxPolicy.");
-    if (params.effort && !["low", "medium", "high", "xhigh", "max"].includes(params.effort))
+    if (params.effort && !["low", "medium", "high", "xhigh", "max", "ultra"].includes(params.effort))
       throw invalidParams(`Unsupported Claude effort '${params.effort}'.`);
     let update: DesiredSettingsUpdate;
     let syncCanonicalSettings = false;

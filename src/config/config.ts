@@ -26,9 +26,18 @@ export interface HybridConfig {
   readonly rpcCaptureMaxBytes?: number;
   /** Presence enables CCodex title rewriting; absence preserves stock Codex title behavior. */
   readonly renamePrompt?: string;
+  /**
+   * Claude effort behind the Codex `ultra` level (proactive sub-agent delegation). `null` hides `ultra`
+   * on Claude models; a missing value means `max`, mirroring stock Codex.
+   */
+  readonly ultraEffort?: ClaudeUltraEffort | null;
   /** Optional UX conveniences. Missing values remain enabled for backwards compatibility. */
   readonly features?: FeatureConfig;
 }
+
+export const CLAUDE_ULTRA_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type ClaudeUltraEffort = typeof CLAUDE_ULTRA_EFFORTS[number];
+export const DEFAULT_ULTRA_EFFORT: ClaudeUltraEffort = "max";
 
 export interface FeatureConfig {
   readonly statusCommand: boolean;
@@ -46,6 +55,7 @@ interface ConfigFile {
   data_dir?: unknown;
   public_socket?: unknown;
   model_prefix?: unknown;
+  ultra_effort?: unknown;
   model_aliases?: unknown;
   idle_timeout_seconds?: unknown;
   model_cache_seconds?: unknown;
@@ -121,6 +131,15 @@ function stringMap(value: unknown, fallback: Readonly<Record<string, string>>): 
     throw new Error("model_aliases values must be non-empty strings.");
   }
   return Object.fromEntries(entries) as Record<string, string>;
+}
+
+function ultraEffort(value: unknown): ClaudeUltraEffort | null {
+  if (value === undefined) return DEFAULT_ULTRA_EFFORT;
+  if (value === "off") return null;
+  if (typeof value === "string" && (CLAUDE_ULTRA_EFFORTS as readonly string[]).includes(value)) {
+    return value as ClaudeUltraEffort;
+  }
+  throw new Error(`ultra_effort must be "off" or one of: ${CLAUDE_ULTRA_EFFORTS.join(", ")}.`);
 }
 
 function featureConfig(value: unknown): FeatureConfig {
@@ -298,6 +317,7 @@ export function loadConfig(): HybridConfig {
     ),
     modelPrefix: environment("CCODEX_MODEL_PREFIX", "CODEX_HYBRID_MODEL_PREFIX") ?? stringValue(file.model_prefix, "claude:"),
     modelAliases: stringMap(file.model_aliases, DEFAULT_CLAUDE_MODEL_ALIASES),
+    ultraEffort: ultraEffort(file.ultra_effort),
     idleTimeoutSeconds: numberValue(file.idle_timeout_seconds, 900),
     modelCacheSeconds: numberValue(file.model_cache_seconds, 300),
     logLevel: logLevel as HybridConfig["logLevel"],

@@ -9,6 +9,21 @@ import {
 import { claudeModelLabel } from "../../src/claude/modelSelection.js";
 
 describe("mapClaudeModel", () => {
+  it("offers Codex ultra only on models that support the effort behind it", () => {
+    const capable: Parameters<typeof mapClaudeModel>[0] = {
+      value: "fable", displayName: "Fable", description: "", supportsEffort: true,
+      supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+    };
+    const levels = (model: Parameters<typeof mapClaudeModel>[0], ultra: string | null) =>
+      mapClaudeModel(model, "claude:", ultra).supportedReasoningEfforts.map((level) => level.reasoningEffort);
+    expect(levels(capable, "max")).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(levels(capable, null)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(levels({ ...capable, supportedEffortLevels: ["low", "medium", "high"] }, "max"))
+      .toEqual(["low", "medium", "high"]);
+    expect(levels({ ...capable, supportsEffort: false }, "max")).toEqual([]);
+    expect(mapClaudeModel(capable, "claude:", "max").defaultReasoningEffort).toBe("high");
+  });
+
   it("rejects an SDK query missing required lifecycle controls", () => {
     expect(() => assertClaudeControlSurface({ supportedModels() {} })).toThrow("missing required controls");
   });
