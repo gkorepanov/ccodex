@@ -82,6 +82,8 @@ async function startGatewayOwner(
           subscriptions.emitGlobal("skills/changed", {});
         }
       : undefined,
+    undefined,
+    features.nativeMcp !== false ? stock.socketPath : undefined,
   );
   await claude.ready();
   const handoffStock = connectStock(stock.socketPath);

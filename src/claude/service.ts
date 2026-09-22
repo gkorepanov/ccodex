@@ -460,6 +460,7 @@ export class ClaudeService {
     }),
     private readonly skillsChanged?: (cwd: string) => void,
     private readonly nativeSessionCatalog: () => Promise<SDKSessionInfo[]> = () => listSessions(),
+    private readonly nativeMcpSocketPath?: string,
   ) {
     this.store = new LayeredHybridStore(durableStore);
     const sessionRepository = new ClaudeSessionRepository(this.store);
@@ -479,6 +480,7 @@ export class ClaudeService {
         undefined,
         {
           claudeBinary: this.config.claudeBinary,
+          ...(this.nativeMcpSocketPath ? { nativeMcpSocketPath: this.nativeMcpSocketPath } : {}),
           logger: this.logger,
           queryFactory: this.queryFactory,
           transcripts: this.transcripts,

@@ -112,6 +112,7 @@ import type { Logger } from "../../observability/logger.js";
 import type { ClaudeQueryFactory } from "../queryFactory.js";
 import type { TranscriptBrancher } from "../transcriptBrancher.js";
 import type { ClaudeRateLimitCoordinator } from "../rateLimits.js";
+import { NativeMcpBridge, nativeMcpTransport } from "../nativeMcp.js";
 import { createGoalMcpServer } from "../goalTools.js";
 import { mapUserInput, normalizeUserInput } from "../inputMapper.js";
 import { bashCommandActions } from "../commandActions.js";
@@ -270,6 +271,7 @@ interface TurnLifecycle {
 }
 
 export interface ClaudeSessionRuntimeDependencies {
+  readonly nativeMcpSocketPath?: string;
   readonly claudeBinary: string;
   readonly logger: Logger;
   readonly queryFactory: ClaudeQueryFactory;
@@ -1103,6 +1105,28 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
   private async createRuntimeGeneration(startup: RuntimeStartup): Promise<RuntimeCandidate> {
     const dependencies = this.runtimeDependencies!;
     let runtime: ProviderRuntime | undefined;
+    const nativeMcp = dependencies.nativeMcpSocketPath ? new NativeMcpBridge(
+      async () => {
+        const record = await this.submit<ClaudeThreadRecord>({ type: "readThread", includeTurns: false });
+        const callback = await this.providerCallbackContext(startup.runtimeGeneration);
+        if (!record.thread.sessionId) throw new Error("Claude session identity is unavailable.");
+        return {
+          threadId: this.threadId, sessionId: record.thread.sessionId,
+          turnId: callback?.inspection.activeTurnId ?? null, model: record.modelPickerId,
+          cwd: record.thread.cwd, runtimeWorkspaceRoots: runtimeWorkspaceRoots(record),
+          approvalPolicy: record.approvalPolicy, approvalsReviewer: record.approvalsReviewer,
+          sandboxPolicy: record.sandboxPolicy,
+        };
+      },
+      async (method, params) => {
+        const result = await this.openProviderInteraction(startup.runtimeGeneration, {
+          threadId: this.threadId, turnId: String(params.turnId), claudeRequestId: null, method, params,
+        });
+        if (!result || typeof result !== "object" || "cancelled" in result) throw new Error("Native MCP interaction cancelled.");
+        return result;
+      },
+      (onRequest) => nativeMcpTransport(dependencies.nativeMcpSocketPath!, onRequest),
+    ) : undefined;
     const projection: ProviderProjectionState = {
       context: new AsyncLocalStorage<RuntimeFactContext>(),
       processEpoch: uuidv7(),
@@ -1137,6 +1161,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
             }),
           ),
         },
+        nativeMcp,
       );
       projection.runtime = runtime;
       await this.submitProviderProjection(startup.runtimeGeneration, {
@@ -1191,6 +1216,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       }).catch(() => undefined);
       return candidate;
     } catch (error) {
+      nativeMcp?.close();
       if (runtime) {
         await this.stopProviderRuntime(
           { generation: startup.runtimeGeneration, runtime },

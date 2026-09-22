@@ -63,6 +63,7 @@ export class ClaudeRuntime {
     options: Options,
     queryFactory: ClaudeQueryFactory,
     private readonly submitFact: (fact: ClaudeRuntimeFact) => Promise<void>,
+    private readonly disposeResources: () => void = () => undefined,
   ) {
     this.initializationExit = new Promise<never>((_resolve, reject) => {
       this.rejectInitializationExit = reject;
@@ -184,6 +185,7 @@ export class ClaudeRuntime {
     this.closed = true;
     this.input.close();
     this.abort.abort();
+    this.disposeResources();
     await this.query.return(undefined).catch(() => undefined);
     await this.consumer?.catch(() => undefined);
   }
@@ -249,6 +251,7 @@ export class ClaudeRuntime {
 
   private markExited(error?: unknown): void {
     this.exited = true;
+    this.disposeResources();
     this.rejectInitializationExit(this.initializationFailure(
       error ?? new Error(`Claude runtime generation ${this.runtimeGeneration} exited during initialization.`),
     ));

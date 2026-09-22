@@ -36,6 +36,7 @@ export interface FeatureConfig {
   readonly optimisticSideStartup: boolean;
   readonly interactiveQuestions: boolean;
   readonly claudeSkills: boolean;
+  readonly nativeMcp?: boolean;
 }
 
 interface ConfigFile {
@@ -66,6 +67,7 @@ export const DEFAULT_FEATURES: FeatureConfig = {
   optimisticSideStartup: true,
   interactiveQuestions: true,
   claudeSkills: true,
+  nativeMcp: true,
 };
 
 export const DEFAULT_RENAME_PROMPT = `Create a concise, vivid, memorable title for the task.
@@ -130,7 +132,7 @@ function featureConfig(value: unknown): FeatureConfig {
   }
   const table = value as Record<string, unknown>;
   for (const key of [
-    "status_command", "side_chat_promotion", "optimistic_side_startup", "interactive_questions", "claude_skills",
+    "status_command", "side_chat_promotion", "optimistic_side_startup", "interactive_questions", "claude_skills", "native_mcp",
   ] as const) {
     if (table[key] !== undefined && typeof table[key] !== "boolean") {
       throw new Error(`features.${key} must be a boolean.`);
@@ -142,6 +144,7 @@ function featureConfig(value: unknown): FeatureConfig {
     optimisticSideStartup: table.optimistic_side_startup as boolean | undefined ?? true,
     interactiveQuestions: table.interactive_questions as boolean | undefined ?? true,
     claudeSkills: table.claude_skills as boolean | undefined ?? true,
+    nativeMcp: table.native_mcp as boolean | undefined ?? true,
   };
 }
 
