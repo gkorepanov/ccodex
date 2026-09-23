@@ -6,6 +6,7 @@ import { fakeClaude, fakeQuery } from "../fixtures/fakeClaude.js";
 import { startTestGateway, type Client, type TestGateway } from "./harness.js";
 
 process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "ccodex-claude-"));
+process.env.CODEX_HOME = mkdtempSync(join(tmpdir(), "ccodex-codex-home-"));
 vi.mock("@anthropic-ai/claude-agent-sdk", async (importOriginal) => ({
   ...await importOriginal<object>(),
   query: fakeQuery,
@@ -251,6 +252,39 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(client.notifications("thread/status/changed", childId).map((message) => message.params.status.type)).toEqual(["idle"]);
     const listed = await client.request("thread/list", { ancestorThreadId: threadId, sourceKinds: ["subAgentThreadSpawn"] });
     expect(listed.data.map((row: any) => row.id)).toEqual([childId]);
+  });
+
+  it("shows what Codex says in a Claude thread's Codex MCP call, live and in history", async () => {
+    const threadId = await claudeThread();
+    const before = client.messages.length;
+    await client.turn(threadId, "ask codex: DIG");
+    const codex = ["◆ CCodex │ Codex MCP prompt\n\nDIG", "◆ CCodex │ Codex MCP message\n\ncodex says: DIG"];
+    const live = client.messages.slice(before).filter((message) => message.method === "item/completed" && message.params.item.text?.startsWith("◆"))
+      .map((message) => message.params.item);
+    expect(live.map((item) => item.text)).toEqual(codex);
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    const items = thread.turns[0].items;
+    expect(items.map((item: any) => item.type === "agentMessage" ? item.text : item.type)).toEqual(["userMessage", "mcpToolCall", ...codex, "claude: ask codex: DIG"]);
+    expect(items.filter((item: any) => item.text?.startsWith("◆")).map((item: any) => item.id)).toEqual(live.map((item) => item.id));
+  });
+
+  it("shows a codex sub-agent's Codex conversation live in the sub-agent's own thread", async () => {
+    const threadId = await claudeThread();
+    const childId = "agent-c0d3c0d3";
+    const done = client.turn(threadId, "ask a codex sub-agent: DIG");
+    await client.waitFor("thread/started", (params) => params.thread.id === childId);
+    await client.request("thread/resume", { threadId: childId });
+    await done;
+    expect(await client.request("thread/resume", { threadId: childId })).toMatchObject({ model: "claude:claude-sonnet-5", cwd: "/work" });
+    await client.waitFor("turn/completed", (params) => params.threadId === childId);
+    const shown = client.notifications("item/completed", childId).map((message) => message.params.item)
+      .map((item) => item.type === "agentMessage" ? item.text : item.type === "userMessage" ? `user:${item.content[0].text}` : item.type);
+    const conversation = ["user:DIG", "mcpToolCall", "◆ CCodex │ Codex MCP prompt\n\nDIG", "◆ CCodex │ Codex MCP message\n\ncodex says: DIG", "Codex is done"];
+    expect([...new Set(shown)]).toEqual(conversation);
+    const { thread: child } = await client.request("thread/read", { threadId: childId, includeTurns: true });
+    expect(itemsOf(child.turns)).toEqual(["user:DIG", "mcpToolCall", ...conversation.slice(2).map((text) => `agent:${text}`)]);
+    const { thread: parent } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(itemsOf(parent.turns).filter((item) => item.includes("◆"))).toEqual([]);
   });
 
   it("keeps a Claude default model, effort and speed out of Codex's config.toml, showing them through config/read", async () => {

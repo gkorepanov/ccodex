@@ -1,7 +1,7 @@
 // Scripted stand-in for the Claude Agent SDK `query()`: answers each pushed message, streams like the real CLI and
 // persists the same transcript records under $CLAUDE_CONFIG_DIR/projects, so the native catalog/projector read it.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 type Message = Record<string, any>;
@@ -37,12 +37,12 @@ const textOf = (content: unknown) => typeof content === "string"
 
 class Transcript {
   public last: string | null = null;
-  private readonly path: string;
+  public readonly path: string;
 
-  public constructor(private readonly sessionId: string, private readonly cwd: string) {
+  public constructor(private readonly sessionId: string, private readonly cwd: string, path?: string) {
     const directory = join(process.env.CLAUDE_CONFIG_DIR!, "projects", cwd.replace(/[^a-zA-Z0-9]/gu, "-"));
     mkdirSync(directory, { recursive: true });
-    this.path = join(directory, `${sessionId}.jsonl`);
+    this.path = path ?? join(directory, `${sessionId}.jsonl`);
     // A resumed session continues the chain.
     if (existsSync(this.path)) this.last = JSON.parse(readFileSync(this.path, "utf8").trim().split("\n").at(-1)!).uuid;
   }
@@ -56,6 +56,40 @@ class Transcript {
     this.last = uuid;
     return uuid;
   }
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Codex answering an MCP call: it journals the turn under $CODEX_HOME/sessions like `codex mcp-server`. */
+function codexJournal(prompt: string): string {
+  const threadId = randomUUID();
+  const directory = join(process.env.CODEX_HOME!, "sessions", "2026", "09", "23");
+  mkdirSync(directory, { recursive: true });
+  const event = (payload: Message) => `${JSON.stringify({ type: "event_msg", payload })}\n`;
+  writeFileSync(join(directory, `rollout-2026-09-23T00-00-00-${threadId}.jsonl`),
+    `${JSON.stringify({ type: "session_meta", payload: { id: threadId, timestamp: new Date().toISOString(), source: "mcp" } })}\n`
+    + event({ type: "task_started" })
+    + event({ type: "item_completed", item: { type: "UserMessage", content: [{ type: "text", text: prompt }] } })
+    + event({ type: "item_completed", item: { type: "AgentMessage", content: [{ type: "Text", text: `codex says: ${prompt}` }] } })
+    + event({ type: "task_complete" }));
+  return threadId;
+}
+
+/** A `mcp__codex__codex` call as Claude makes it: tool use, the PreToolUse hook, codex working, the result. */
+async function* codexCall(transcript: Transcript, sessionId: string, options: Message, prompt: string, agentId?: string): AsyncGenerator<Message> {
+  const toolUseId = `toolu_${randomUUID().slice(0, 8)}`;
+  const input = { prompt };
+  const call = { type: "assistant", message: { id: `msg_${randomUUID().slice(0, 8)}`, role: "assistant", model: "claude-opus-5-5", content: [{ type: "tool_use", id: toolUseId, name: "mcp__codex__codex", input }], stop_reason: "tool_use", usage: { input_tokens: 5, output_tokens: 1 } } };
+  transcript.write({ ...call, apiBlockIndex: 0, ...(agentId ? { isSidechain: true, agentId } : {}) });
+  if (!agentId) yield base(sessionId, call);
+  for (const hook of options.hooks?.PreToolUse ?? []) {
+    for (const run of hook.hooks) await run({ tool_name: "mcp__codex__codex", tool_input: input, tool_use_id: toolUseId, ...(agentId ? { agent_id: agentId } : {}) });
+  }
+  const threadId = codexJournal(prompt);
+  await sleep(1_200);
+  const content = [{ type: "tool_result", tool_use_id: toolUseId, content: JSON.stringify({ threadId, content: `codex says: ${prompt}` }) }];
+  transcript.write({ type: "user", message: { role: "user", content }, ...(agentId ? { isSidechain: true, agentId } : {}) });
+  if (!agentId) yield base(sessionId, { type: "user", message: { role: "user", content } });
 }
 
 function base(sessionId: string, extra: Message): Message {
@@ -115,6 +149,31 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     transcript.write({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: result }] }, toolUseResult: { stdout: result, stderr: "" } });
     yield base(sessionId, { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: result }] }, tool_use_result: { stdout: result, stderr: "" } });
     reply = `approval ${decision.behavior}`;
+  }
+  const asked = /^ask codex: (.+)$/u.exec(text);
+  if (asked) yield* codexCall(transcript, sessionId, options, asked[1]!);
+  const delegated = /^ask a codex sub-agent: (.+)$/u.exec(text);
+  if (delegated) {
+    const toolUseId = `toolu_${randomUUID().slice(0, 8)}`;
+    const agentId = "c0d3c0d3";
+    const spawn = { type: "assistant", message: { id: `msg_${randomUUID().slice(0, 8)}`, role: "assistant", model: "claude-opus-5-5", content: [{ type: "tool_use", id: toolUseId, name: "Agent", input: { description: "Codex helper", prompt: delegated[1], subagent_type: "codex-wrapper" } }], stop_reason: "tool_use", usage: { input_tokens: 5, output_tokens: 1 } } };
+    transcript.write({ ...spawn, apiBlockIndex: 0 });
+    yield base(sessionId, spawn);
+    const launched = { isAsync: true, status: "async_launched", agentId, description: "Codex helper", resolvedModel: "claude-sonnet-5", prompt: delegated[1] };
+    const content = [{ type: "tool_result", tool_use_id: toolUseId, content: "Async agent launched" }];
+    transcript.write({ type: "user", message: { role: "user", content }, toolUseResult: launched });
+    yield base(sessionId, { type: "user", message: { role: "user", content }, tool_use_result: launched });
+    await sleep(300);
+    const directory = transcript.path.replace(/\.jsonl$/u, "/subagents");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, `agent-${agentId}.meta.json`), JSON.stringify({ agentType: "codex-wrapper", description: "Codex helper", toolUseId, spawnDepth: 1 }));
+    const child = new Transcript(sessionId, options.cwd ?? process.cwd(), join(directory, `agent-${agentId}.jsonl`));
+    child.write({ type: "user", isSidechain: true, agentId, message: { role: "user", content: delegated[1] } });
+    yield* codexCall(child, sessionId, options, delegated[1]!, agentId);
+    // Claude writes the sub-agent's last records a moment after its task settles.
+    yield base(sessionId, { type: "system", subtype: "task_notification", task_id: agentId, tool_use_id: toolUseId, status: "completed", output_file: "", summary: "Codex helper" });
+    await sleep(500);
+    child.write({ type: "assistant", isSidechain: true, agentId, apiBlockIndex: 0, message: { id: `msg_${randomUUID().slice(0, 8)}`, role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "Codex is done" }], stop_reason: "end_turn", usage: { input_tokens: 5, output_tokens: 1 } } });
   }
   if (text.includes("spawn a sub-agent")) {
     // Claude writes the child's transcript only after the spawn's result: here it never does.

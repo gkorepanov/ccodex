@@ -6,7 +6,7 @@ import type { JsonObject, QueuedSubmissionLike, ThreadItem, TokenUsageBreakdown,
 import { invalidRequest } from "../protocol/codex.js";
 import { startedTurn } from "../protocol/turnPagination.js";
 import {
-  CODEX_MCP_MESSAGE_LABEL, CODEX_MCP_PROMPT_LABEL, CODEX_MCP_REASONING_LABEL, CODEX_MCP_TOOLS, tailCodexRollout,
+  CODEX_MCP_TOOLS, codexMcpItem, tailCodexRollout,
 } from "./codexRollout.js";
 import { claudeContent, normalizeUserInput, userMessage } from "./inputMapper.js";
 import { completedToolItem } from "./native/projector.js";
@@ -185,7 +185,7 @@ export class ClaudeSession {
         hooks: {
           PostCompact: [{ hooks: [async (input: any) => { this.compactSummary?.(String(input.compact_summary ?? "")); return {}; }] }],
           PreToolUse: [{ matcher: "mcp__codex__.*", hooks: [async (input: any) => {
-            this.codexMcpCall(String(input.tool_name), input.tool_input ?? {}, String(input.tool_use_id));
+            this.codexMcpCall(String(input.tool_name), input.tool_input ?? {}, String(input.tool_use_id), input.agent_id);
             return {};
           }] }],
         },
@@ -672,14 +672,21 @@ export class ClaudeSession {
     this.itemStarted(started.item);
   }
 
-  /** Codex MCP calls: the prompt and everything codex says while it works show up in this chat. */
-  private codexMcpCall(toolName: string, input: JsonObject, toolUseId: string): void {
+  /**
+   * Codex MCP calls: the prompt and everything codex says while it works show up in the calling chat (a
+   * sub-agent's own thread when a sub-agent calls), with the ids history gives them.
+   */
+  private codexMcpCall(toolName: string, input: JsonObject, toolUseId: string, agentId: string | undefined): void {
     if (!CODEX_MCP_TOOLS.has(toolName)) return;
-    if (typeof input.prompt === "string" && input.prompt) this.systemText(`${CODEX_MCP_PROMPT_LABEL}\n\n${input.prompt}`);
-    this.codexTails.set(toolUseId, tailCodexRollout(toolName, input, (event) => {
-      if (event.kind === "message") this.systemText(`${CODEX_MCP_MESSAGE_LABEL}\n\n${event.text}`);
-      else if (event.kind === "reasoning") this.systemText(`${CODEX_MCP_REASONING_LABEL}\n\n${event.text}`);
-      else this.codexTails.get(toolUseId)?.();
+    const show = (item: ThreadItem) => {
+      if (agentId) this.host.subagentActivity(`agent-${agentId}`);
+      else if (this.turn) { this.itemStarted(item); this.itemCompleted(item); }
+    };
+    if (typeof input.prompt === "string" && input.prompt) show(codexMcpItem(toolUseId, "prompt", { kind: "prompt", text: input.prompt }));
+    let said = 0;
+    this.codexTails.set(toolUseId, tailCodexRollout(toolUseId, toolName, input, (event) => {
+      if (event.kind === "turnComplete") this.codexTails.get(toolUseId)?.();
+      else show(codexMcpItem(toolUseId, said++, event));
     }));
   }
 

@@ -1,8 +1,9 @@
-import { closeSync, openSync, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { MCP_THREAD_SOURCE } from "../mcp/server.js";
+import type { ThreadItem } from "../protocol/codex.js";
 
 export const CODEX_MCP_TOOLS = new Set(["mcp__codex__codex", "mcp__codex__codex-reply"]);
 export const CODEX_MCP_PROMPT_LABEL = "◆ CCodex │ Codex MCP prompt";
@@ -129,33 +130,95 @@ export function defaultCodexRolloutLocator(sessionsDir = codexSessionsDir()): Co
   };
 }
 
+type RolloutLine = CodexRolloutEvent | { readonly kind: "turnStarted" } | { readonly kind: "prompt"; readonly text: string };
+
+function rolloutLine(line: string): RolloutLine | undefined {
+  let parsed: { type?: string; payload?: { type?: string; message?: unknown; text?: unknown; item?: { type?: string; content?: { text?: string }[]; summary_text?: string[] } } };
+  try { parsed = JSON.parse(line) as typeof parsed; } catch { return undefined; }
+  if (parsed.type !== "event_msg") return undefined;
+  const payload = parsed.payload;
+  if (payload?.type === "task_started") return { kind: "turnStarted" };
+  if (payload?.type === "task_complete") return { kind: "turnComplete" };
+  if (payload?.type === "agent_message" && typeof payload.message === "string" && payload.message) return { kind: "message", text: payload.message };
+  if (payload?.type === "agent_reasoning" && typeof payload.text === "string" && payload.text) return { kind: "reasoning", text: payload.text };
+  if (payload?.type !== "item_completed") return undefined;
+  // codex ≥ 0.156 journals items instead of agent_message / agent_reasoning events.
+  const item = payload.item;
+  const text = item?.type === "Reasoning" ? (item.summary_text ?? []).join("\n") : (item?.content ?? []).map((part) => part.text ?? "").join("");
+  if (!text) return undefined;
+  if (item?.type === "AgentMessage") return { kind: "message", text };
+  if (item?.type === "Reasoning") return { kind: "reasoning", text };
+  return item?.type === "UserMessage" ? { kind: "prompt", text } : undefined;
+}
+
 /** Consumes complete journal lines from `buffer` + `chunk`, returning mapped events and the unparsed tail. */
 export function parseRolloutChunk(buffer: string, chunk: string): { rest: string; events: CodexRolloutEvent[] } {
   const combined = buffer + chunk;
   const boundary = combined.lastIndexOf("\n");
   if (boundary === -1) return { rest: combined, events: [] };
-  const events: CodexRolloutEvent[] = [];
-  for (const line of combined.slice(0, boundary).split("\n")) {
-    if (!line.trim()) continue;
-    let parsed: { type?: string; payload?: { type?: string; message?: unknown; text?: unknown; item?: { type?: string; content?: { text?: string }[]; summary_text?: string[] } } };
-    try { parsed = JSON.parse(line) as typeof parsed; } catch { continue; }
-    if (parsed.type !== "event_msg") continue;
-    const payload = parsed.payload;
-    if (payload?.type === "agent_message" && typeof payload.message === "string" && payload.message) {
-      events.push({ kind: "message", text: payload.message });
-    } else if (payload?.type === "agent_reasoning" && typeof payload.text === "string" && payload.text) {
-      events.push({ kind: "reasoning", text: payload.text });
-    } else if (payload?.type === "item_completed") {
-      // codex ≥ 0.156 journals items instead of agent_message / agent_reasoning events.
-      const item = payload.item;
-      const text = item?.type === "AgentMessage" ? (item.content ?? []).map((part) => part.text ?? "").join("")
-        : item?.type === "Reasoning" ? (item.summary_text ?? []).join("\n") : "";
-      if (text) events.push({ kind: item!.type === "AgentMessage" ? "message" : "reasoning", text });
-    } else if (payload?.type === "task_complete") {
-      events.push({ kind: "turnComplete" });
-    }
-  }
+  const events = combined.slice(0, boundary).split("\n").map(rolloutLine)
+    .filter((event): event is CodexRolloutEvent => event !== undefined && event.kind !== "turnStarted" && event.kind !== "prompt");
   return { rest: combined.slice(boundary + 1), events };
+}
+
+/** One codex turn of a journal: its prompt and what codex said. */
+interface RolloutTurn {
+  prompt?: string;
+  readonly events: CodexRolloutEvent[];
+}
+
+const turnCache = new Map<string, { readonly size: number; readonly turns: RolloutTurn[] }>();
+
+function rolloutTurns(path: string): RolloutTurn[] {
+  const size = statSync(path).size;
+  const cached = turnCache.get(path);
+  if (cached?.size === size) return cached.turns;
+  const turns: RolloutTurn[] = [];
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    const event = line ? rolloutLine(line) : undefined;
+    if (!event) continue;
+    if (event.kind === "turnStarted") turns.push({ events: [] });
+    else if (event.kind === "prompt" && turns.length) turns.at(-1)!.prompt ??= event.text;
+    else if (event.kind !== "prompt") turns.at(-1)?.events.push(event);
+  }
+  turnCache.set(path, { size, turns });
+  return turns;
+}
+
+/** Journals of in-flight `mcp__codex__codex` calls (whose result, carrying the codex thread id, is not in yet). */
+const liveRollouts = new Map<string, string>();
+
+/** The item a codex MCP prompt, message or reasoning shows as; ids are shared by the live stream and history. */
+export function codexMcpItem(toolUseId: string, index: number | "prompt", event: CodexRolloutEvent | { kind: "prompt"; text: string }): ThreadItem {
+  const label = event.kind === "prompt" ? CODEX_MCP_PROMPT_LABEL : event.kind === "reasoning" ? CODEX_MCP_REASONING_LABEL : CODEX_MCP_MESSAGE_LABEL;
+  const text = "text" in event ? event.text : "";
+  return { type: "agentMessage", id: `${toolUseId}:codex:${index}`, text: `${label}\n\n${text}`, phase: "commentary", memoryCitation: null };
+}
+
+/**
+ * History of one codex MCP call: its prompt and the codex turn it ran, read back from codex's journal. `seen`
+ * counts earlier calls with the same thread and prompt in this history (the n-th such call ran the n-th such turn).
+ */
+export function codexMcpItems(
+  toolUseId: string,
+  input: Record<string, unknown>,
+  result: string | undefined,
+  seen: Map<string, number>,
+  locator: CodexRolloutLocator = defaultCodexRolloutLocator(),
+): ThreadItem[] {
+  const prompt = typeof input.prompt === "string" ? input.prompt : "";
+  const items = prompt ? [codexMcpItem(toolUseId, "prompt", { kind: "prompt", text: prompt })] : [];
+  let threadId = typeof input.threadId === "string" ? input.threadId : undefined;
+  try { threadId ??= (JSON.parse(result ?? "") as { threadId?: string }).threadId; } catch { /* not a codex result */ }
+  const path = liveRollouts.get(toolUseId) ?? (threadId ? locator.byThreadId(threadId) : undefined);
+  if (!path) return items;
+  const key = `${path}\n${prompt}`;
+  const nth = seen.get(key) ?? 0;
+  seen.set(key, nth + 1);
+  let turn: RolloutTurn | undefined;
+  try { turn = rolloutTurns(path).filter((candidate) => candidate.prompt === prompt)[nth]; } catch { return items; }
+  const said = (turn?.events ?? []).filter((event) => event.kind !== "turnComplete");
+  return [...items, ...said.map((event, index) => codexMcpItem(toolUseId, index, event))];
 }
 
 const claimedRollouts = new Set<string>();
@@ -165,6 +228,7 @@ const claimedRollouts = new Set<string>();
  * reasoning as they are appended. Purely observational: codex's own MCP server is untouched.
  */
 export function tailCodexRollout(
+  toolUseId: string,
   toolName: string,
   input: Record<string, unknown>,
   onEvent: (event: CodexRolloutEvent) => void,
@@ -184,6 +248,7 @@ export function tailCodexRollout(
         : locator.freshMcpSession(startedAt, claimedRollouts);
       if (!path) return;
       claimedRollouts.add(path);
+      liveRollouts.set(toolUseId, path);
       // A reply appends to an existing journal: only what is written from now on belongs to this call.
       if (toolName === "mcp__codex__codex-reply") offset = statSync(path).size;
     }

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { deleteSession, forkSession, renameSession, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { v7 as uuidv7 } from "uuid";
@@ -43,6 +43,8 @@ export class ClaudeThreads {
   private readonly subagentRoots = new Map<string, string>();
   /** Sub-agents spawned live, shown until Claude has written their transcript. */
   private readonly spawnedSubagents = new Map<string, Thread>();
+  /** Running sub-agents: their thread follows the transcript Claude writes (what was shown: item id → item). */
+  private readonly liveSubagents = new Map<string, { turnId?: string; shown: Map<string, string>; size: number; poll: NodeJS.Timeout; refresh?: Promise<void> }>();
   private models_?: Promise<JsonObject[]>;
   private defaultModel: string | null = null;
   private readonly rateLimitWindows = new Map<string, RateLimitWindow & { status: string }>();
@@ -215,14 +217,67 @@ export class ClaudeThreads {
     this.subagentRoots.set(childId, session.threadId);
     this.spawnedSubagents.set(childId, thread);
     this.gateway.broadcast("thread/started", { thread });
+    const live = { shown: new Map<string, string>(), size: 0, poll: setInterval(() => {
+      const summary = this.catalog.get(session.threadId);
+      if (!summary) return void this.catalog.refresh();
+      const transcript = join(summary.path.replace(/\.jsonl$/u, ""), "subagents", `${childId}.jsonl`);
+      const size = existsSync(transcript) ? statSync(transcript).size : 0;
+      if (size === live.size) return;
+      live.size = size;
+      this.subagentActivity(childId);
+    }, 1000) };
+    this.liveSubagents.set(childId, live);
   }
 
   /** A live sub-agent's task settled (Claude's task id is its agent id). */
-  public subagentFinished(childId: string): void {
+  public async subagentFinished(childId: string): Promise<void> {
     const thread = this.spawnedSubagents.get(childId);
     if (!thread) return;
+    const live = this.liveSubagents.get(childId);
+    if (live) {
+      clearInterval(live.poll);
+      await live.refresh;
+      // Claude writes the sub-agent's last records a moment after its task settles.
+      let turn = await this.refreshSubagent(childId);
+      for (let waited = 0; turn?.status === "inProgress" && waited < 10_000; waited += 250) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        turn = await this.refreshSubagent(childId);
+      }
+      this.liveSubagents.delete(childId);
+      if (turn) {
+        const status = turn.status === "inProgress" ? "completed" : turn.status;
+        this.gateway.emit(childId, "turn/completed", { threadId: childId, turn: { ...turn, status, items: [], itemsView: "notLoaded" } });
+      }
+    }
     this.spawnedSubagents.set(childId, { ...thread, status: { type: "idle" } });
     this.gateway.emit(childId, "thread/status/changed", { threadId: childId, status: { type: "idle" } });
+  }
+
+  /** Something happened in a running sub-agent (a Codex MCP call it made said something): show it now. */
+  public subagentActivity(childId: string): void {
+    const live = this.liveSubagents.get(childId);
+    if (live) live.refresh = (live.refresh ?? Promise.resolve()).then(async () => { await this.refreshSubagent(childId); });
+  }
+
+  /** Emits what the sub-agent's transcript (and its Codex calls) holds beyond what its thread already showed. */
+  private async refreshSubagent(childId: string): Promise<Turn | undefined> {
+    const live = this.liveSubagents.get(childId);
+    const turn = live && (await this.subagentProjection(childId).catch(() => undefined))?.turns.at(-1);
+    if (!live || !turn) return undefined;
+    if (live.turnId !== turn.id) {
+      live.turnId = turn.id;
+      live.shown.clear();
+      this.gateway.emit(childId, "turn/started", { threadId: childId, turn: { ...turn, items: [], itemsView: "notLoaded", status: "inProgress" } });
+    }
+    for (const item of turn.items) {
+      const json = JSON.stringify(item);
+      const shown = live.shown.get(item.id);
+      if (shown === json) continue;
+      if (shown === undefined) this.gateway.emit(childId, "item/started", { threadId: childId, turnId: turn.id, item, startedAtMs: Date.now() });
+      this.gateway.emit(childId, "item/completed", { threadId: childId, turnId: turn.id, item, completedAtMs: Date.now() });
+      live.shown.set(item.id, json);
+    }
+    return turn;
   }
 
   /** Thread with its turns (history + the live turn). */
@@ -690,7 +745,10 @@ export class ClaudeThreads {
     const threadId: string = params.threadId;
     this.gateway.subscribe(threadId, connection);
     const { thread, turns } = await this.read(threadId);
-    const settings = this.settings(threadId);
+    // A sub-agent has no session of its own: it shows the model and directory it runs with.
+    const settings = thread.parentThreadId && thread.model
+      ? { ...this.settings(threadId), cwd: thread.cwd, model: this.pickerModel(thread.model.slice(this.config.modelPrefix.length)) }
+      : this.settings(threadId);
     const response: JsonObject = {
       thread: { ...thread, turns: params.excludeTurns ? [] : turns },
       ...this.settingsResponse(settings),

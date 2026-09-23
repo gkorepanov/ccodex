@@ -1,6 +1,7 @@
 /** Owns pure projection of selected Claude transcript history into Codex protocol objects. */
 import { isAbsolute, resolve } from "node:path";
 import type { Thread, ThreadItem, TokenUsageBreakdown, Turn, UserInput } from "../../protocol/codex.js";
+import { CODEX_MCP_TOOLS, codexMcpItems } from "../codexRollout.js";
 import { normalizeClaudeModelIdentifier } from "../modelSelection.js";
 import {
   projectToolCompletion,
@@ -327,6 +328,7 @@ function assistantItems(
   threadId: string,
   completions: ReadonlyMap<string, ToolCompletion>,
   toolResponses: ReadonlySet<string>,
+  codexCalls: Map<string, number>,
 ): ThreadItem[] {
   let reasoning: Extract<ThreadItem, { type: "reasoning" }> | undefined;
   return responseBlocks(records).flatMap(({ record, block, apiBlockIndex }): ThreadItem[] => {
@@ -350,7 +352,10 @@ function assistantItems(
     if (["tool_use", "server_tool_use", "mcp_tool_use"].includes(String(block.type))
       && typeof block.id === "string" && typeof block.name === "string") {
       const item = projectTool(block as unknown as ToolUseBlock, apiBlockIndex, record, cwd, threadId, completions);
-      return item ? [item] : [];
+      if (!item) return [];
+      if (!CODEX_MCP_TOOLS.has(block.name)) return [item];
+      const result = completions.get(block.id)?.block.content;
+      return [item, ...codexMcpItems(block.id, object(block.input) ?? {}, result === undefined ? undefined : outputText(result), codexCalls)];
     }
     return [];
   });
@@ -393,6 +398,7 @@ function projectTurns(
     record.type === "user" && startsTurn(record, subagentPromptUuid) ? [index] : []);
   const completions = toolCompletions(records);
   const toolResponses = responseHasTools(records);
+  const codexCalls = new Map<string, number>();
   const turns = starts.map((start, turnIndex) => {
     const end = starts[turnIndex + 1] ?? records.length;
     const prompt = records[start] as UserRecord;
@@ -417,7 +423,7 @@ function projectTurns(
         const messageId = record.message.id!;
         if (projectedResponses.has(messageId)) continue;
         projectedResponses.add(messageId);
-        items.push(...assistantItems(responses.get(messageId)!, cwd, threadId, completions, toolResponses));
+        items.push(...assistantItems(responses.get(messageId)!, cwd, threadId, completions, toolResponses, codexCalls));
       }
       else if (record.type === "system" && record.subtype === "local_command" && typeof record.content === "string") {
         const text = record.content.replace(/<\/?local-command-std(?:out|err)>/gu, "").trim();
