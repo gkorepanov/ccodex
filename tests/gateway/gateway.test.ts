@@ -420,16 +420,6 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(after.thread.turns.map((t: any) => t.items[0].content[0].text)).toEqual(["apple", "date"]);
   });
 
-  it("continues Claude after an edit of its first message", async () => {
-    const threadId = await claudeThread();
-    const { turn } = await client.turn(threadId, "apple");
-    await client.request("thread/revert", { threadId, beforeTurnId: turn.id });
-    await client.turn(threadId, "cherry");
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
-    expect(itemsOf(thread.turns)).toEqual(["user:cherry", "agent:claude: cherry"]);
-  });
-
   it("announces a Claude sub-agent before its spawn completes, before Claude has written its transcript", async () => {
     const threadId = await claudeThread();
     const before = client.messages.length;
@@ -562,15 +552,67 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(itemsOf(thread.turns)).toEqual(["user:first", "agent:claude: first", "contextCompaction", "user:second, edited", "agent:gpt: second, edited"]);
   });
 
-  it("switches claude → gpt again after an edit of the thread's first message", async () => {
-    const threadId = await claudeThread();
-    const { turn: first } = await client.turn(threadId, "first");
-    await client.turn(threadId, "second", { model: "gpt-6-luna" });
-    await client.request("thread/revert", { threadId, beforeTurnId: first.id });
-    await client.turn(threadId, "first, edited");
-    await client.turn(threadId, "second, again", { model: "gpt-6-luna" });
+  // The live matrix (experiments/2026_09_23_thin_rewrite/scripts/edit_switch.mjs): a step is a turn, an edit of
+  // turn N (Desktop: revert before it, then the step after it sends the new text) or a fork at turn N.
+  type Step = { model: string; text: string } | { revert: number } | { fork: number; model: string; text: string };
+  const GPT = "gpt-6-luna";
+  const on = (model: string, text: string) => ({ model, text });
+  const edits: Array<[string, string, Step[], string[], string[]?]> = [
+    ["S1 claude→gpt, edit the gpt turn", CLAUDE, [on(CLAUDE, "one"), on(GPT, "two"), { revert: 1 }, on(GPT, "two, edited"), on(GPT, "three")],
+      ["user:one", "agent:claude: one", "contextCompaction", "user:two, edited", "agent:gpt: two, edited", "user:three", "agent:gpt: three"]],
+    ["S2 gpt→claude, edit the claude turn", GPT, [on(GPT, "one"), on(CLAUDE, "two"), { revert: 1 }, on(CLAUDE, "two, edited"), on(CLAUDE, "three")],
+      ["user:one", "agent:gpt: one", "contextCompaction", "user:two, edited", "agent:claude: two, edited", "user:three", "agent:claude: three"]],
+    ["S3 claude→gpt, edit the first message, switch again", CLAUDE, [on(CLAUDE, "one"), on(GPT, "two"), { revert: 0 }, on(CLAUDE, "one, edited"), on(GPT, "two, again")],
+      ["user:one, edited", "agent:claude: one, edited", "contextCompaction", "user:two, again", "agent:gpt: two, again"]],
+    ["S4 claude→gpt, edit the gpt turn on claude, switch again", CLAUDE, [on(CLAUDE, "one"), on(GPT, "two"), { revert: 1 }, on(CLAUDE, "two, on claude"), on(GPT, "three")],
+      ["user:one", "agent:claude: one", "contextCompaction", "user:two, on claude", "agent:claude: two, on claude", "contextCompaction", "user:three", "agent:gpt: three"]],
+    ["S5 claude→gpt→claude, edit the last turn twice", CLAUDE, [on(CLAUDE, "one"), on(GPT, "two"), on(CLAUDE, "three"), { revert: 2 }, on(CLAUDE, "three, edited"), { revert: 3 }, on(GPT, "three, on gpt")],
+      ["user:one", "agent:claude: one", "contextCompaction", "user:two", "agent:gpt: two", "user:three, on gpt", "agent:gpt: three, on gpt"]],
+    ["S6 claude→gpt, edit the gpt turn, fork at it", CLAUDE, [on(CLAUDE, "one"), on(GPT, "two"), { revert: 1 }, on(GPT, "two, edited"), { fork: 2, ...on(GPT, "forked") }],
+      ["user:one", "agent:claude: one", "contextCompaction", "user:two, edited", "agent:gpt: two, edited"],
+      ["user:one", "agent:claude: one", "contextCompaction", "user:two, edited", "agent:gpt: two, edited", "user:forked", "agent:gpt: forked"]],
+    ["S7 gpt→claude, edit the first message, switch again", GPT, [on(GPT, "one"), on(CLAUDE, "two"), { revert: 0 }, on(GPT, "one, edited"), on(CLAUDE, "two, again")],
+      ["user:one, edited", "agent:gpt: one, edited", "contextCompaction", "user:two, again", "agent:claude: two, again"]],
+    ["S8 claude only, edit the only message twice", CLAUDE, [on(CLAUDE, "one"), { revert: 0 }, on(CLAUDE, "one, edited"), { revert: 1 }, on(CLAUDE, "one, again")],
+      ["user:one, again", "agent:claude: one, again"]],
+    ["S9 gpt only, edit the first message", GPT, [on(GPT, "one"), on(GPT, "two"), { revert: 0 }, on(GPT, "one, edited")],
+      ["user:one, edited", "agent:gpt: one, edited"]],
+  ];
+  it.each(edits)("edits messages around switches: %s", async (_name, first, steps, expected, expectedFork) => {
+    const other = await gateway.connect();
+    const { thread: started } = await client.request("thread/start", { model: first, cwd: "/work" });
+    const threadId: string = started.id;
+    const turns: string[] = [];
+    for (const step of steps) {
+      if ("revert" in step) {
+        await client.request("thread/revert", { threadId, beforeTurnId: turns[step.revert] });
+      } else if ("fork" in step) {
+        const { thread: fork } = await client.request("thread/fork", { threadId, lastTurnId: turns[step.fork] });
+        await client.turn(fork.id, step.text, { model: step.model });
+        const { thread } = await client.request("thread/read", { threadId: fork.id, includeTurns: true });
+        expect(itemsOf(thread.turns)).toEqual(expectedFork);
+      } else {
+        const { turn } = await client.turn(threadId, step.text, { model: step.model });
+        expect(turn.status).toBe("completed");
+        turns.push(turn.id);
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
     const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
-    expect(itemsOf(thread.turns)).toEqual(["user:first, edited", "agent:claude: first, edited", "contextCompaction", "user:second, again", "agent:gpt: second, again"]);
+    expect(itemsOf(thread.turns)).toEqual(expected);
+    // Another window never hears the thread was archived (switch backends dropped by an edit are).
+    expect(other.notifications("thread/archived", threadId)).toEqual([]);
+  });
+
+  it("keeps a Claude thread's name through an edit of its only message", async () => {
+    const threadId = await claudeThread();
+    const { turn } = await client.turn(threadId, "one");
+    await client.request("thread/name/set", { threadId, name: "Named" });
+    await client.request("thread/revert", { threadId, beforeTurnId: turn.id });
+    expect((await client.request("thread/read", { threadId })).thread.name).toBe("Named");
+    await client.turn(threadId, "one, edited");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect((await client.request("thread/read", { threadId })).thread.name).toBe("Named");
   });
 
   it("fails a switch to gpt Desktop can see fail: the failed turn was announced as started", async () => {
