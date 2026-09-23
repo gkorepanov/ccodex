@@ -155,18 +155,40 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(answer.text).toBe("side: what did I say?");
   });
 
-  it("maps /goal to Claude's native goal", async () => {
+  it("maps /goal to Claude's native goal the way stock runs goals", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "start");
+    const before = client.messages.length;
     const set = await client.request("thread/goal/set", { threadId, objective: "ship it" });
     expect(set.goal).toMatchObject({ objective: "ship it", status: "active" });
-    await client.waitFor("turn/completed", (params) => params.threadId === threadId && params.turn.id !== undefined);
+    // Desktop adds the goal message itself on the answer; the goal's turn starts after it and shows no user message.
+    await client.waitFor("turn/completed", (params) => params.threadId === threadId && fakeClaude.prompts.at(-1)?.text === "/goal ship it");
+    const sequence = client.messages.slice(before).map((message) => message.method ?? (message.result?.goal ? "answer" : null));
+    expect(sequence.filter((method) => method === "answer" || method === "turn/started")).toEqual(["answer", "turn/started"]);
+    const turn = client.messages.slice(before).find((message) => message.method === "turn/started")!.params.turn;
+    expect(client.notifications("item/started", threadId).filter((params) => params.params.turnId === turn.id && params.params.item.type === "userMessage")).toEqual([]);
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect((await client.request("thread/goal/get", { threadId })).goal).toMatchObject({ objective: "ship it", status: "active" });
     expect(fakeClaude.prompts.map((prompt) => prompt.text)).toContain("/goal ship it");
+
+    // Claude drops a met goal: reported complete once, then Desktop's clear sends Claude nothing.
+    await client.turn(threadId, "this meets the goal: ship it");
+    await client.waitFor("thread/goal/updated", (params) => params.threadId === threadId && params.goal.status === "complete");
+    const prompts = fakeClaude.prompts.length;
+    expect(await client.request("thread/goal/clear", { threadId })).toEqual({ cleared: true });
+    expect(fakeClaude.prompts).toHaveLength(prompts);
+    expect((await client.request("thread/goal/get", { threadId })).goal).toBeNull();
+
+    await client.request("thread/goal/set", { threadId, objective: "again" });
+    await client.waitFor("turn/completed", (params) => params.threadId === threadId && fakeClaude.prompts.at(-1)?.text === "/goal again");
+    await new Promise((resolve) => setTimeout(resolve, 300));
     await client.request("thread/goal/clear", { threadId });
+    expect(fakeClaude.prompts.at(-1)?.text).toBe("/goal clear");
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect((await client.request("thread/goal/get", { threadId })).goal).toBeNull();
+    const history = await client.request("thread/read", { threadId, includeTurns: true });
+    const texts = history.thread.turns.flatMap((t: any) => t.items).filter((item: any) => item.type === "userMessage").map((item: any) => item.content[0].text);
+    expect(texts).toEqual(["start", "/goal ship it", "this meets the goal: ship it", "/goal again"]);
   });
 
   it("keeps a Claude default model out of Codex's config.toml, showing it through config/read", async () => {

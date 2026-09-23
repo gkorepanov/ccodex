@@ -398,9 +398,9 @@ function projectTurns(
     const prompt = records[start] as UserRecord;
     const turnRecords = records.slice(start, end);
     const input = userInputs(prompt);
-    const manualCompaction = input.length === 1 && input[0]?.type === "text"
-      && /^\/compact(?:\s|$)/u.test(input[0].text);
-    const items: ThreadItem[] = manualCompaction
+    const hiddenCommand = input.length === 1 && input[0]?.type === "text"
+      && /^\/(?:compact(?:\s|$)|goal clear$)/u.test(input[0].text);
+    const items: ThreadItem[] = hiddenCommand
       ? []
       : [{ type: "userMessage", id: prompt.uuid, clientId: null, content: input }];
     const responses = new Map<string, AssistantRecord[]>();

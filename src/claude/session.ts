@@ -253,7 +253,8 @@ export class ClaudeSession {
     const uuid: string = params.turnId ?? randomUUID();
     await this.applyTurnSettings(params);
     const content = await claudeContent(input, this.settings.cwd);
-    const hidden = typeof content === "string" && /^\/compact(?:\s|$)/u.test(content);
+    // Desktop shows `/goal` messages itself.
+    const hidden = typeof content === "string" && /^\/(?:compact|goal)(?:\s|$)/u.test(content);
     if (this.turn) {
       // Claude folds a message sent mid-turn into the running turn, like a steer.
       this.pendingInputs.set(uuid, { input, clientId: params.clientUserMessageId ?? null, hidden });

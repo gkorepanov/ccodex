@@ -524,27 +524,36 @@ export class ClaudeThreads {
         await this.session(threadId).inject((params.items ?? []).map((item: JsonObject) => JSON.stringify(item)).join("\n"));
         return {};
       }
-      case "thread/goal/get": return { goal: this.goal(threadId) };
+      case "thread/goal/get": {
+        // Claude drops a goal once it is met; Codex clients clear a completed goal themselves.
+        const goal = this.goal(threadId);
+        return { goal: goal?.status === "complete" ? null : goal };
+      }
       case "thread/goal/set": {
         const now = Math.floor(Date.now() / 1000);
         const current = this.goal(threadId);
         if (params.objective) {
-          await this.session(threadId).command(`/goal ${params.objective}`);
+          const session = this.session(threadId);
           const goal = {
             threadId, objective: params.objective, status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0,
             createdAt: now, updatedAt: now,
           };
-          this.gateway.emit(threadId, "thread/goal/updated", { threadId, turnId: null, goal });
+          // Like stock, the goal's turn starts after the answer: Desktop shows the goal message itself on the answer.
+          setImmediate(() => {
+            this.gateway.emit(threadId, "thread/goal/updated", { threadId, turnId: null, goal });
+            session.command(`/goal ${params.objective}`)
+              .catch((error: unknown) => this.logger.warn("claude.goal.start-failed", { threadId, error: String(error) }));
+          });
           return { goal };
         }
-        if (params.status && params.status !== "active" && current) await this.session(threadId).command("/goal clear");
+        if (params.status && params.status !== "active" && current?.status === "active") await this.session(threadId).command("/goal clear");
         return { goal: current ? { ...current, status: params.status ?? current.status, updatedAt: now } : null };
       }
       case "thread/goal/clear": {
-        const cleared = this.goal(threadId) !== null;
-        if (cleared) await this.session(threadId).command("/goal clear");
+        const goal = this.goal(threadId);
+        if (goal?.status === "active") await this.session(threadId).command("/goal clear");
         this.gateway.emit(threadId, "thread/goal/cleared", { threadId });
-        return { cleared };
+        return { cleared: goal !== null };
       }
       case "thread/queue/list": return { data: this.sessions.get(threadId)?.queued ?? [], nextCursor: null };
       case "thread/queue/add": {
