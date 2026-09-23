@@ -365,7 +365,10 @@ function turnStatus(records: readonly TranscriptChainRecord[], hasFollowingTurn:
   if (failed) return "failed";
   const lastAssistant = records.findLast((record): record is AssistantRecord => record.type === "assistant");
   const stopReason = lastAssistant?.message.stop_reason;
-  const terminal = isCompactBoundary(records.at(-1)!)
+  // A local command (`/usage`, `/cost`...) ends with its output and no model reply.
+  const last = records.at(-1)!;
+  const localCommand = last.type === "system" && last.subtype === "local_command";
+  const terminal = localCommand || isCompactBoundary(last)
     || stopReason !== null && stopReason !== undefined && !NON_TERMINAL_STOPS.has(stopReason);
   return terminal || hasFollowingTurn ? "completed" : "inProgress";
 }

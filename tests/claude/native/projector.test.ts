@@ -157,4 +157,14 @@ describe("native Claude transcript projector", () => {
     expect(ids).toContain("msg_011CezukZZwYK9qbQqHK4dXw:0");
     expect(ids).toContain("msg_011Cezuoy2vGZPzXLyrRUhqN:0");
   });
+  it("completes a local command turn (its output, no model reply)", async () => {
+    const user = prompt("prompt-1", null, "/usage", 1);
+    const output = {
+      type: "system", subtype: "local_command", ...envelope("output-1", user.uuid, 2), level: "info",
+      content: "<local-command-stdout>You are currently using your subscription</local-command-stdout>",
+    } as unknown as TranscriptRecord;
+    const { thread } = await projectTranscript({ sessionId: "session", path: "/tmp/session.jsonl", records: [user, output] });
+    expect(thread.turns.map((turn) => turn.status)).toEqual(["completed"]);
+    expect(thread.status).toEqual({ type: "idle" });
+  });
 });
