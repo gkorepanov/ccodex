@@ -298,6 +298,27 @@ export class Gateway {
       on(method, (connection, params) => this.remote.pairing(method, params, connection.clientName));
     }
     on("thread/section/move", (connection, params) => this.catalog.moveInSection(connection, params));
+    // The App saves the picked model as Codex's default. A Claude one must not reach config.toml (plain `codex`
+    // and every stock thread without an explicit model would use it): it stays in meta and shows in config/read.
+    for (const method of ["config/batchWrite", "config/value/write"]) {
+      on(method, (connection, params) => {
+        const edits: JsonObject[] = method === "config/batchWrite" ? params.edits : [params];
+        const model = edits.find((edit) => edit.keyPath === "model");
+        const effort = edits.find((edit) => edit.keyPath === "model_reasoning_effort");
+        const current = this.meta.defaultModel;
+        if (model && !this.claude.isClaudeModel(model.value) && current) this.meta.setDefaultModel(null);
+        if (model ? !this.claude.isClaudeModel(model.value) : !(current && effort)) return connection.upstream.request(method, params);
+        this.meta.setDefaultModel({ model: model?.value ?? current!.model, effort: effort?.value ?? (model ? null : current!.effort) });
+        const { keyPath: _keyPath, mergeStrategy: _mergeStrategy, value: _value, ...rest } = params;
+        return connection.upstream.request("config/batchWrite", { ...rest, edits: edits.filter((edit) => edit !== model && edit !== effort) });
+      });
+    }
+    on("config/read", async (connection, params) => {
+      const result = await connection.upstream.request("config/read", params);
+      const preferred = this.meta.defaultModel;
+      if (!preferred) return result;
+      return { ...result, config: { ...result.config, model: preferred.model, ...(preferred.effort ? { model_reasoning_effort: preferred.effort } : {}) } };
+    });
   }
 }
 

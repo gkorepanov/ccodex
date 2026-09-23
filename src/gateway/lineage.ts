@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { codexPermissions } from "../claude/sdk.js";
 import type { Provider, Segment } from "../meta.js";
-import { invalidRequest, type JsonObject, type Thread, type Turn } from "../protocol/codex.js";
+import { invalidRequest, requestedModel, type JsonObject, type Thread, type Turn } from "../protocol/codex.js";
 import { historyCursors, paginateItems, paginateTurns, startedTurn } from "../protocol/turnPagination.js";
 import type { Connection } from "./connection.js";
 import type { Gateway } from "./server.js";
@@ -61,7 +61,7 @@ export class Lineages {
   public switchRequested(method: string, params: JsonObject): boolean {
     if (method !== "turn/start" && method !== "thread/settings/update") return false;
     if (this.pending.has(params.threadId)) return true;
-    const target = this.providerOf(params.model);
+    const target = this.providerOf(requestedModel(params));
     return target !== undefined && target !== this.segments(params.threadId).at(-1)!.provider;
   }
 
@@ -84,7 +84,7 @@ export class Lineages {
     const segments = this.segments(publicId);
     const current = segments.at(-1)!;
     if (method === "thread/settings/update" || method === "turn/start") {
-      const target = this.providerOf(params.model);
+      const target = this.providerOf(requestedModel(params));
       if (target && target !== current.provider) {
         if (method === "thread/settings/update") {
           this.pending.set(publicId, params);
@@ -96,7 +96,7 @@ export class Lineages {
       const pending = this.pending.get(publicId);
       this.pending.delete(publicId);
       if (!target && pending && method === "turn/start") {
-        return this.switchProvider(connection, publicId, segments, { ...pending, ...params, model: pending.model });
+        return this.switchProvider(connection, publicId, segments, { ...pending, ...params, model: requestedModel(pending) });
       }
     }
     if (segments.length === 1) return this.forward(connection, current, method, params);
@@ -300,8 +300,9 @@ export class Lineages {
 
   /**
    * `turn/start` with the other provider's model: summarize the current segment, start a native thread on the
-   * other provider with the summary injected, then run the user's turn there. Answers at once with the turn that
-   * shows the compaction; the rest runs in the background.
+   * other provider with the summary injected, then run the user's turn there. A turn showing the compaction is
+   * streamed meanwhile; the answer is the user's turn itself, so the client's optimistic message lands in the
+   * turn that carries it (live view = history). On failure the answer is the compaction turn, with an error.
    */
   private async switchProvider(connection: Connection, publicId: string, segments: Segment[], params: JsonObject): Promise<unknown> {
     const source = segments.at(-1)!;
@@ -317,12 +318,15 @@ export class Lineages {
       let summary = "";
       session.compactSummary = (text) => { summary = text; };
       const turn = await session.command(`/compact ${COMPACT_PROMPT}`);
-      void session.turnDone(turn.id).then(async (status) => {
+      try {
+        const status = await session.turnDone(turn.id);
         session.compactSummary = undefined;
         if (status !== "completed" || !summary) throw new Error(`compaction ${status}`);
-        await this.toCodex(connection, publicId, segments, { ...source, lastTurnId: turn.id }, summary, params);
-      }).catch((error: unknown) => fail(turn.id, error));
-      return { turn };
+        return await this.toCodex(connection, publicId, segments, { ...source, lastTurnId: turn.id }, summary, params);
+      } catch (error) {
+        fail(turn.id, error);
+        return { turn };
+      }
     }
     // codex → claude: stock compaction is encrypted, so an ephemeral fork writes a summary with the same model.
     const cwd = (await this.thread(source)).cwd;
@@ -344,7 +348,7 @@ export class Lineages {
         },
       });
     };
-    void (async () => {
+    try {
       const summary = await this.gptSummary(source.threadId);
       const last: JsonObject = await this.gateway.stock.request("thread/turns/list", { threadId: source.threadId, limit: 1, sortDirection: "desc" });
       await session.inject(`${SUMMARY_PREFIX}\n${summary}`);
@@ -356,9 +360,11 @@ export class Lineages {
       ]);
       finish("completed");
       connection.provider = "claude";
-      await this.gateway.claude.handle(connection, "turn/start", { ...params, threadId: session.threadId });
-    })().catch((error: unknown) => finish("failed", fail(turnId, error)));
-    return { turn: startedTurn(turn) };
+      return await this.gateway.claude.handle(connection, "turn/start", { ...params, threadId: session.threadId });
+    } catch (error) {
+      finish("failed", fail(turnId, error));
+      return { turn: startedTurn(turn) };
+    }
   }
 
   private async gptSummary(threadId: string): Promise<string> {
@@ -370,11 +376,11 @@ export class Lineages {
     }
   }
 
-  private async toCodex(connection: Connection, publicId: string, segments: Segment[], source: Segment, summary: string, params: JsonObject): Promise<void> {
+  private async toCodex(connection: Connection, publicId: string, segments: Segment[], source: Segment, summary: string, params: JsonObject): Promise<unknown> {
     const settings = this.gateway.claude.settings(source.threadId);
     const permissions = codexPermissions(settings.permissionMode, settings.cwd);
     const started: JsonObject = await connection.upstream.request("thread/start", {
-      model: params.model, cwd: settings.cwd,
+      model: requestedModel(params), cwd: settings.cwd,
       approvalPolicy: params.approvalPolicy ?? permissions.approvalPolicy,
       approvalsReviewer: params.approvalsReviewer ?? permissions.approvalsReviewer,
       ...(params.permissions || params.sandboxPolicy ? {} : { permissions: permissions.activePermissionProfile.id }),
@@ -393,6 +399,6 @@ export class Lineages {
     connection.provider = "codex";
     const name = (await this.thread(this.gateway.meta.row(publicId))).name;
     if (name) await connection.upstream.request("thread/name/set", { threadId, name: name.replace(/\s*✳️$/u, "") }).catch(() => undefined);
-    await connection.upstream.request("turn/start", { ...params, threadId });
+    return connection.upstream.request("turn/start", { ...params, threadId });
   }
 }

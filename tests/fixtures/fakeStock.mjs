@@ -76,6 +76,7 @@ function paginate(list, params) {
   return { data, nextCursor: offset + limit < list.length ? String(offset + limit) : null, backwardsCursor: null };
 }
 
+const config = { model: "gpt-6-luna" };
 const handlers = {
   initialize: (connection) => { connection.initialized = true; return { userAgent: "fake-stock/0.156.0", codexHome: "/fake", platformFamily: "unix", platformOs: "linux" }; },
   "thread/start": (connection, params) => {
@@ -138,6 +139,12 @@ const handlers = {
   "model/list": () => ({ data: [{ id: "gpt-6-luna", model: "gpt-6-luna", displayName: "GPT-6 Luna", isDefault: true }], nextCursor: null }),
   "skills/list": (_connection, params) => ({ data: (params.cwds ?? []).map((cwd) => ({ cwd, skills: [{ name: "stock-skill" }], errors: [] })) }),
   "account/rateLimits/read": () => ({ rateLimits: { limitId: "codex", primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: null }, secondary: null }, rateLimitsByLimitId: null }),
+  "config/batchWrite": (_connection, params) => {
+    for (const edit of params.edits) config[edit.keyPath] = edit.value;
+    return { status: "ok", version: "v", filePath: "/fake/config.toml", overriddenMetadata: null };
+  },
+  "config/read": () => ({ config: { ...config }, origins: {} }),
+  "test/config": () => ({ config: { ...config } }),
   // Test hooks.
   "test/threads": () => ({ threads: [...threads.values()].map((thread) => ({ ...thread, subscribers: thread.subscribers.size })) }),
   "test/approval": async (connection) => ({ decision: await connection.ask("item/commandExecution/requestApproval", { threadId: "stock-thread", command: "ls" }) }),

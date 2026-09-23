@@ -25,6 +25,8 @@ export interface MetaData {
   sectionOrder: Record<string, string[]>;
   /** Claude threads rolled back but not continued yet: the kept history ends at this record. */
   leaves: Record<string, string>;
+  /** Default model the App picked when it is a Claude one (never written to Codex's config.toml). */
+  defaultModel?: { model: string; effort: string | null } | null;
 }
 
 /**
@@ -40,7 +42,7 @@ export class Meta {
     const raw = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as Partial<MetaData> : {};
     this.data = {
       lineages: raw.lineages ?? {}, archived: raw.archived ?? [], sections: raw.sections ?? {},
-      sectionOrder: raw.sectionOrder ?? {}, leaves: raw.leaves ?? {},
+      sectionOrder: raw.sectionOrder ?? {}, leaves: raw.leaves ?? {}, defaultModel: raw.defaultModel ?? null,
     };
     this.reindex();
   }
@@ -117,6 +119,13 @@ export class Meta {
 
   public setSectionOrder(sectionId: string, ids: string[]): void {
     this.data.sectionOrder[sectionId] = ids;
+    this.save();
+  }
+
+  public get defaultModel(): MetaData["defaultModel"] { return this.data.defaultModel; }
+
+  public setDefaultModel(value: MetaData["defaultModel"]): void {
+    this.data.defaultModel = value;
     this.save();
   }
 

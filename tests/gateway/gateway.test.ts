@@ -144,10 +144,23 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect((await client.request("thread/goal/get", { threadId })).goal).toBeNull();
   });
 
+  it("keeps a Claude default model out of Codex's config.toml, showing it through config/read", async () => {
+    const edits = (model: string, effort: string) => [
+      { keyPath: "model", value: model, mergeStrategy: "upsert" }, { keyPath: "model_reasoning_effort", value: effort, mergeStrategy: "upsert" }];
+    await client.request("config/batchWrite", { edits: edits(CLAUDE, "max"), filePath: null, expectedVersion: null });
+    expect((await client.request("test/config")).config).toEqual({ model: "gpt-6-luna" });
+    expect((await client.request("config/read", {})).config).toMatchObject({ model: CLAUDE, model_reasoning_effort: "max" });
+    await client.request("config/value/write", { keyPath: "model_reasoning_effort", value: "ultra", mergeStrategy: "upsert" });
+    expect((await client.request("config/read", {})).config).toMatchObject({ model: CLAUDE, model_reasoning_effort: "ultra" });
+    await client.request("config/batchWrite", { edits: edits("gpt-6-sol", "high") });
+    expect((await client.request("config/read", {})).config).toEqual({ model: "gpt-6-sol", model_reasoning_effort: "high" });
+  });
+
   it("switches claude → gpt: native /compact, new stock thread with the summary, stitched history", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "first");
-    await client.request("turn/start", { threadId, model: "gpt-6-luna", input: text("second") });
+    // The answer is the user's turn itself (the client's optimistic message belongs there), not the compaction.
+    const { turn: answered } = await client.request("turn/start", { threadId, model: "gpt-6-luna", input: text("second") });
     await client.waitFor("turn/completed", (params) => params.threadId === threadId && client.notifications("item/completed", threadId)
       .some((message) => message.params.item.text === "gpt: second"));
     const { threads } = await client.request("test/threads");
@@ -157,6 +170,7 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(meta.lineages[threadId].map((segment: any) => segment.provider)).toEqual(["claude", "codex"]);
     const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
     expect(itemsOf(thread.turns)).toEqual(["user:first", "agent:claude: first", "contextCompaction", "user:second", "agent:gpt: second"]);
+    expect(thread.turns.at(-1).id).toBe(answered.id);
     const list = await client.request("thread/list", { limit: 200 });
     // The stock backend is never listed on its own (and every frame names it by the public id).
     expect(backend.id).toBe(threadId);
@@ -174,13 +188,14 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
   it("switches gpt → claude: summary from an ephemeral fork, injected without a reply", async () => {
     const threadId = await stockThread();
     await client.turn(threadId, "first");
-    await client.request("turn/start", { threadId, model: CLAUDE, input: text("second") });
+    const { turn: answered } = await client.request("turn/start", { threadId, model: CLAUDE, input: text("second") });
     await client.waitFor("item/completed", (params) => params.threadId === threadId && params.item.text === "claude: second");
     const injected = fakeClaude.prompts.find((prompt) => !prompt.shouldQuery);
     expect(injected?.text).toContain(`GPT-SUMMARY(${threadId})`);
     await new Promise((resolve) => setTimeout(resolve, 200));
     const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
     expect(itemsOf(thread.turns)).toEqual(["user:first", "agent:gpt: first", "contextCompaction", "user:second", "agent:claude: second"]);
+    expect(thread.turns.at(-1).id).toBe(answered.id);
     const list = await client.request("thread/list", { limit: 200 });
     expect(list.data.filter((row: any) => row.modelProvider === "claude" && row.preview === "")).toHaveLength(0);
     // Forking at the gpt turn forks the stock segment only.

@@ -7,7 +7,7 @@ import type { Config } from "../config.js";
 import type { Connection } from "../gateway/connection.js";
 import type { Gateway } from "../gateway/server.js";
 import type { Logger } from "../log.js";
-import { invalidParams, invalidRequest, type JsonObject, type Thread, type Turn } from "../protocol/codex.js";
+import { invalidParams, invalidRequest, requestedModel, type JsonObject, type Thread, type Turn } from "../protocol/codex.js";
 import { historyCursors, paginateItems, paginateTurns, startedTurn } from "../protocol/turnPagination.js";
 import { normalizeUserInput } from "./inputMapper.js";
 import { claudeModelLabel, modelCatalogValue, normalizeClaudeModelIdentifier } from "./modelSelection.js";
@@ -280,12 +280,13 @@ export class ClaudeThreads {
   }
 
   public settingsFrom(params: JsonObject, current: SessionSettings): SessionSettings {
-    const model = typeof params.model === "string" && this.isClaudeModel(params.model) ? this.modelValue(params.model) : current.model;
+    const requested = requestedModel(params);
+    const model = typeof requested === "string" && this.isClaudeModel(requested) ? this.modelValue(requested) : current.model;
     const tier = params.serviceTier === undefined ? undefined : params.serviceTier;
     return {
       cwd: params.cwd ?? current.cwd,
       model,
-      effort: params.effort === undefined ? current.effort : params.effort,
+      effort: params.effort ?? params.collaborationMode?.settings?.reasoning_effort ?? current.effort,
       fast: tier === undefined ? current.fast : tier === "fast" || tier === "priority",
       permissionMode: permissionModeFrom(params) ?? current.permissionMode,
     };

@@ -128,6 +128,9 @@ export class RpcFailure extends Error {
   }
 }
 
+/** The model a turn/start or settings update asks for (Desktop sends it in the collaboration mode, with model null). */
+export const requestedModel = (params: JsonObject): unknown => params.model ?? params.collaborationMode?.settings?.model;
+
 export const invalidParams = (message: string) => new RpcFailure(-32602, message);
 export const invalidRequest = (message: string) => new RpcFailure(-32600, message);
 export const internalError = (message: string) => new RpcFailure(-32603, message);
