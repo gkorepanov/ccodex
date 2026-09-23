@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { HybridConfig } from "../config/config.js";
+import type { Config } from "../config.js";
 import type { DaemonCommand } from "../cli/args.js";
 import { probeAppServer, type ProbeInfo } from "./probe.js";
 import {
@@ -48,7 +48,7 @@ type JsonOutput = Record<string, string | number | boolean | undefined>;
 
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-function paths(config: HybridConfig, wrapperPath: string): DaemonPaths {
+function paths(config: Config, wrapperPath: string): DaemonPaths {
   const stateDirectory = daemonStateDirectory();
   return {
     stateDirectory,
@@ -95,12 +95,12 @@ class HybridDaemon {
   private readonly paths: DaemonPaths;
   private version?: Promise<string>;
 
-  public constructor(private readonly config: HybridConfig, wrapperPath: string) {
+  public constructor(private readonly config: Config, wrapperPath: string) {
     this.paths = paths(config, wrapperPath);
   }
 
   private getVersion(): Promise<string> {
-    return this.version ??= stockVersion(this.config.realCodex);
+    return this.version ??= stockVersion(this.config.codex);
   }
 
   public run(invocation: DaemonInvocation): Promise<JsonOutput> {
@@ -333,7 +333,7 @@ class HybridDaemon {
 }
 
 export function runDaemonCommand(
-  config: HybridConfig,
+  config: Config,
   invocation: DaemonInvocation,
   wrapperPath: string,
 ): Promise<JsonOutput> {

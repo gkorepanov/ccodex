@@ -1,10 +1,8 @@
-import type { ThreadItem } from "../codex/generated/v2/ThreadItem.js";
-import type { ThreadItemsListParams } from "../codex/generated/v2/ThreadItemsListParams.js";
-import type { ThreadItemsListResponse } from "../codex/generated/v2/ThreadItemsListResponse.js";
-import type { ThreadTurnsListParams } from "../codex/generated/v2/ThreadTurnsListParams.js";
-import type { ThreadTurnsListResponse } from "../codex/generated/v2/ThreadTurnsListResponse.js";
-import type { Turn } from "../codex/generated/v2/Turn.js";
-import { invalidRequest } from "./errors.js";
+import { invalidRequest, type ThreadItem, type Turn } from "./codex.js";
+
+interface TurnsListParams { cursor?: string | null; limit?: number | null; sortDirection?: "asc" | "desc" | null; itemsView?: "notLoaded" | "summary" | "full" | null }
+interface ItemsListParams { cursor?: string | null; limit?: number | null; sortDirection?: "asc" | "desc" | null; turnId?: string | null }
+interface Page<T> { data: T[]; nextCursor: string | null; backwardsCursor: string | null }
 
 interface AnchorCursor {
   anchor: string;
@@ -105,9 +103,9 @@ export function summaryItems(turn: Turn): ThreadItem[] {
 
 export function paginateTurns(
   turns: readonly Turn[],
-  params: Omit<ThreadTurnsListParams, "threadId">,
+  params: TurnsListParams,
   legacyPrefixes: readonly string[] = [],
-): ThreadTurnsListResponse {
+): Page<Turn> {
   const page = paginate(turns, "turnId", (turn) => turn.id, params, legacyPrefixes, "desc");
   const itemsView = params.itemsView ?? "summary";
   return {
@@ -122,9 +120,9 @@ export function paginateTurns(
 
 export function paginateItems(
   turns: readonly Turn[],
-  params: Omit<ThreadItemsListParams, "threadId">,
+  params: ItemsListParams,
   legacyPrefixes: readonly string[] = [],
-): ThreadItemsListResponse {
+): Page<{ turnId: string; item: ThreadItem }> {
   const entries = turns.flatMap((turn) => turn.items.map((item) => ({ turnId: turn.id, item })));
   return paginate(entries, "itemId", (entry) => entry.item.id, params, legacyPrefixes, "asc",
     (entry) => !params.turnId || entry.turnId === params.turnId);

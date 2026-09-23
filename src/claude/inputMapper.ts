@@ -1,9 +1,8 @@
-import { readFile, realpath } from "node:fs/promises";
-import { extname, isAbsolute, relative, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { extname, isAbsolute, resolve } from "node:path";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { UserInput } from "../codex/generated/v2/UserInput.js";
-import { invalidParams } from "../protocol/errors.js";
-import { decodeClaudeSkillChips } from "./skillCodec.js";
+import { invalidParams, type UserInput } from "../protocol/codex.js";
+import { decodeClaudeSkillChips } from "./sdk.js";
 
 const mediaTypes: Record<string, string> = {
   ".gif": "image/gif",
@@ -15,79 +14,40 @@ const mediaTypes: Record<string, string> = {
 
 const dataImageUrl = /^data:(image\/[a-z+.-]+);base64,([\s\S]*)$/i;
 
-interface InputContext {
-  readonly cwd: string;
-  readonly sandboxPolicy: unknown;
-  readonly origin?: "human";
-}
-
-async function allowedImagePath(path: string, context: InputContext): Promise<string> {
-  const candidate = await realpath(isAbsolute(path) ? path : resolve(context.cwd, path));
-  const sandbox = context.sandboxPolicy && typeof context.sandboxPolicy === "object" && "type" in context.sandboxPolicy
-    ? context.sandboxPolicy as { type: unknown; writableRoots?: unknown }
-    : undefined;
-  if (sandbox?.type === "dangerFullAccess") return candidate;
-  const roots = [context.cwd, ...(Array.isArray(sandbox?.writableRoots) ? sandbox.writableRoots.filter((root): root is string => typeof root === "string") : [])];
-  for (const root of roots) {
-    const canonicalRoot = await realpath(root).catch(() => undefined);
-    if (!canonicalRoot) continue;
-    const child = relative(canonicalRoot, candidate);
-    if (child === "" || (!child.startsWith("..") && !isAbsolute(child))) return candidate;
-  }
-  throw invalidParams(`Claude local image '${path}' is outside the thread's readable workspace.`);
-}
-
-export async function mapUserInput(input: readonly UserInput[], uuid?: string, context?: InputContext): Promise<SDKUserMessage> {
-  const content: Array<Record<string, unknown>> = [];
-  let decodedSkill = false;
+/** Codex user input → Claude message content (string when it is text only, so slash commands work). */
+export async function claudeContent(input: readonly UserInput[], cwd: string): Promise<string | Record<string, unknown>[]> {
+  const content: Record<string, unknown>[] = [];
   for (const item of input) {
-    if (item.type === "text") {
-      const decoded = decodeClaudeSkillChips(item.text);
-      decodedSkill ||= decoded.decoded;
-      content.push({ type: "text", text: decoded.text });
-    }
-    else if (item.type === "mention") {
-      content.push({ type: "text", text: `@${item.name} (${item.path})` });
-    } else if (item.type === "skill") {
-      throw invalidParams("Codex skills are not available in Claude threads.");
-    } else if (item.type === "image") {
+    if (item.type === "text") content.push({ type: "text", text: decodeClaudeSkillChips(item.text) });
+    else if (item.type === "mention") content.push({ type: "text", text: `@${item.name} (${item.path})` });
+    else if (item.type === "skill") content.push({ type: "text", text: `/${item.name.replace(/^claude:/u, "")}` });
+    else if (item.type === "image") {
       const inline = dataImageUrl.exec(item.url);
-      if (inline) {
-        const mediaType = inline[1]!.toLocaleLowerCase();
-        if (!Object.values(mediaTypes).includes(mediaType)) throw invalidParams(`Unsupported Claude image type '${mediaType}'.`);
-        content.push({ type: "image", source: { type: "base64", media_type: mediaType, data: inline[2]!.replace(/\s+/g, "") } });
-        continue;
-      }
-      const url = new URL(item.url);
-      if (url.protocol !== "https:" && url.protocol !== "http:") throw invalidParams(`Unsupported Claude image URL scheme '${url.protocol}'.`);
-      content.push({ type: "image", source: { type: "url", url: item.url } });
+      content.push(inline
+        ? { type: "image", source: { type: "base64", media_type: inline[1]!.toLowerCase(), data: inline[2]!.replace(/\s+/g, "") } }
+        : { type: "image", source: { type: "url", url: item.url } });
     } else if (item.type === "localImage") {
-      if (!context) throw invalidParams("Local Claude images require a thread path policy.");
-      const path = await allowedImagePath(item.path, context);
-      const mediaType = mediaTypes[extname(path).toLocaleLowerCase()];
-      if (!mediaType) throw invalidParams(`Unsupported Claude image type for '${item.path}'.`);
-      const bytes = await readFile(path);
-      content.push({
-        type: "image",
-        source: { type: "base64", media_type: mediaType, data: bytes.toString("base64") },
-      });
+      const path = isAbsolute(item.path) ? item.path : resolve(cwd, item.path);
+      const mediaType = mediaTypes[extname(path).toLowerCase()];
+      if (!mediaType) throw invalidParams(`Unsupported image type for '${item.path}'.`);
+      content.push({ type: "image", source: { type: "base64", media_type: mediaType, data: (await readFile(path)).toString("base64") } });
     } else {
-      throw invalidParams("Audio input is not supported by the pinned Claude runtime.");
+      throw invalidParams("Audio input is not supported in Claude threads.");
     }
   }
+  return content.every((block) => block.type === "text") ? content.map((block) => block.text).join("\n") : content;
+}
+
+export function userMessage(content: string | Record<string, unknown>[], uuid: string, extra: Partial<SDKUserMessage> = {}): SDKUserMessage {
   return {
     type: "user",
     session_id: "",
     parent_tool_use_id: null,
-    ...(uuid ? { uuid } : {}),
-    ...(context?.origin === "human" ? { origin: { kind: "human" } } : {}),
-    message: {
-      role: "user",
-      content: decodedSkill && content.every((block) => block.type === "text")
-        ? content.map((block) => block.text).join("")
-        : content,
-    },
-  } as unknown as SDKUserMessage;
+    uuid,
+    origin: { kind: "human" },
+    message: { role: "user", content },
+    ...extra,
+  } as SDKUserMessage;
 }
 
 /**
@@ -98,4 +58,8 @@ export function normalizeUserInput(input: readonly UserInput[]): UserInput[] {
   return input.map((item) => item.type === "text"
     ? { type: "text", text: item.text, text_elements: item.text_elements ?? [] }
     : item);
+}
+
+export function inputText(input: readonly UserInput[]): string {
+  return input.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
 }

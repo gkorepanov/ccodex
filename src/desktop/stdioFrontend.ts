@@ -2,7 +2,7 @@ import { createConnection } from "node:net";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import type { Writable } from "node:stream";
 import WebSocket from "ws";
-import type { HybridConfig } from "../config/config.js";
+import type { Config } from "../config.js";
 import { runDaemonCommand } from "../daemon/daemon.js";
 import { applyLaunchConfig } from "./launchConfig.js";
 
@@ -27,7 +27,7 @@ interface RpcEnvelope {
 export interface StdioFrontendDeps {
   readonly input?: NodeJS.ReadableStream;
   readonly output?: NodeJS.WritableStream;
-  readonly kick?: (config: HybridConfig) => Promise<void>;
+  readonly kick?: (config: Config) => Promise<void>;
   readonly initialConnectDeadlineMs?: number;
   readonly retryDelayMs?: number;
   readonly configOverrides?: readonly string[];
@@ -73,7 +73,7 @@ function send(socket: WebSocket, line: string): Promise<void> {
   });
 }
 
-async function defaultKick(config: HybridConfig): Promise<void> {
+async function defaultKick(config: Config): Promise<void> {
   try {
     await runDaemonCommand(config, { command: "start", remoteControl: false }, process.argv[1] ?? process.execPath);
   } catch (error) {
@@ -104,11 +104,11 @@ class StdioFrontend {
   private suppressInitializeResponse = false;
 
   public constructor(
-    private readonly config: HybridConfig,
+    private readonly config: Config,
     private readonly socketPath: string,
     input: NodeJS.ReadableStream,
     output: NodeJS.WritableStream,
-    private readonly kick: (config: HybridConfig) => Promise<void>,
+    private readonly kick: (config: Config) => Promise<void>,
     private readonly initialConnectDeadlineMs: number,
     private readonly retryDelayMs: number,
     private readonly configOverrides: readonly string[],
@@ -313,7 +313,7 @@ class StdioFrontend {
 }
 
 export function runStdioFrontend(
-  config: HybridConfig,
+  config: Config,
   socketPath: string,
   deps: StdioFrontendDeps = {},
 ): Promise<number> {

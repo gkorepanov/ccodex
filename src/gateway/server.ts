@@ -2,305 +2,354 @@ import { chmodSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import type { Socket } from "node:net";
 import { join } from "node:path";
-import { WebSocket, WebSocketServer } from "ws";
-import { ClaudeModelCatalog } from "../claude/modelCatalog.js";
-import { ClaudeSkillCatalog } from "../claude/skillCatalog.js";
-import { ClaudeService } from "../claude/service.js";
-import { DEFAULT_FEATURES, type HybridConfig } from "../config/config.js";
-import { startStockProcess } from "../codex/stockProcess.js";
-import type { Logger } from "../observability/logger.js";
-import { attachClientConnection } from "./clientConnection.js";
+import { WebSocketServer } from "ws";
+import { ClaudeThreads } from "../claude/threads.js";
+import type { Config } from "../config.js";
+import { Logger, RpcRecorder } from "../log.js";
+import { Meta } from "../meta.js";
+import type { JsonObject } from "../protocol/codex.js";
+import { Catalog } from "./catalog.js";
+import { Connection } from "./connection.js";
+import { Lineages } from "./lineage.js";
+import { RemoteControl } from "./remote.js";
 import { acquireSocketStartupLock, prepareUnixSocket } from "./socket.js";
-import { SubscriptionHub } from "./subscriptions.js";
-import { CursorCodec } from "../protocol/cursor.js";
-import { probeHostCompatibility } from "../compatibility/probe.js";
-import { MetricsRegistry } from "../observability/metrics.js";
-import { RpcRecorder } from "../observability/rpcRecorder.js";
-import { RemoteControlController } from "./remoteControlController.js";
-import { remoteControlEnabled } from "./remoteControlMode.js";
-import { CrossProviderForks, HANDOFF_DAEMON_CONNECTION_ID } from "../handoff/service.js";
-import {
-  initializeHandoffPersistence,
-  type HandoffPersistence,
-} from "../handoff/startupMigration.js";
-import {
-  ProviderAvailabilityService,
-} from "../runtime/providerAvailability.js";
-import { StockStateTracker } from "../state/stockStateTracker.js";
-import { connectStock } from "../codex/stockConnection.js";
-import { StockRpc } from "./stockRpc.js";
-import { isRequest, parseRpcMessage } from "../protocol/envelopes.js";
-import { StockSideThreads } from "./stockSideThreads.js";
-import { OptimisticSideThreads } from "./optimisticSideThreads.js";
-import { ThreadCatalog } from "./threadList.js";
+import { ccodexCommand, synthesizeTurn } from "./status.js";
+import { StockClient, openStockSocket, startStockProcess, type StockProcess } from "./stock.js";
+import { Titles } from "./titles.js";
+
+type Handler = (connection: Connection, params: any) => Promise<unknown>;
+
+interface PendingServerRequest {
+  readonly threadId: string;
+  readonly method: string;
+  readonly params: unknown;
+  readonly resolve: (result: unknown) => void;
+  readonly reject: (error: Error) => void;
+}
+
+/** Thread notifications stock broadcasts to every initialized connection. */
+const GLOBAL_NOTIFICATIONS = new Set([
+  "thread/started", "thread/status/changed", "thread/name/updated", "thread/archived", "thread/unarchived",
+  "thread/deleted", "thread/closed",
+]);
+
+export class Gateway {
+  public readonly connections = new Set<Connection>();
+  public readonly handlers = new Map<string, Handler>();
+  public readonly recorder: RpcRecorder;
+  public readonly meta: Meta;
+  public claude!: ClaudeThreads;
+  public stock!: StockClient;
+  public catalog!: Catalog;
+  public lineages!: Lineages;
+  public titles!: Titles;
+  public remote!: RemoteControl;
+  private stockProcess!: StockProcess;
+  private readonly subscriptions = new Map<string, Set<Connection>>();
+  private readonly serverRequests = new Map<string, PendingServerRequest>();
+  private readonly internalTurns = new Map<string, { text: string; resolve: (text: string) => void; reject: (error: Error) => void }>();
+  private nextServerRequest = 0;
+
+  public constructor(
+    public readonly config: Config,
+    public readonly socketPath: string,
+    public readonly logger: Logger,
+  ) {
+    this.recorder = new RpcRecorder(config);
+    this.meta = new Meta(join(config.dataDir, "meta.json"));
+  }
+
+  public async start(stockArgs: readonly string[], remoteControl: boolean): Promise<void> {
+    this.stockProcess = await startStockProcess(this.config, stockArgs, this.logger);
+    this.stock = await StockClient.connect(this.stockProcess.socketPath, "ccodex-internal");
+    this.stock.onFrame = (text) => this.internalFrame(text);
+    this.claude = new ClaudeThreads(this.config, this, this.logger);
+    this.catalog = new Catalog(this);
+    this.lineages = new Lineages(this);
+    this.titles = new Titles(this);
+    this.remote = new RemoteControl(this.socketPath, this.logger, remoteControl);
+    await this.claude.start();
+    this.registerHandlers();
+    await this.remote.start();
+  }
+
+  public connectionSocket(): string { return this.stockProcess.socketPath; }
+
+  public async stop(): Promise<void> {
+    await this.remote.stop();
+    for (const request of this.serverRequests.values()) request.reject(new Error("Gateway shutting down."));
+    await this.claude.close();
+    this.stock.close();
+    await this.stockProcess.stop();
+  }
+
+  // ---- subscriptions and fan-out for threads the gateway itself serves (Claude) ----
+
+  public subscribe(threadId: string, connection: Connection): void {
+    const set = this.subscriptions.get(threadId) ?? new Set();
+    const fresh = !set.has(connection);
+    set.add(connection);
+    this.subscriptions.set(threadId, set);
+    if (!fresh) return;
+    for (const [id, request] of this.serverRequests) {
+      if (request.threadId === threadId) connection.request(id, request.method, request.params);
+    }
+  }
+
+  public unsubscribe(threadId: string, connection: Connection): void {
+    this.subscriptions.get(threadId)?.delete(connection);
+  }
+
+  public subscribers(threadId: string): number {
+    return this.subscriptions.get(threadId)?.size ?? 0;
+  }
+
+  public emit(threadId: string, method: string, params: unknown): void {
+    if (GLOBAL_NOTIFICATIONS.has(method)) {
+      this.broadcast(method, params);
+      return;
+    }
+    const text = JSON.stringify({ method, params });
+    for (const connection of this.subscriptions.get(threadId) ?? []) connection.send(text);
+  }
+
+  public broadcast(method: string, params: unknown): void {
+    const text = JSON.stringify({ method, params });
+    for (const connection of this.connections) connection.send(text);
+  }
+
+  /** Server→client request on a Claude thread: every subscriber sees it, the first answer wins. */
+  public serverRequest<T = any>(threadId: string, method: string, params: unknown): Promise<T> {
+    const id = `ccodex:${++this.nextServerRequest}`;
+    return new Promise<T>((resolve, reject) => {
+      this.serverRequests.set(id, { threadId, method, params, resolve: resolve as (value: unknown) => void, reject });
+      for (const connection of this.subscriptions.get(threadId) ?? []) connection.request(id, method, params);
+    });
+  }
+
+  public cancelServerRequests(threadId: string): void {
+    for (const [id, request] of this.serverRequests) {
+      if (request.threadId !== threadId) continue;
+      this.serverRequests.delete(id);
+      request.reject(new Error("Request cancelled."));
+      this.emit(threadId, "serverRequest/resolved", { threadId, requestId: id });
+    }
+  }
+
+  public resolveServerRequest(message: JsonObject): void {
+    const request = this.serverRequests.get(message.id);
+    if (!request) return;
+    this.serverRequests.delete(message.id);
+    if (message.error) request.reject(new Error(message.error.message ?? "Client rejected the request."));
+    else request.resolve(message.result);
+    this.emit(request.threadId, "serverRequest/resolved", { threadId: request.threadId, requestId: message.id });
+  }
+
+  public detach(connection: Connection): void {
+    this.connections.delete(connection);
+    this.remote.detach(connection);
+    for (const set of this.subscriptions.values()) set.delete(connection);
+  }
+
+  // ---- routing ----
+
+  public isClaudeThread(threadId: string): boolean {
+    const current = this.meta.current(threadId);
+    return current ? current.provider === "claude" : this.claude.owns(threadId);
+  }
+
+  /** Handler for a request that carries a thread (or starts one); undefined = raw passthrough to stock. */
+  public threadHandler(connection: Connection, method: string, params: JsonObject): Handler | undefined {
+    const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+    if (method === "thread/start") {
+      if (!this.claude.isClaudeModel(params.model)) return undefined;
+      connection.provider = "claude";
+      return (conn, p) => this.claude.handle(conn, method, p);
+    }
+    if (!threadId) return undefined;
+    if (method === "turn/start") {
+      const command = ccodexCommand(params);
+      if (command) return (conn, p) => synthesizeTurn(this, conn, p, command);
+      if (params.turnTrigger === "thread_title" && this.config.renamePrompt) {
+        return (conn, p) => this.titles.answerDesktopTitleTurn(conn, p);
+      }
+      this.titles.onTurnStart(threadId, params);
+    }
+    if (method === "thread/name/set" && this.config.renamePrompt) {
+      return (conn, p) => this.titles.nameSet(conn, p);
+    }
+    return this.ownerHandler(connection, method, params);
+  }
+
+  /** The thread's owner: a switched thread's lineage, the Claude layer, or (undefined) stock. */
+  private ownerHandler(connection: Connection, method: string, params: JsonObject): Handler | undefined {
+    const threadId: string = params.threadId;
+    if (this.meta.lineage(threadId) || this.lineages.switchRequested(method, params)) {
+      return (conn, p) => this.lineages.handle(conn, method, p);
+    }
+    if (this.claude.owns(threadId)) {
+      connection.provider = "claude";
+      return (conn, p) => this.claude.handle(conn, method, p);
+    }
+    if (method === "turn/start" || method === "thread/resume") connection.provider = "codex";
+    return undefined;
+  }
+
+  public threadRequest(connection: Connection, method: string, params: JsonObject): Promise<unknown> {
+    const handler = this.ownerHandler(connection, method, params);
+    return handler ? handler(connection, params) : connection.upstream.request(method, params);
+  }
+
+  /** Stock→client frame; undefined drops it. */
+  public fromBackendFrame(connection: Connection, text: string): string | undefined {
+    if (connection.provider === "claude" && text.startsWith("{\"method\":\"account/rateLimits/updated\"")) return undefined;
+    // A new backend of a switched thread is announced by stock like any new thread; the public row stays.
+    if (text.startsWith("{\"method\":\"thread/started\"") && this.lineages.isBackendAnnouncement(text)) return undefined;
+    if (text.startsWith("{\"method\":\"remoteControl/status/changed\"")) {
+      this.remote.intercept(connection, (JSON.parse(text) as JsonObject).params);
+      return undefined;
+    }
+    return text;
+  }
+
+  /** Runs one turn on an internal stock thread (titles, gpt summaries) and returns its final agent message. */
+  public async internalTurn(threadId: string, text: string, extra: JsonObject = {}): Promise<string> {
+    const done = new Promise<string>((resolve, reject) => this.internalTurns.set(threadId, { text: "", resolve, reject }));
+    const timeout = setTimeout(() => this.finishInternalTurn(threadId, new Error("internal turn timed out")), 300_000);
+    try {
+      await this.stock.request("turn/start", { threadId, input: [{ type: "text", text, text_elements: [] }], ...extra });
+      return await done;
+    } catch (error) {
+      this.internalTurns.delete(threadId);
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private finishInternalTurn(threadId: string, result: string | Error): void {
+    const turn = this.internalTurns.get(threadId);
+    if (!turn) return;
+    this.internalTurns.delete(threadId);
+    if (typeof result === "string") turn.resolve(result);
+    else turn.reject(result);
+  }
+
+  private internalFrame(text: string): void {
+    const message = JSON.parse(text) as JsonObject;
+    if (message.id !== undefined && message.method !== undefined) {
+      // Internal ephemeral threads (titles, summaries) never ask for anything we would grant.
+      void this.stock.send(JSON.stringify({ id: message.id, result: { decision: "decline" } })).catch(() => undefined);
+      return;
+    }
+    const params = message.params ?? {};
+    const turn = this.internalTurns.get(params.threadId);
+    if (turn && message.method === "item/completed" && params.item?.type === "agentMessage") turn.text = params.item.text;
+    if (turn && message.method === "turn/completed") {
+      const status = params.turn?.status;
+      this.finishInternalTurn(params.threadId, status === "completed"
+        ? turn.text
+        : new Error(params.turn?.error?.message ?? `internal turn ${status}`));
+    }
+    if (message.method === "thread/started") this.titles.observe(params.thread);
+  }
+
+  private registerHandlers(): void {
+    const on = (method: string, handler: Handler) => this.handlers.set(method, handler);
+    on("initialize", async (connection, params) => {
+      connection.clientName = params?.clientInfo?.name;
+      const result = await connection.upstream.request("initialize", params);
+      if (connection.clientName === "codex-backend") {
+        setImmediate(() => void this.catalog.announce(connection).catch((error: unknown) =>
+          this.logger.warn("remote.catalog.announce-failed", { error: String(error) })));
+      }
+      return result;
+    });
+    on("thread/list", (connection, params) => this.catalog.list(connection, params));
+    on("thread/search", (connection, params) => this.catalog.search(connection, params));
+    on("thread/loaded/list", (connection, params) => this.catalog.loaded(connection, params));
+    on("model/list", async (connection, params) => {
+      const [stock, claude] = await Promise.all([
+        connection.upstream.request("model/list", params),
+        params?.cursor ? Promise.resolve([]) : this.claude.models().catch(() => []),
+      ]);
+      return { ...stock, data: [...stock.data, ...claude] };
+    });
+    on("skills/list", async (connection, params) => {
+      const [stock, claude] = await Promise.all([
+        connection.upstream.request("skills/list", params),
+        this.claude.skills(params?.cwds ?? []).catch(() => new Map<string, unknown[]>()),
+      ]);
+      return {
+        ...stock,
+        data: stock.data.map((entry: JsonObject) => ({ ...entry, skills: [...entry.skills, ...claude.get(entry.cwd) ?? []] })),
+      };
+    });
+    on("account/rateLimits/read", (connection, params) => connection.provider === "claude"
+      ? this.claude.rateLimits()
+      : connection.upstream.request("account/rateLimits/read", params));
+    on("remoteControl/enable", (_connection, params) => this.remote.enable(params?.ephemeral === true));
+    on("remoteControl/disable", (_connection, params) => this.remote.disable(params?.ephemeral === true));
+    on("remoteControl/status/read", async (connection, params) =>
+      this.remote.current() ?? connection.upstream.request("remoteControl/status/read", params));
+    for (const method of ["remoteControl/pairing/start", "remoteControl/pairing/status"]) {
+      on(method, (connection, params) => this.remote.pairing(method, params, connection.clientName));
+    }
+    on("thread/section/move", (connection, params) => this.catalog.moveInSection(connection, params));
+  }
+}
 
 export interface GatewayServer {
   stop(): Promise<void>;
 }
 
-async function startGatewayOwner(
-  config: HybridConfig,
-  socketPath: string,
-  stockArgs: readonly string[],
-  logger: Logger,
-): Promise<GatewayServer> {
-  await probeHostCompatibility(config, logger);
-  await prepareUnixSocket(socketPath);
-  const relayEnabled = remoteControlEnabled(stockArgs);
-  const stock = await startStockProcess(config, stockArgs.filter((arg) => arg !== "--remote-control"), logger);
-  const metrics = new MetricsRegistry();
-  const recorder = new RpcRecorder(config);
-  const remoteControl = new RemoteControlController(socketPath, logger, relayEnabled);
-  const features = config.features ?? DEFAULT_FEATURES;
-  const claudeModels = new ClaudeModelCatalog(config, logger, metrics);
-  await claudeModels.list().catch((error: unknown) => {
-    logger.warn("compatibility.claude-unavailable", { error: error instanceof Error ? error.message : String(error) });
-  });
-  const subscriptions = new SubscriptionHub();
-  const claudeSkills = new ClaudeSkillCatalog(config, logger);
-  const cursors = CursorCodec.load(config.dataDir);
-  const providerAvailability = new ProviderAvailabilityService(config);
-  const stockState = new StockStateTracker();
-  const claude = new ClaudeService(
-    config,
-    subscriptions,
-    logger,
-    undefined,
-    undefined,
-    claudeModels,
-    metrics,
-    undefined,
-    undefined,
-    undefined,
-    async () => {
-      const availability = await providerAvailability.read("claude");
-      return availability.state === "ready" ? availability : providerAvailability.refresh("claude");
-    },
-    features.claudeSkills
-      ? (cwd) => {
-          claudeSkills.invalidate(cwd);
-          subscriptions.emitGlobal("skills/changed", {});
-        }
-      : undefined,
-  );
-  await claude.ready();
-  const handoffStock = connectStock(stock.socketPath);
-  const handoffStockRpc = new StockRpc(handoffStock);
-  const stockSideThreads = new StockSideThreads(
-    features.sideChatPromotion,
-    handoffStockRpc,
-    logger,
-  );
-  let activeHandoffs: CrossProviderForks | undefined;
-  handoffStock.on("message", (data, isBinary) => {
-    const message = isBinary ? undefined : parseRpcMessage(data);
-    if (!message || handoffStockRpc.handle(message) || !("method" in message)) return;
-    const internal = activeHandoffs?.captureInternalStockMessage(HANDOFF_DAEMON_CONNECTION_ID, message) ?? false;
-    const target = !internal
-      && (activeHandoffs?.suppressStockTargetMessage(HANDOFF_DAEMON_CONNECTION_ID, message) ?? false);
-    const projected = !internal && !target && (activeHandoffs?.projectStockMessage(message) ?? false);
-    const side = !internal && !target && !projected
-      && stockSideThreads.captureDaemonMessage(message, subscriptions);
-    if ((internal || target || side) && !projected && isRequest(message) && handoffStock.readyState === WebSocket.OPEN) {
-      if (side) return;
-      handoffStock.send(JSON.stringify({ id: message.id, result: { decision: "decline" } }));
-    }
-  });
-  const abortHandoffStartup = async (): Promise<void> => {
-    stockSideThreads.close();
-    handoffStockRpc.close(new Error("Gateway startup failed."));
-    if (handoffStock.readyState === WebSocket.OPEN || handoffStock.readyState === WebSocket.CONNECTING) {
-      handoffStock.close();
-    }
-    await claude.close();
-    await stock.stop();
-    rmSync(socketPath, { force: true });
-  };
-  let persistence: HandoffPersistence;
-  try {
-    persistence = await initializeHandoffPersistence(
-      join(config.dataDir, "handoffs.sqlite"),
-      handoffStockRpc,
-      claude,
-    );
-  } catch (error) {
-    await abortHandoffStartup();
-    throw error;
-  }
-  let handoffs: CrossProviderForks;
-  try {
-    handoffs = new CrossProviderForks(
-      persistence.operational,
-      claude,
-      config.renamePrompt ?? null,
-      persistence.lineage,
-    );
-  } catch (error) {
-    persistence.lineage.close();
-    persistence.operational.close();
-    await abortHandoffStartup();
-    throw error;
-  }
-  handoffs.configureSubscriptions(subscriptions);
-  activeHandoffs = handoffs;
-  handoffs.configureDaemonStock(handoffStockRpc);
-  const optimisticSideThreads = new OptimisticSideThreads(persistence.operational);
-  await stockSideThreads.recover().catch((error: unknown) => {
-    logger.warn("stock.side.recovery-failed", { error: String(error) });
-  });
-  optimisticSideThreads.recover(
-    async (record) => {
-      const { provider, params } = record.preparation!;
-      const publicId = record.response.thread.id;
-      const publicParentId = record.response.thread.forkedFromId ?? params.threadId;
-      if (provider === "claude") {
-        const result = await claude.forkThread(params, publicParentId, publicId);
-        return { provider, backendThreadId: result.thread.id };
-      }
-      const result = await stockSideThreads.prepareOptimisticSide(params, publicParentId, publicId);
-      return { provider, backendThreadId: result.backendThreadId };
-    },
-    async (publicId, target) => {
-      if (target.provider === "claude") {
-        if (claude.ownsThread(target.backendThreadId)) await claude.deleteThread(target.backendThreadId);
-        subscriptions.unaliasThread(target.backendThreadId);
-      } else await stockSideThreads.discardOptimistic(publicId);
-    },
-    (publicId, target, response) => {
-      if (target.provider === "claude") subscriptions.aliasThread(target.backendThreadId, publicId);
-      else stockSideThreads.restoreOptimistic(publicId, target.backendThreadId, response.thread.forkedFromId);
-    },
-    (threadId, error) => logger.error("side.recovery-failed", { threadId, error: error.message }),
-    async (target, items) => {
-      const params = { threadId: target.backendThreadId, items };
-      if (target.provider === "claude") await claude.injectItems(params);
-      else await stockSideThreads.request("thread/inject_items", params);
-    },
-  );
-  const threadCatalog = new ThreadCatalog(
-    handoffStockRpc,
-    claude,
-    cursors,
-    handoffs,
-    stockSideThreads,
-  );
-  const webSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 64 * 1024 * 1024 });
-  const connectionCleanups = new Set<Promise<void>>();
-  const server = createServer((request, response) => {
-    if (request.url === "/readyz" || (request.url === "/healthz" && !request.headers.origin)) {
-      response.writeHead(200).end("ok\n");
-      return;
-    }
-    if (request.url === "/metrics" && !request.headers.origin) {
-      response.writeHead(200, { "content-type": "application/json" }).end(`${JSON.stringify(metrics.snapshot())}\n`);
-      return;
-    }
-    response.writeHead(request.headers.origin ? 403 : 404).end();
-  });
-
-  server.on("upgrade", (request, socket: Socket, head) => {
-    if (request.url !== "/rpc") {
-      socket.destroy();
-      return;
-    }
-    webSockets.handleUpgrade(request, socket, head, (client) => {
-      const connection = attachClientConnection(
-        client,
-        stock.socketPath,
-        claudeModels,
-        claude,
-        handoffs,
-        subscriptions,
-        logger,
-        cursors,
-        metrics,
-        recorder,
-        remoteControl,
-        features,
-        providerAvailability,
-        stockState,
-        stockSideThreads,
-        features.optimisticSideStartup ? optimisticSideThreads : undefined,
-        claudeSkills,
-        threadCatalog,
-      );
-      connectionCleanups.add(connection.closed);
-      const untrack = () => connectionCleanups.delete(connection.closed);
-      void connection.closed.then(untrack, (error: unknown) => {
-        untrack();
-        logger.error("connection.cleanup.failed", { error: String(error) });
-      });
-    });
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socketPath, () => resolve());
-  });
-  chmodSync(socketPath, 0o600);
-  const closeConnections = async () => {
-    for (const client of webSockets.clients) client.close(1001, "Gateway shutting down");
-    const websocketClosed = new Promise<void>((resolve) => webSockets.close(() => resolve()));
-    const force = setTimeout(() => {
-      for (const client of webSockets.clients) client.terminate();
-    }, 1_000);
-    await Promise.all([
-      new Promise<void>((resolve) => server.close(() => resolve())),
-      websocketClosed,
-    ]);
-    clearTimeout(force);
-    await Promise.allSettled(connectionCleanups);
-  };
-  try {
-    await remoteControl.start();
-  } catch (error) {
-    stockSideThreads.close();
-    optimisticSideThreads.close();
-    await closeConnections();
-    await handoffs.drain();
-    handoffStockRpc.close(new Error("Gateway startup failed."));
-    if (handoffStock.readyState === WebSocket.OPEN || handoffStock.readyState === WebSocket.CONNECTING) {
-      handoffStock.close();
-    }
-    handoffs.close();
-    await claude.close();
-    await stock.stop();
-    rmSync(socketPath, { force: true });
-    throw error;
-  }
-  logger.info("gateway.started", { socketPath, stockSocket: stock.socketPath });
-
-  return {
-    async stop(): Promise<void> {
-      await remoteControl.stop();
-      stockSideThreads.close();
-      optimisticSideThreads.close();
-      await closeConnections();
-      await handoffs.drain();
-      handoffStockRpc.close(new Error("Gateway shutting down."));
-      if (handoffStock.readyState === WebSocket.OPEN || handoffStock.readyState === WebSocket.CONNECTING) {
-        handoffStock.close();
-      }
-      handoffs.close();
-      await claude.close();
-      await stock.stop();
-      rmSync(socketPath, { force: true });
-      logger.info("metrics.final", metrics.snapshot());
-      recorder.lifecycle("recorder.stopped", { pid: process.pid });
-      logger.info("gateway.stopped", { socketPath });
-    },
-  };
-}
-
 export async function startGateway(
-  config: HybridConfig,
+  config: Config,
   socketPath: string,
   stockArgs: readonly string[],
   logger: Logger,
+  remoteControl: boolean,
 ): Promise<GatewayServer> {
   const release = await acquireSocketStartupLock(socketPath);
   try {
-    return await startGatewayOwner(config, socketPath, stockArgs, logger);
+    await prepareUnixSocket(socketPath);
+    const gateway = new Gateway(config, socketPath, logger);
+    await gateway.start(stockArgs, remoteControl);
+    const webSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 256 * 1024 * 1024 });
+    const server = createServer((request, response) => {
+      if (request.url === "/readyz" || (request.url === "/healthz" && !request.headers.origin)) {
+        response.writeHead(200).end("ok\n");
+        return;
+      }
+      response.writeHead(request.headers.origin ? 403 : 404).end();
+    });
+    server.on("upgrade", (request, socket: Socket, head) => {
+      if (request.url !== "/rpc") {
+        socket.destroy();
+        return;
+      }
+      webSockets.handleUpgrade(request, socket, head, (client) => {
+        const upstream = new StockClient(openStockSocket(gateway.connectionSocket()));
+        gateway.connections.add(new Connection(gateway, client, upstream));
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => resolve());
+    });
+    chmodSync(socketPath, 0o600);
+    logger.info("gateway.started", { socketPath, codex: config.codex });
+    return {
+      async stop() {
+        for (const client of webSockets.clients) client.close(1001, "Gateway shutting down");
+        const force = setTimeout(() => { for (const client of webSockets.clients) client.terminate(); }, 1_000);
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        clearTimeout(force);
+        await gateway.stop();
+        rmSync(socketPath, { force: true });
+        logger.info("gateway.stopped", { socketPath });
+      },
+    };
   } finally {
     release();
   }

@@ -1,28 +1,22 @@
 #!/usr/bin/env node
-import { join } from "node:path";
 import { classifyInvocation, withProxySocket } from "./args.js";
 import { delegate } from "./delegate.js";
-import { loadConfig } from "../config/config.js";
-import { Logger } from "../observability/logger.js";
+import { loadConfig } from "../config.js";
+import { Logger } from "../log.js";
 import { publishDaemonChildRecord, withGatewayStartupFence } from "../daemon/supervisor.js";
 import { publishGatewayOwner } from "../daemon/ownership.js";
 import { runDaemonCommand } from "../daemon/daemon.js";
-import { runEarlyManagementCommand, runManagementCommand } from "../management/commands.js";
+import { loadDaemonSettings } from "../daemon/settings.js";
+import { runManagementCommand } from "../management/commands.js";
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
-  const earlyManagement = await runEarlyManagementCommand(args);
-  if (earlyManagement !== undefined) return earlyManagement;
-  const config = loadConfig();
-  const logger = new Logger(config.logLevel, {
-    includeContent: config.logPrompts,
-    ...(config.debugCapture ? { capturePath: join(config.dataDir, "debug.jsonl"), maxBytes: config.debugLogMaxBytes } : {}),
-  });
-  const management = await runManagementCommand(config, args);
+  const management = await runManagementCommand(args, loadConfig);
   if (management !== undefined) return management;
+  const config = loadConfig();
   const invocation = classifyInvocation(args, config);
 
-  if (invocation.kind === "delegate") return delegate(config.delegateCodex ?? config.realCodex, args);
+  if (invocation.kind === "delegate") return delegate(config.delegateCodex, args);
   if (invocation.kind === "daemon") {
     const output = await runDaemonCommand(config, invocation, process.argv[1]!);
     process.stdout.write(`${JSON.stringify(output)}\n`);
@@ -30,22 +24,20 @@ async function main(): Promise<number> {
   }
   if (invocation.kind === "proxy") {
     await runDaemonCommand(config, { command: "start", remoteControl: false }, process.argv[1]!);
-    return delegate(
-      config.realCodex,
-      withProxySocket(invocation.proxyArgs, invocation.socketPath),
-    );
+    return delegate(config.codex, withProxySocket(invocation.proxyArgs, invocation.socketPath));
   }
   if (invocation.kind === "stdioFrontend") {
     const { runStdioFrontend } = await import("../desktop/stdioFrontend.js");
-    return runStdioFrontend(config, invocation.socketPath, {
-      configOverrides: invocation.configOverrides,
-    });
+    return runStdioFrontend(config, invocation.socketPath, { configOverrides: invocation.configOverrides });
   }
 
   const { startGateway } = await import("../gateway/server.js");
-  let resolveStop!: () => void;
-  const stopped = new Promise<void>((resolve) => { resolveStop = resolve; });
-  const stop = () => resolveStop();
+  const logger = new Logger(config.logLevel);
+  const remoteControl = process.env.CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED !== "1"
+    && (invocation.stockArgs.includes("--remote-control") || loadDaemonSettings().remoteControlEnabled);
+  const stockArgs = invocation.stockArgs.filter((arg) => arg !== "--remote-control");
+  let stop!: () => void;
+  const stopped = new Promise<void>((resolve) => { stop = resolve; });
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   let releaseDaemonRecord: () => void = () => undefined;
@@ -53,16 +45,9 @@ async function main(): Promise<number> {
   let gateway: Awaited<ReturnType<typeof startGateway>> | undefined;
   try {
     gateway = await withGatewayStartupFence(async () => {
-      // The PID handshake identifies the detached child, not gateway readiness.
-      // Publish it before the potentially slow stock/Claude bootstrap; the
-      // daemon independently waits for and verifies public-socket ownership.
+      // The PID handshake identifies the detached child; the daemon separately waits for socket ownership.
       releaseDaemonRecord = await publishDaemonChildRecord();
-      return startGateway(
-        config,
-        invocation.socketPath,
-        invocation.stockArgs,
-        logger,
-      );
+      return startGateway(config, invocation.socketPath, stockArgs, logger, remoteControl);
     });
     releaseGatewayOwner = publishGatewayOwner(invocation.socketPath);
     await stopped;
@@ -73,18 +58,14 @@ async function main(): Promise<number> {
       releaseGatewayOwner();
       releaseDaemonRecord();
     }
-    process.removeListener("SIGINT", stop);
-    process.removeListener("SIGTERM", stop);
   }
   return 0;
 }
 
-main()
-  .then((code) => {
-    process.exitCode = code;
-  })
-  .catch((error: unknown) => {
-    const message = error instanceof Error ? error.stack ?? error.message : String(error);
-    process.stderr.write(`ccodex: ${message}\n`);
+main().then(
+  (code) => { process.exitCode = code; },
+  (error: unknown) => {
+    process.stderr.write(`ccodex: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     process.exitCode = 1;
-  });
+  },
+);

@@ -1,9 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { isAbsolute, resolve } from "node:path";
-import type { ThreadItem } from "../codex/generated/v2/ThreadItem.js";
-import { relayBinary } from "../gateway/remoteRelay.js";
-
-type CommandAction = Extract<ThreadItem, { type: "commandExecution" }>["commandActions"][number];
+import { relayBinary } from "../gateway/remote.js";
+import type { CommandAction } from "../protocol/codex.js";
 
 type ParsedCommand =
   | { type: "read"; cmd: string; name: string; path: string }

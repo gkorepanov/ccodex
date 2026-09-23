@@ -1,6 +1,5 @@
 import { basename, extname, isAbsolute, resolve } from "node:path";
-import type { ThreadItem } from "../codex/generated/v2/ThreadItem.js";
-import type { JsonValue } from "../codex/generated/serde_json/JsonValue.js";
+import type { JsonValue, ThreadItem } from "../protocol/codex.js";
 import { bashCommandActions } from "./commandActions.js";
 
 export interface ActiveTool {

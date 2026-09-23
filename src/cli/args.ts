@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import type { HybridConfig } from "../config/config.js";
+import type { Config } from "../config.js";
 
 const delegatedAppServerCommands = new Set([
   "generate-ts",
@@ -94,7 +94,7 @@ function configOverrides(args: readonly string[]): string[] {
   return result;
 }
 
-function socketPathFromListen(listen: string | undefined, config: HybridConfig): string {
+function socketPathFromListen(listen: string | undefined, config: Config): string {
   if (!listen || listen === "unix://") return config.publicSocket;
   if (!listen.startsWith("unix://")) {
     throw new Error(`CCodex currently requires a Unix listener, received '${listen}'.`);
@@ -103,7 +103,7 @@ function socketPathFromListen(listen: string | undefined, config: HybridConfig):
   return value.startsWith("/") ? value : resolve(value);
 }
 
-export function classifyInvocation(args: readonly string[], config: HybridConfig): Invocation {
+export function classifyInvocation(args: readonly string[], config: Config): Invocation {
   const appServerIndex = args.indexOf("app-server");
   if (appServerIndex < 0) return { kind: "delegate" };
 

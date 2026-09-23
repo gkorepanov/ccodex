@@ -1,7 +1,0 @@
-{
-  "schemaVersion": 1,
-  "architecture": "one-claude-session-writer",
-  "generatedBy": "scripts/check-one-writer-architecture.mjs --update-ledger",
-  "debtCount": 0,
-  "entries": []
-}

@@ -1,10 +1,6 @@
 /** Owns pure projection of selected Claude transcript history into Codex protocol objects. */
 import { isAbsolute, resolve } from "node:path";
-import type { Thread } from "../../codex/generated/v2/Thread.js";
-import type { ThreadItem } from "../../codex/generated/v2/ThreadItem.js";
-import type { Turn } from "../../codex/generated/v2/Turn.js";
-import type { UserInput } from "../../codex/generated/v2/UserInput.js";
-import type { TokenUsageBreakdown } from "../../codex/generated/v2/TokenUsageBreakdown.js";
+import type { Thread, ThreadItem, TokenUsageBreakdown, Turn, UserInput } from "../../protocol/codex.js";
 import { normalizeClaudeModelIdentifier } from "../modelSelection.js";
 import {
   projectToolCompletion,
@@ -25,6 +21,7 @@ import {
   type UserRecord,
 } from "./records.js";
 import {
+  slashCommand,
   startsTurn,
   summarizeTranscript,
   timestampSeconds,
@@ -93,8 +90,8 @@ function projectedUsage(records: readonly TranscriptChainRecord[]): TokenUsageBr
   return total;
 }
 
-interface ToolCompletion {
-  readonly record: UserRecord;
+export interface ToolCompletion {
+  readonly record: Pick<UserRecord, "toolUseResult" | "toolDenialKind">;
   readonly block: ToolResultBlock;
 }
 
@@ -123,7 +120,8 @@ function imageInput(source: unknown): UserInput | undefined {
 
 function userInputs(record: UserRecord): UserInput[] {
   if (typeof record.message.content === "string") {
-    return [{ type: "text", text: record.message.content, text_elements: [] }];
+    const text = slashCommand(record.message.content) ?? record.message.content;
+    return [{ type: "text", text, text_elements: [] }];
   }
   return record.message.content.flatMap((block): UserInput[] => {
     if (block.type === "text") return [{ type: "text", text: block.text, text_elements: [] }];
@@ -241,21 +239,34 @@ function projectTool(
   completions: ReadonlyMap<string, ToolCompletion>,
 ): ThreadItem | undefined {
   if (block.name.startsWith("mcp__ccodex_goal__")) return undefined;
-  const input = object(block.input) ?? {};
   const started = activeTool(blockIndex, block, cwd, threadId, record.timestamp);
   const completion = completions.get(block.id);
-  if (started.item.type === "fileChange" && FILE_TOOLS.has(block.name)) {
-    return completeFileItem(started.item, block.name, input, completion, cwd);
-  }
   if (!completion) return started.item;
   const result = completion.record.toolUseResult;
-  const deterministicResult = { ...result, duration_ms: typeof result?.duration_ms === "number" ? result.duration_ms : 0 };
+  return completedToolItem(
+    { state: { ...started.state, startedAtMs: Date.parse(record.timestamp) }, item: started.item },
+    { ...completion, record: { ...completion.record, toolUseResult: { ...result, duration_ms: typeof result?.duration_ms === "number" ? result.duration_ms : 0 } } },
+    cwd,
+  );
+}
+
+/** A started tool item completed by its tool_result; shared by history projection and the live stream. */
+export function completedToolItem(
+  started: { readonly state: ActiveTool; readonly item: ThreadItem },
+  completion: ToolCompletion,
+  cwd: string,
+): ThreadItem {
+  const { state } = started;
+  if (started.item.type === "fileChange" && FILE_TOOLS.has(state.name)) {
+    return completeFileItem(started.item, state.name, state.input, completion, cwd);
+  }
+  const result = completion.record.toolUseResult;
   let item = projectToolCompletion(
     started.item,
-    { ...started.state, startedAtMs: Date.parse(record.timestamp) },
+    state,
     structuredOutput(completion),
     completion.block.is_error === true,
-    deterministicResult,
+    result,
     cwd,
     completion.record.toolDenialKind,
   ).completed;
@@ -375,7 +386,7 @@ function projectTurns(
     record.type === "user" && startsTurn(record, subagentPromptUuid) ? [index] : []);
   const completions = toolCompletions(records);
   const toolResponses = responseHasTools(records);
-  return starts.map((start, turnIndex) => {
+  const turns = starts.map((start, turnIndex) => {
     const end = starts[turnIndex + 1] ?? records.length;
     const prompt = records[start] as UserRecord;
     const turnRecords = records.slice(start, end);
@@ -401,7 +412,20 @@ function projectTurns(
         projectedResponses.add(messageId);
         items.push(...assistantItems(responses.get(messageId)!, cwd, threadId, completions, toolResponses));
       }
-      else if (isCompactBoundary(record)) items.push({ type: "contextCompaction", id: record.uuid });
+      else if (record.type === "system" && record.subtype === "local_command" && typeof record.content === "string") {
+        const text = record.content.replace(/<\/?local-command-std(?:out|err)>/gu, "").trim();
+        if (text) items.push({ type: "agentMessage", id: record.uuid, text, phase: "commentary", memoryCitation: null });
+      } else if (isCompactBoundary(record)) items.push({ type: "contextCompaction", id: record.uuid });
+      else if (record.type === "attachment") {
+        // A message sent mid-turn: Claude folds it into the running turn.
+        const attachment = object(record.attachment);
+        if (attachment?.type === "queued_command" && attachment.commandMode === "prompt" && typeof attachment.prompt === "string") {
+          items.push({
+            type: "userMessage", id: string(attachment.source_uuid) ?? record.uuid, clientId: null,
+            content: [{ type: "text", text: attachment.prompt, text_elements: [] }],
+          });
+        }
+      }
     }
     const status = turnStatus(turnRecords, turnIndex + 1 < starts.length);
     const startedAt = timestampSeconds(prompt.timestamp);
@@ -412,13 +436,20 @@ function projectTurns(
       itemsView: "full",
       status,
       error: status === "failed"
-        ? { message: errorMessage(turnRecords), codexErrorInfo: null, additionalDetails: null, misalignment: null }
+        ? { message: errorMessage(turnRecords), codexErrorInfo: null, additionalDetails: null }
         : null,
       startedAt,
       completedAt,
       durationMs: startedAt === null || completedAt === null ? null : Math.max(0, (completedAt - startedAt) * 1_000),
-    };
+    } satisfies Turn;
   });
+  // Claude writes a manual `/compact` boundary before the command record; live, it belongs to the `/compact` turn.
+  turns.forEach((turn, index) => {
+    const previous = turns[index - 1];
+    if (!previous || turn.items.length || previous.items.at(-1)?.type !== "contextCompaction") return;
+    turn.items.push(previous.items.pop()!);
+  });
+  return turns;
 }
 
 function projectTurnBoundaries(
@@ -432,6 +463,56 @@ function projectTurnBoundaries(
     const boundary = records.slice(start + 1, starts[turnIndex + 1] ?? records.length).at(-1);
     return boundary ? [{ turnId: prompt.uuid, messageUuid: boundary.uuid }] : [];
   });
+}
+
+/** The Codex thread for a native session header (list rows, reads, live responses). */
+export function nativeThread(
+  id: string,
+  header: TranscriptHeader,
+  options: {
+    readonly status: Thread["status"];
+    readonly turns?: Turn[];
+    readonly subagent?: { readonly parentThreadId: string; readonly depth: number; readonly nickname: string };
+  },
+): Thread {
+  const subagent = options.subagent;
+  return {
+    id,
+    environments: null,
+    extra: null,
+    sessionId: id,
+    forkedFromId: subagent ? subagent.parentThreadId : null,
+    parentThreadId: subagent?.parentThreadId ?? null,
+    preview: header.preview,
+    ephemeral: false,
+    section: null,
+    sectionEnteredAt: null,
+    projectId: null,
+    historyMode: "paginated",
+    modelProvider: "claude",
+    model: header.model ? `claude:${normalizeClaudeModelIdentifier(header.model)}` : null,
+    reasoningEffort: header.reasoningEffort,
+    createdAt: header.createdAt,
+    updatedAt: header.updatedAt,
+    recencyAt: header.updatedAt,
+    status: options.status,
+    path: null,
+    cwd: header.cwd,
+    cliVersion: header.cliVersion ?? "claude-code",
+    originator: null,
+    source: subagent ? { subAgent: { thread_spawn: {
+      parent_thread_id: subagent.parentThreadId, depth: subagent.depth, agent_path: null,
+      agent_nickname: subagent.nickname, agent_role: null,
+    } } } : "vscode",
+    canAcceptDirectInput: subagent ? false : true,
+    threadSource: subagent ? "subagent" : "user",
+    agentNickname: subagent?.nickname ?? null,
+    agentRole: null,
+    gitInfo: { sha: null, branch: header.gitBranch, originUrl: null },
+    name: subagent?.nickname ?? header.customTitle ?? header.aiTitle,
+    daybreakEnabled: null,
+    turns: options.turns ?? [],
+  };
 }
 
 export async function projectTranscript(input: ProjectTranscriptInput): Promise<TranscriptProjection> {
@@ -455,40 +536,11 @@ export async function projectTranscript(input: ProjectTranscriptInput): Promise<
   const status: Thread["status"] = turns.at(-1)?.status === "inProgress"
     ? { type: "active", activeFlags: [] }
     : { type: "idle" };
-  const thread: Thread = {
-    id: input.sessionId,
-    extra: null,
-    sessionId: input.sessionId,
-    forkedFromId: input.subagent ? parentThreadId : null,
-    parentThreadId,
-    preview: header.preview,
-    ephemeral: false,
-    section: null,
-    sectionEnteredAt: null,
-    projectId: null,
-    historyMode: "paginated",
-    modelProvider: "claude",
-    model: header.model ? `claude:${normalizeClaudeModelIdentifier(header.model)}` : null,
-    reasoningEffort: header.reasoningEffort,
-    createdAt: header.createdAt,
-    updatedAt: header.updatedAt,
-    recencyAt: header.updatedAt,
+  const thread = nativeThread(input.sessionId, header, {
     status,
-    path: null,
-    cwd: header.cwd,
-    cliVersion: header.cliVersion ?? "claude-code",
-    source: input.subagent ? { subAgent: { thread_spawn: {
-      parent_thread_id: parentThreadId!, depth: input.subagent.depth, agent_path: null,
-      agent_nickname: nickname, agent_role: null,
-    } } } : "vscode",
-    canAcceptDirectInput: input.subagent ? false : true,
-    threadSource: input.subagent ? "subagent" : "user",
-    agentNickname: nickname,
-    agentRole: null,
-    gitInfo: { sha: null, branch: header.gitBranch, originUrl: null },
-    name: nickname ?? header.customTitle ?? header.aiTitle,
-    turns,
-  };
+    turns: [...turns],
+    ...(input.subagent ? { subagent: { parentThreadId: parentThreadId!, depth: input.subagent.depth, nickname: nickname! } } : {}),
+  });
   const lastAssistant = selected.findLast((record): record is AssistantRecord => record.type === "assistant");
   return {
     thread,

@@ -1,5 +1,7 @@
 import type { ModelInfo } from "@anthropic-ai/claude-agent-sdk";
-import type { HybridConfig } from "../config/config.js";
+import type { Config } from "../config.js";
+
+type HybridConfig = Config & { readonly modelAliases?: Readonly<Record<string, string>> };
 
 export const DEFAULT_CLAUDE_MODEL_ALIASES: Readonly<Record<string, string>> = {};
 

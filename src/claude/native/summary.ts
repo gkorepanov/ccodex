@@ -14,6 +14,15 @@ export interface TranscriptHeader {
   readonly serviceTier: string | null;
   readonly permissionMode: string | null;
   readonly cliVersion: string | null;
+  /** Claude's `/goal`: set by the command, updated by `goal_status` attachments, cleared by `/goal clear`. */
+  readonly goal: NativeGoal | null;
+}
+
+export interface NativeGoal {
+  readonly objective: string;
+  readonly met: boolean;
+  readonly createdAt: number;
+  readonly updatedAt: number;
 }
 
 export interface TranscriptSummaryState extends TranscriptHeader {
@@ -37,12 +46,21 @@ function hasToolResult(record: UserRecord): boolean {
     && record.message.content.some((block) => block.type === "tool_result");
 }
 
+/** `/name args` for a user-typed slash command record (`<command-name>/goal</command-name>...`). */
+export function slashCommand(text: string): string | undefined {
+  const name = /^<command-name>(\/[^<]+)<\/command-name>/u.exec(text)?.[1];
+  if (!name) return undefined;
+  const args = /<command-args>([\s\S]*?)<\/command-args>/u.exec(text)?.[1]?.trim();
+  return args ? `${name} ${args}` : name;
+}
+
 export function startsTurn(record: UserRecord, subagentPromptUuid?: string): boolean {
   if (record.uuid === subagentPromptUuid) return true;
   if (record.isMeta === true || record.isCompactSummary === true || hasToolResult(record)) return false;
   if (record.origin?.kind === "human") return true;
   if (record.origin !== undefined || !userText(record)) return false;
   const text = userText(record);
+  if (slashCommand(text)) return true;
   return !/<command-name>|<command-message>|<command-args>|<local-command-[^>]*>|<task-notification>/u.test(text)
     && !text.startsWith("[Injected model-visible history]")
     && !/^\[Request interrupted by user(?: for tool use)?\]$/u.test(text);
@@ -61,6 +79,7 @@ const EMPTY_STATE: TranscriptSummaryState = {
   serviceTier: null,
   permissionMode: null,
   cliVersion: null,
+  goal: null,
   hasCreatedAt: false,
   hasFirstPrompt: false,
 };
@@ -98,7 +117,8 @@ export class TranscriptSummarizer {
     }
     if (record.type === "user") {
       if (!this.state.hasFirstPrompt && startsTurn(record, this.subagentPromptUuid)) {
-        this.state.preview = userText(record).trim();
+        const text = userText(record);
+        this.state.preview = (slashCommand(text) ?? text).trim();
         this.state.hasFirstPrompt = true;
       }
       if (record.permissionMode !== undefined) this.state.permissionMode = record.permissionMode;
@@ -108,6 +128,15 @@ export class TranscriptSummarizer {
       if (record.message.stop_reason !== null && record.message.stop_reason !== undefined) {
         this.state.serviceTier = serviceTier(record);
       }
+    } else if (record.type === "system" && record.subtype === "local_command") {
+      const run = record.commandRun;
+      if (run?.command === "goal") this.goalCommand(String(run.args ?? "").trim(), String(record.content ?? ""), timestamp ?? 0);
+    } else if (record.type === "attachment") {
+      const attachment = record.attachment as { type?: string; met?: boolean; condition?: string } | undefined;
+      if (attachment?.type === "goal_status" && attachment.condition) {
+        const createdAt = this.state.goal?.objective === attachment.condition ? this.state.goal.createdAt : timestamp ?? 0;
+        this.state.goal = { objective: attachment.condition, met: attachment.met === true, createdAt, updatedAt: timestamp ?? 0 };
+      }
     } else if (record.type === "custom-title") {
       this.state.customTitle = record.customTitle ?? null;
     } else if (record.type === "ai-title") {
@@ -115,6 +144,11 @@ export class TranscriptSummarizer {
     } else if (record.type === "permission-mode" && typeof record.permissionMode === "string") {
       this.state.permissionMode = record.permissionMode;
     }
+  }
+
+  private goalCommand(args: string, output: string, timestamp: number): void {
+    if (!args || /^(?:clear|stop|off|reset|none|cancel)$/iu.test(args)) this.state.goal = null;
+    else if (/Goal set/u.test(output)) this.state.goal = { objective: args, met: false, createdAt: timestamp, updatedAt: timestamp };
   }
 
   public snapshot(): TranscriptSummaryState {
@@ -135,6 +169,7 @@ export class TranscriptSummarizer {
       serviceTier: this.state.serviceTier,
       permissionMode: this.state.permissionMode,
       cliVersion: this.state.cliVersion,
+      goal: this.state.goal,
     };
   }
 }

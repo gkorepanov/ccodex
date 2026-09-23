@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { atomicWrite } from "../management/layout.js";
+import { atomicWrite } from "../management/files.js";
 
 export const CODEX_CLI_PATH_LABEL = "dev.ccodex.codex-cli-path";
 export const CODEX_CLI_PATH_ENV = "CODEX_CLI_PATH";

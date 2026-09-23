@@ -90,6 +90,7 @@ export interface SystemRecord extends ChainRecord {
   readonly type: "system";
   readonly subtype?: string;
   readonly logicalParentUuid?: string;
+  readonly commandRun?: { readonly command?: string; readonly args?: string };
   readonly compactMetadata?: {
     readonly preservedMessages?: PreservedMessages;
     readonly preservedSegment?: PreservedSegment;
