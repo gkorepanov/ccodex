@@ -1,7 +1,7 @@
 // Scripted stand-in for the Claude Agent SDK `query()`: answers each pushed message, streams like the real CLI and
 // persists the same transcript records under $CLAUDE_CONFIG_DIR/projects, so the native catalog/projector read it.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 type Message = Record<string, any>;
@@ -43,6 +43,8 @@ class Transcript {
     const directory = join(process.env.CLAUDE_CONFIG_DIR!, "projects", cwd.replace(/[^a-zA-Z0-9]/gu, "-"));
     mkdirSync(directory, { recursive: true });
     this.path = join(directory, `${sessionId}.jsonl`);
+    // A resumed session continues the chain.
+    if (existsSync(this.path)) this.last = JSON.parse(readFileSync(this.path, "utf8").trim().split("\n").at(-1)!).uuid;
   }
 
   public write(record: Message, chain = true): string {

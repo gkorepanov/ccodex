@@ -55,6 +55,7 @@ describe("wire objects of Claude threads validate against the installed codex sc
     await call("thread/resume", { threadId }, "ThreadResumeResponse");
     await call("thread/turns/list", { threadId, limit: 10 }, "ThreadTurnsListResponse");
     await call("thread/items/list", { threadId, limit: 10 }, "ThreadItemsListResponse");
+    await call("thread/section/move", { threadId, sectionId: "section-pinned" });
     await call("thread/list", { limit: 20 }, "ThreadListResponse");
     // The fake stock's own rows are minimal; only what CCodex adds is checked.
     for (const model of (await call("model/list", {})).data.filter((entry: any) => entry.id.startsWith("claude:"))) {

@@ -13,7 +13,8 @@ export interface Segment {
 export interface MetaData {
   /**
    * Threads that switched provider: public id → segments, oldest first. The public id is one of the segments
-   * (the first one; for a fork taken in a later segment, the forked backend).
+   * (the first one; for a fork taken in a later segment, the forked backend), or none of them for a 0.4 thread id
+   * kept for its Claude session by the migration.
    */
   lineages: Record<string, Segment[]>;
   /** Archived Claude sessions (stock keeps its own archive flag). */
@@ -32,7 +33,7 @@ export interface MetaData {
  */
 export class Meta {
   private data: MetaData;
-  private rewrites = new Map<string, string>();
+  private idRewrites = new Map<string, string>();
   private hiddenIds = new Set<string>();
 
   public constructor(private readonly path: string) {
@@ -48,13 +49,24 @@ export class Meta {
 
   public lineage(publicId: string): readonly Segment[] | undefined { return this.data.lineages[publicId]; }
 
-  /** Current backend id → public id, for lineages whose current backend is not the public one. */
-  public get currentRewrites(): ReadonlyMap<string, string> { return this.rewrites; }
+  /** Backend id → public id: the current backend and the row's backend of lineages where they differ from it. */
+  public get rewrites(): ReadonlyMap<string, string> { return this.idRewrites; }
 
   /** Backend threads that only exist as a part of some lineage (never listed on their own). */
   public hidden(threadId: string): boolean { return this.hiddenIds.has(threadId); }
 
   public current(publicId: string): Segment | undefined { return this.data.lineages[publicId]?.at(-1); }
+
+  /** The segment whose backend carries the lineage's row (name, preview, archive, section). */
+  public row(publicId: string): Segment {
+    const segments = this.data.lineages[publicId]!;
+    return segments.find((segment) => segment.threadId === publicId) ?? segments[0]!;
+  }
+
+  /** The backend id a public thread id is keyed by: its row's backend for lineages, itself otherwise. */
+  public rowId(threadId: string): string {
+    return this.data.lineages[threadId] ? this.row(threadId).threadId : threadId;
+  }
 
   public setLineage(publicId: string, segments: Segment[]): void {
     this.data.lineages[publicId] = segments;
@@ -110,11 +122,16 @@ export class Meta {
   }
 
   private reindex(): void {
-    const lineages = Object.entries(this.data.lineages);
-    this.rewrites = new Map(lineages.flatMap(([publicId, segments]) =>
-      segments.at(-1)!.threadId === publicId ? [] : [[segments.at(-1)!.threadId, publicId] as const]));
-    this.hiddenIds = new Set(lineages.flatMap(([publicId, segments]) =>
-      segments.flatMap((segment) => segment.threadId === publicId || this.data.lineages[segment.threadId] ? [] : [segment.threadId])));
+    this.idRewrites = new Map();
+    this.hiddenIds = new Set();
+    // Forks share segments: a segment is hidden unless it is some lineage's row.
+    const rows = new Set(Object.keys(this.data.lineages).map((publicId) => this.row(publicId).threadId));
+    for (const [publicId, segments] of Object.entries(this.data.lineages)) {
+      for (const segment of [this.row(publicId), segments.at(-1)!]) {
+        if (segment.threadId !== publicId) this.idRewrites.set(segment.threadId, publicId);
+      }
+      for (const segment of segments) if (!rows.has(segment.threadId)) this.hiddenIds.add(segment.threadId);
+    }
   }
 
   private save(): void {

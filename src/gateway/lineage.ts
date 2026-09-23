@@ -23,10 +23,16 @@ const NO_RESUME = new Set([
   "thread/name/set", "thread/archive", "thread/unarchive", "thread/delete", "thread/metadata/update",
 ]);
 
-/** The marker turn a Claude segment starts with: the summary of the previous segment was injected there. */
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gu;
+
+/**
+ * The marker turn a Claude segment starts with: the summary of the previous segment was injected there. Its id
+ * has no dashes, so it never reads as a backend id to rewrite.
+ */
 function switchTurn(threadId: string, at: number | null): Turn {
+  const id = `switch:${threadId.replaceAll("-", "")}`;
   return {
-    id: `switch:${threadId}`, items: [{ type: "contextCompaction", id: `switch:${threadId}:compaction` }], itemsView: "full",
+    id, items: [{ type: "contextCompaction", id: `${id}:compaction` }], itemsView: "full",
     status: "completed", error: null, startedAt: at, completedAt: at, durationMs: 0,
   };
 }
@@ -60,14 +66,12 @@ export class Lineages {
   }
 
   public rewrite(text: string): string {
-    for (const [backend, publicId] of this.gateway.meta.currentRewrites) {
-      if (text.includes(backend)) text = text.replaceAll(backend, publicId);
-    }
-    return text;
+    const rewrites = this.gateway.meta.rewrites;
+    return rewrites.size ? text.replace(UUID, (id) => rewrites.get(id) ?? id) : text;
   }
 
   public isBackendAnnouncement(text: string): boolean {
-    const rewrites = this.gateway.meta.currentRewrites;
+    const rewrites = this.gateway.meta.rewrites;
     if (!rewrites.size) return false;
     const id = (JSON.parse(text) as JsonObject).params?.thread?.id;
     return rewrites.has(id) || this.gateway.meta.hidden(id);
@@ -109,7 +113,7 @@ export class Lineages {
       case "thread/name/set":
       case "thread/archive":
       case "thread/unarchive": {
-        const row = segments.find((segment) => segment.threadId === publicId)!;
+        const row = this.gateway.meta.row(publicId);
         const result = await this.forward(connection, row, method, params);
         if (method === "thread/name/set" && row !== current) await this.forward(connection, current, method, params);
         return result;
@@ -191,9 +195,10 @@ export class Lineages {
 
   /** List row of a lineage's public thread. */
   public async projectRow(row: Thread): Promise<Thread> {
-    const current = this.gateway.meta.current(row.id);
+    const publicId = this.gateway.meta.rewrites.get(row.id) ?? row.id;
+    const current = this.gateway.meta.current(publicId);
     if (!current || current.threadId === row.id) return row;
-    return this.merge(row, await this.thread(current).catch(() => row), row.id);
+    return this.merge(row, await this.thread(current).catch(() => row), publicId);
   }
 
   private async history(connection: Connection, publicId: string, segments: Segment[], method: string, params: JsonObject): Promise<unknown> {
@@ -201,7 +206,7 @@ export class Lineages {
     if (method === "thread/turns/list") return paginateTurns(turns, params);
     if (method === "thread/items/list") return paginateItems(turns, params);
     const current = segments.at(-1)!;
-    const row = await this.thread(segments.find((segment) => segment.threadId === publicId)!);
+    const row = await this.thread(this.gateway.meta.row(publicId));
     if (method === "thread/read") {
       const { thread } = await this.forward(connection, current, method, { ...params, includeTurns: false });
       return { thread: { ...this.merge(row, thread, publicId), turns: params.includeTurns ? turns : [] } };
@@ -269,7 +274,8 @@ export class Lineages {
     const dropSegment = at.segment > 0 && (beforeTurnId.startsWith("switch:") || beforeTurnId === firstReal);
     const keep = dropSegment ? at.segment : at.segment + 1;
     const dropped = segments.slice(keep);
-    if (dropped.some((segment) => segment.threadId === publicId)) {
+    const rowSegment = this.gateway.meta.row(publicId);
+    if (dropped.includes(rowSegment)) {
       throw invalidRequest("This fork cannot be rolled back past the provider switch it was forked from.");
     }
     if (!dropSegment) await this.forward(connection, segments[at.segment]!, "thread/revert", { threadId: publicId, beforeTurnId });
@@ -279,10 +285,12 @@ export class Lineages {
       if (segment.provider === "claude") this.gateway.meta.setArchived(segment.threadId, true);
       else await this.gateway.stock.request("thread/archive", { threadId: segment.threadId }).catch(() => undefined);
     }
-    if (kept.length === 1 && kept[0]!.threadId === publicId) this.gateway.meta.deleteLineage(publicId);
+    // A lineage back to its own single thread is dropped, unless forks still list that thread as a segment.
+    const shared = Object.entries(this.gateway.meta.lineages).some(([id, other]) => id !== publicId && other.some((segment) => segment.threadId === publicId));
+    if (kept.length === 1 && kept[0]!.threadId === publicId && !shared) this.gateway.meta.deleteLineage(publicId);
     else this.gateway.meta.setLineage(publicId, kept);
     const turns = await this.stitchedTurns(kept);
-    const row = await this.thread(kept.find((segment) => segment.threadId === publicId)!);
+    const row = await this.thread(rowSegment);
     const thread = this.merge(row, await this.thread(kept.at(-1)!), publicId);
     if (dropSegment) connection.notify("thread/reverted", { threadId: publicId });
     return rollback ? { thread: { ...thread, turns } } : { thread, ...historyCursors(turns) };
@@ -317,10 +325,13 @@ export class Lineages {
       return { turn };
     }
     // codex → claude: stock compaction is encrypted, so an ephemeral fork writes a summary with the same model.
-    const turnId = `switch-${randomUUID()}`;
+    const cwd = (await this.thread(source)).cwd;
+    const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd, model: null, effort: null, fast: false, permissionMode: "default" }));
     const now = Math.floor(Date.now() / 1000);
-    const turn: Turn = { id: turnId, items: [], itemsView: "notLoaded", status: "inProgress", error: null, startedAt: now, completedAt: null, durationMs: null };
-    const item = { type: "contextCompaction", id: `${turnId}:compaction` };
+    const marker = switchTurn(session.threadId, now);
+    const turnId = marker.id;
+    const turn: Turn = { ...marker, items: [], itemsView: "notLoaded", status: "inProgress", completedAt: null, durationMs: null };
+    const item = marker.items[0]!;
     connection.notify("turn/started", { threadId: publicId, turn });
     connection.notify("item/started", { item, threadId: publicId, turnId, startedAtMs: Date.now() });
     const finish = (status: "completed" | "failed", message?: string) => {
@@ -336,9 +347,6 @@ export class Lineages {
     void (async () => {
       const summary = await this.gptSummary(source.threadId);
       const last: JsonObject = await this.gateway.stock.request("thread/turns/list", { threadId: source.threadId, limit: 1, sortDirection: "desc" });
-      const cwd = (await this.thread(source)).cwd;
-      const settings = this.gateway.claude.settingsFrom(params, { cwd, model: null, effort: null, fast: false, permissionMode: "default" });
-      const session = this.gateway.claude.create(settings);
       await session.inject(`${SUMMARY_PREFIX}\n${summary}`);
       this.gateway.meta.setLineage(publicId, [
         ...segments.slice(0, -1), { ...source, lastTurnId: last.data[0]?.id ?? null },
@@ -381,7 +389,7 @@ export class Lineages {
     resumed.add(threadId);
     this.resumed.set(connection, resumed);
     connection.provider = "codex";
-    const name = (await this.thread(segments.find((segment) => segment.threadId === publicId)!)).name;
+    const name = (await this.thread(this.gateway.meta.row(publicId))).name;
     if (name) await connection.upstream.request("thread/name/set", { threadId, name: name.replace(/\s*✳️$/u, "") }).catch(() => undefined);
     await connection.upstream.request("turn/start", { ...params, threadId });
   }

@@ -68,7 +68,7 @@ export class Catalog {
       if (section !== params.sectionId) return false;
     }
     if (params.projectId) return false;
-    if (params.parentThreadId && thread.parentThreadId !== params.parentThreadId) return false;
+    if (params.parentThreadId && thread.parentThreadId !== meta.rowId(params.parentThreadId)) return false;
     if (params.searchTerm) {
       const term = String(params.searchTerm).toLowerCase();
       if (!`${thread.name ?? ""}\n${thread.preview}`.toLowerCase().includes(term)) return false;
@@ -77,7 +77,8 @@ export class Catalog {
   }
 
   private async claudeThreads(params: JsonObject): Promise<Thread[]> {
-    const ancestor: string | undefined = params.ancestorThreadId ?? params.parentThreadId ?? undefined;
+    const publicAncestor: string | undefined = params.ancestorThreadId ?? params.parentThreadId ?? undefined;
+    const ancestor = publicAncestor && this.gateway.meta.rowId(publicAncestor);
     const claude = this.gateway.claude;
     let threads = claude.threads();
     if (ancestor && claude.owns(ancestor)) threads = await claude.subagentThreads(ancestor);
@@ -138,7 +139,7 @@ export class Catalog {
     const { cursor: _cursor, limit: _limit, ...filters } = params;
     const key = JSON.stringify(filters);
     const offset = decodeCursor(params.cursor, key);
-    if (!params.cursor) await this.gateway.claude.catalog.refresh();
+    if (!params.cursor) await Promise.all([this.gateway.claude.catalog.refresh(), this.refreshSections()]);
     const claude = await this.project(await this.claudeThreads(params));
     const stock = await this.stockThreads(connection, params, offset + limit + 1, !params.cursor);
     const complete = this.stockCache!.done;
@@ -156,6 +157,12 @@ export class Catalog {
       nextCursor: more && data.length ? encodeCursor({ key, offset: offset + data.length }) : null,
       backwardsCursor: null,
     };
+  }
+
+  private async refreshSections(): Promise<void> {
+    const { data } = await this.gateway.stock.request("threadSection/list", { limit: 100 });
+    this.gateway.sections.clear();
+    for (const section of data) this.gateway.sections.set(section.id, section);
   }
 
   public async search(connection: Connection, params: JsonObject): Promise<JsonObject> {
@@ -194,7 +201,7 @@ export class Catalog {
       stock.push(...page.data);
       cursor = page.nextCursor;
     } while (cursor);
-    const rewrites = this.gateway.meta.currentRewrites;
+    const rewrites = this.gateway.meta.rewrites;
     const ids = [...stock, ...this.gateway.claude.loadedIds()].map((id) => rewrites.get(id) ?? id)
       .filter((id) => !this.gateway.meta.hidden(id));
     const unique = [...new Set(ids)];
@@ -209,8 +216,9 @@ export class Catalog {
    * is recorded so Claude threads keep their place among stock ones.
    */
   public async moveInSection(connection: Connection, params: JsonObject): Promise<JsonObject> {
-    const { threadId, sectionId } = params as { threadId: string; sectionId: string | null };
-    // The row of a lineage is its public thread, so the public id's own provider decides.
+    const { sectionId } = params as { sectionId: string | null };
+    // Claude rows are keyed by their session: a lineage's row backend decides.
+    const threadId = this.gateway.meta.rowId(params.threadId);
     const claude = this.gateway.claude.owns(threadId);
     if (!claude) return connection.upstream.request("thread/section/move", params);
     if (sectionId === null) {
@@ -219,7 +227,7 @@ export class Catalog {
     }
     const members = (await this.list(connection, { sectionId, sortKey: "section_position", limit: 200, archived: false })).data as Thread[];
     const order = members.map((thread) => thread.id).filter((id) => id !== threadId);
-    const at = params.beforeThreadId ? order.indexOf(params.beforeThreadId) : order.length;
+    const at = params.beforeThreadId ? order.indexOf(this.gateway.meta.rowId(params.beforeThreadId)) : order.length;
     order.splice(at < 0 ? order.length : at, 0, threadId);
     this.gateway.meta.setSection(threadId, sectionId);
     this.gateway.meta.setSectionOrder(sectionId, order);
@@ -234,8 +242,10 @@ export class Catalog {
       if (thread.name) connection.notify("thread/name/updated", { threadId: thread.id, threadName: thread.name });
       connection.notify(this.gateway.meta.isArchived(thread.id) ? "thread/archived" : "thread/unarchived", { threadId: thread.id });
     }
-    for (const [publicId, segments] of Object.entries(this.gateway.meta.lineages)) {
-      for (const segment of segments) if (segment.threadId !== publicId) connection.notify("thread/deleted", { threadId: segment.threadId });
+    for (const segments of Object.values(this.gateway.meta.lineages)) {
+      for (const { threadId } of segments) {
+        if (this.gateway.meta.hidden(threadId)) connection.send(JSON.stringify({ method: "thread/deleted", params: { threadId } }), true);
+      }
     }
   }
 }

@@ -38,6 +38,8 @@ export class Gateway {
   public readonly handlers = new Map<string, Handler>();
   public readonly recorder: RpcRecorder;
   public readonly meta: Meta;
+  /** Stock's sections by id (Claude rows name theirs from here); refreshed with each first list page. */
+  public readonly sections = new Map<string, JsonObject>();
   public claude!: ClaudeThreads;
   public stock!: StockClient;
   public catalog!: Catalog;

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -99,7 +99,8 @@ export interface TestGateway {
   stop(): Promise<void>;
 }
 
-export async function startTestGateway(overrides: Partial<Config> = {}): Promise<TestGateway> {
+/** `meta` is written to meta.json before the gateway starts (state left by an earlier version or the migration). */
+export async function startTestGateway(overrides: Partial<Config> = {}, meta?: object): Promise<TestGateway> {
   const root = mkdtempSync(join(tmpdir(), "ccodex-gw-"));
   const config = testConfig({
     codex: FAKE_STOCK,
@@ -109,6 +110,10 @@ export async function startTestGateway(overrides: Partial<Config> = {}): Promise
     publicSocket: join(root, "gateway.sock"),
     ...overrides,
   });
+  if (meta) {
+    mkdirSync(config.dataDir, { recursive: true });
+    writeFileSync(join(config.dataDir, "meta.json"), JSON.stringify(meta));
+  }
   const server = await startGateway(config, config.publicSocket, ["app-server"], new Logger("error"), false);
   const clients: Client[] = [];
   return {

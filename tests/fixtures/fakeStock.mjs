@@ -133,6 +133,8 @@ const handlers = {
     if (params.model) thread.model = params.model;
     return runTurn(connection, thread, params);
   },
+  "threadSection/list": () => ({ data: [{ id: "section-pinned", name: "Pinned", appearance: null }], nextCursor: null }),
+  "thread/section/move": () => ({}),
   "model/list": () => ({ data: [{ id: "gpt-6-luna", model: "gpt-6-luna", displayName: "GPT-6 Luna", isDefault: true }], nextCursor: null }),
   "skills/list": (_connection, params) => ({ data: (params.cwds ?? []).map((cwd) => ({ cwd, skills: [{ name: "stock-skill" }], errors: [] })) }),
   "account/rateLimits/read": () => ({ rateLimits: { limitId: "codex", primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: null }, secondary: null }, rateLimitsByLimitId: null }),

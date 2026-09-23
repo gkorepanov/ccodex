@@ -30,7 +30,7 @@ export class Titles {
   /** Stock `thread/started` as seen by the internal connection. */
   public observe(thread: Thread | undefined): void {
     if (!this.gateway.config.renamePrompt || !thread || thread.ephemeral || thread.forkedFromId || thread.parentThreadId) return;
-    if (this.gateway.meta.hidden(thread.id) || this.gateway.meta.currentRewrites.has(thread.id)) return;
+    if (this.gateway.meta.hidden(thread.id) || this.gateway.meta.rewrites.has(thread.id)) return;
     this.track(thread.id);
   }
 

@@ -129,7 +129,10 @@ export class ClaudeThreads {
     const section = this.gateway.meta.section(thread.id);
     return {
       ...thread,
-      ...(section ? { section: { id: section.sectionId }, sectionEnteredAt: section.enteredAt } : {}),
+      ...(section ? {
+        section: this.gateway.sections.get(section.sectionId) ?? { id: section.sectionId, name: "", appearance: null },
+        sectionEnteredAt: section.enteredAt,
+      } : {}),
       archived: this.gateway.meta.isArchived(thread.id),
     };
   }
