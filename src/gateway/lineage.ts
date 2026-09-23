@@ -45,7 +45,7 @@ export class Lineages {
   /** Model of the other provider chosen through `thread/settings/update`; the switch runs on the next turn. */
   private readonly pending = new Map<string, JsonObject>();
   private readonly resumed = new WeakMap<Connection, Set<string>>();
-  /** Stock backends being created by switches, their held announcements, and the backends created so far. */
+  /** Stock backends being created by switches, their held announcements, and the backends (both providers) created so far. */
   private creatingBackends = 0;
   private readonly heldAnnouncements: Array<{ connection: Connection; threadId: string; text: string }> = [];
   private readonly newBackends = new Set<string>();
@@ -76,7 +76,12 @@ export class Lineages {
 
   /** A backend of a switched thread: never a thread of its own for clients. */
   public isBackend(threadId: string): boolean {
-    return this.newBackends.has(threadId) || this.gateway.meta.rewrites.has(threadId) || this.gateway.meta.hidden(threadId);
+    return this.isHidden(threadId) || this.gateway.meta.rewrites.has(threadId);
+  }
+
+  /** Not listed: a backend that is no lineage's row (a row backend lists as its public thread). */
+  public isHidden(threadId: string): boolean {
+    return this.newBackends.has(threadId) || this.gateway.meta.hidden(threadId);
   }
 
   /** Holds a new thread's announcement while a switch creates a stock backend; false = deliver it now. */
@@ -310,11 +315,13 @@ export class Lineages {
     const shared = Object.entries(this.gateway.meta.lineages).some(([id, other]) => id !== publicId && other.some((segment) => segment.threadId === publicId));
     if (kept.length === 1 && kept[0]!.threadId === publicId && !shared) this.gateway.meta.deleteLineage(publicId);
     else this.gateway.meta.setLineage(publicId, kept);
-    // Rolled-back backends leave the lineage first, or stock's news of them would read as the public thread
-    // archived and unloaded for every client. They stay on disk, archived.
+    // Rolled-back backends are gone like rolled-back turns (kept while a fork's lineage still holds them): listed
+    // anywhere, even as archived, Desktop shows them as threads of their own. They leave the lineage first, or
+    // stock's news of them would read as the public thread's for every client.
     for (const segment of dropped) {
-      if (segment.provider === "claude") this.gateway.meta.setArchived(segment.threadId, true);
-      else await this.gateway.stock.request("thread/archive", { threadId: segment.threadId }).catch(() => undefined);
+      if (Object.values(this.gateway.meta.lineages).some((other) => other.some((entry) => entry.threadId === segment.threadId))) continue;
+      if (segment.provider === "claude") await this.gateway.claude.discard(segment.threadId);
+      else await this.gateway.stock.request("thread/delete", { threadId: segment.threadId }).catch(() => undefined);
     }
     const turns = await this.stitchedTurns(kept);
     const row = await this.thread(rowSegment);
@@ -377,6 +384,8 @@ export class Lineages {
     // codex → claude: stock compaction is encrypted, so an ephemeral fork writes a summary with the same model.
     const cwd = (await this.thread(source)).cwd;
     const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd, model: null, effort: null, fast: false, permissionMode: "default" }));
+    // A backend from its first record on: its transcript is on disk before the lineage lists it.
+    this.newBackends.add(session.threadId);
     const turnId = randomUUID();
     const turn: Turn = { id: turnId, items: [], itemsView: "notLoaded", status: "inProgress", error: null, startedAt: now, completedAt: null, durationMs: null };
     const item = { type: "contextCompaction", id: `${turnId}:compaction` };

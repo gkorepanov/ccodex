@@ -108,7 +108,7 @@ export class Catalog {
 
   /** Lineage backends are hidden; a lineage's public row carries its current backend's live state. */
   private async project(threads: Thread[]): Promise<Thread[]> {
-    return Promise.all(threads.filter((thread) => !this.gateway.meta.hidden(thread.id)).map((thread) => this.gateway.lineages.projectRow(thread)));
+    return Promise.all(threads.filter((thread) => !this.gateway.lineages.isHidden(thread.id)).map((thread) => this.gateway.lineages.projectRow(thread)));
   }
 
   /** Position of a row in the requested order: negative sorts first. */
@@ -201,7 +201,7 @@ export class Catalog {
     } while (cursor && stockResults.length < offset + limit);
     const claude = (await this.project(await this.claudeThreads({ archived: params.archived, sourceKinds: params.sourceKinds, searchTerm })))
       .map((thread) => ({ thread, snippet: thread.name ?? thread.preview.slice(0, 120) }));
-    const visible = stockResults.filter((result) => !this.gateway.meta.hidden(result.thread.id));
+    const visible = stockResults.filter((result) => !this.gateway.lineages.isHidden(result.thread.id));
     let all = [...visible, ...claude].sort((left, right) =>
       direction * (Number(left.thread[key] ?? 0) - Number(right.thread[key] ?? 0)));
     // Without all stock results, only the part no unseen stock result can precede is final.
@@ -224,7 +224,7 @@ export class Catalog {
     } while (cursor);
     const rewrites = this.gateway.meta.rewrites;
     const ids = [...stock, ...this.gateway.claude.loadedIds()].map((id) => rewrites.get(id) ?? id)
-      .filter((id) => !this.gateway.meta.hidden(id));
+      .filter((id) => !this.gateway.lineages.isHidden(id));
     const unique = [...new Set(ids)];
     const limit = Math.max(1, Math.min(Number(params.limit ?? 100), 100));
     const offset = decodeCursor(params.cursor, "loaded");

@@ -133,6 +133,7 @@ const handlers = {
     return {};
   },
   "thread/archive": (_connection, params) => { threads.get(params.threadId).archived = true; broadcast("thread/archived", { threadId: params.threadId }); return {}; },
+  "thread/delete": (_connection, params) => { threads.delete(params.threadId); broadcast("thread/deleted", { threadId: params.threadId }); return {}; },
   "thread/unsubscribe": (connection, params) => { threads.get(params.threadId)?.subscribers.delete(connection); return { status: "unsubscribed" }; },
   "turn/start": (connection, params) => {
     const thread = threads.get(params.threadId);

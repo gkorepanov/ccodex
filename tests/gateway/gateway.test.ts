@@ -580,14 +580,19 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
   ];
   it.each(edits)("edits messages around switches: %s", async (_name, first, steps, expected, expectedFork) => {
     const other = await gateway.connect();
+    const listed = async () => (await Promise.all([false, true].map((archived) => client.request("thread/list", { limit: 500, archived }))))
+      .flatMap((page: any) => page.data.map((row: any) => row.id as string));
+    const before = new Set(await listed());
     const { thread: started } = await client.request("thread/start", { model: first, cwd: "/work" });
     const threadId: string = started.id;
+    const publicIds = [threadId];
     const turns: string[] = [];
     for (const step of steps) {
       if ("revert" in step) {
         await client.request("thread/revert", { threadId, beforeTurnId: turns[step.revert] });
       } else if ("fork" in step) {
         const { thread: fork } = await client.request("thread/fork", { threadId, lastTurnId: turns[step.fork] });
+        publicIds.push(fork.id);
         await client.turn(fork.id, step.text, { model: step.model });
         const { thread } = await client.request("thread/read", { threadId: fork.id, includeTurns: true });
         expect(itemsOf(thread.turns)).toEqual(expectedFork);
@@ -600,8 +605,11 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
     expect(itemsOf(thread.turns)).toEqual(expected);
-    // Another window never hears the thread was archived (switch backends dropped by an edit are).
+    // Another window never hears the thread was archived or deleted (switch backends dropped by an edit are deleted).
     expect(other.notifications("thread/archived", threadId)).toEqual([]);
+    expect(other.notifications("thread/deleted").filter((message) => publicIds.includes(message.params.threadId))).toEqual([]);
+    // No backend is ever listed, not even archived once an edit dropped it (Desktop shows it as a thread of its own).
+    expect(new Set((await listed()).filter((id) => !before.has(id)))).toEqual(new Set(publicIds));
   });
 
   it("keeps a Claude thread's name through an edit of its only message", async () => {
@@ -680,11 +688,28 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     for (const connection of [client, other]) {
       expect(JSON.stringify(connection.messages.filter((message) => message.method?.startsWith("thread/")))).not.toContain(backendId);
     }
-    // A row some client kept anyway is gone, as stock says it (Desktop drops the row); the backend is untouched.
+    // A row some client kept anyway is gone, as stock says it, and deleted for that client (Desktop drops it from its
+    // catalog); the backend is untouched.
     await expect(other.request("thread/archive", { threadId: backendId })).rejects.toThrow(`no rollout found for thread id ${backendId}`);
+    expect(other.notifications("thread/deleted").map((message) => message.params)).toEqual([{ threadId: backendId }]);
+    expect(client.notifications("thread/deleted")).toEqual([]);
     const next = await client.turn(threadId, "third", { model: "gpt-6-luna" });
     expect(next.threadId).toBe(threadId);
     expect(client.notifications("item/completed", threadId).some((message) => message.params.item.text === "gpt: third")).toBe(true);
+  });
+
+  it("never lists a switch's new Claude backend, even while the switch is still writing it", async () => {
+    const threadId = await stockThread();
+    await client.turn(threadId, "first");
+    let release!: () => void;
+    fakeClaude.hold = new Promise((resolve) => { release = resolve; });
+    const switched = client.turn(threadId, "second", { model: CLAUDE });
+    await vi.waitFor(() => expect(fakeClaude.prompts).toHaveLength(1));
+    const backendId = fakeClaude.prompts[0]!.sessionId;
+    const pages = await Promise.all([false, true].map((archived) => client.request("thread/list", { limit: 500, archived })));
+    release();
+    expect(pages.flatMap((page: any) => page.data.map((row: any) => row.id))).not.toContain(backendId);
+    expect((await switched).threadId).toBe(threadId);
   });
 
   it("leaves no empty Claude thread behind when a switch to Claude fails", async () => {

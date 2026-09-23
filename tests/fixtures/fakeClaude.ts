@@ -12,7 +12,7 @@ export interface FakeClaudeLog {
   readonly calls: Array<{ method: string; args: unknown[] }>;
 }
 
-export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string; spawnError: string | null; compactError: string | null } = {
+export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string; spawnError: string | null; compactError: string | null; hold: Promise<void> | null } = {
   prompts: [],
   options: [],
   calls: [],
@@ -21,6 +21,8 @@ export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) 
   spawnError: null,
   /** Set: `/compact` fails, as Claude reports it (`Error during compaction: …`). */
   compactError: null,
+  /** Set: an injection (no model reply) is confirmed only once it settles, its record already on disk. */
+  hold: null,
   reset() {
     this.prompts.length = 0;
     this.options.length = 0;
@@ -28,6 +30,7 @@ export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) 
     this.reply = (text) => `claude: ${text}`;
     this.spawnError = null;
     this.compactError = null;
+    this.hold = null;
   },
 };
 
@@ -122,6 +125,7 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   };
   if (prompt.shouldQuery === false) {
     transcript.write({ type: "user", uuid, message: { role: "user", content: text } });
+    await fakeClaude.hold;
     yield* finish("");
     return;
   }
