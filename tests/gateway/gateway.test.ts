@@ -361,6 +361,30 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(client.notifications("thread/name/updated", threadId).at(-1)!.params.threadName).toBe("Final title");
   });
 
+  it("runs a message queued during a Claude turn, as edited, once the turn ends (Desktop's queue)", async () => {
+    const threadId = await claudeThread();
+    let approve!: (value: unknown) => void;
+    const asked = new Promise<void>((running) => {
+      client.onRequest = () => new Promise((resolve) => { approve = resolve; running(); });
+    });
+    await client.request("turn/start", { threadId, input: text("this needs approval") });
+    await asked;
+    const { queuedSubmission } = await client.request("thread/queue/add", { threadId, input: text("queued") });
+    const deleted = await client.request("thread/queue/add", { threadId, input: text("dropped") });
+    await client.request("thread/queue/update", { threadId, queuedSubmissionId: queuedSubmission.id, input: text("queued, edited") });
+    await client.request("thread/queue/delete", { threadId, queuedSubmissionId: deleted.queuedSubmission.id });
+    expect((await client.request("thread/queue/list", { threadId })).data.map((entry: any) => entry.input[0].text)).toEqual(["queued, edited"]);
+    approve({ decision: "accept" });
+    await client.waitFor("turn/completed", (params) => params.threadId === threadId && fakeClaude.prompts.at(-1)?.text === "queued, edited");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(thread.turns.map((turn: any) => itemsOf([turn]).filter((item) => item.startsWith("user:") || item.startsWith("agent:")))).toEqual([
+      ["user:this needs approval", "agent:approval allow"],
+      ["user:queued, edited", "agent:claude: queued, edited"],
+    ]);
+    expect((await client.request("thread/queue/list", { threadId })).data).toEqual([]);
+  });
+
   it("continues Claude from before a reverted turn (Desktop's message edit)", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "apple");
