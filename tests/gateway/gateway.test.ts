@@ -71,18 +71,34 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(list.data.map((row: any) => row.id)).toContain(threadId);
   });
 
-  it("lists sessions created outside CCodex with default metadata", async () => {
+  it("shows a session made in the claude CLI at once, with its whole history in Desktop's pages", async () => {
     const directory = join(process.env.CLAUDE_CONFIG_DIR!, "projects", "-cli");
     mkdirSync(directory, { recursive: true });
     const id = "0a0a0a0a-0000-4000-8000-000000000001";
-    writeFileSync(join(directory, `${id}.jsonl`), `${JSON.stringify({
-      type: "user", uuid: "u1", parentUuid: null, sessionId: id, cwd: "/cli", timestamp: "2026-09-23T00:00:00.000Z",
-      origin: { kind: "human" }, message: { role: "user", content: "made in the claude CLI" },
-    })}\n`);
+    const record = (n: number, type: "user" | "assistant", content: unknown) => ({
+      type, uuid: `${type}-${n}`, parentUuid: type === "user" ? (n > 1 ? `assistant-${n - 1}` : null) : `user-${n}`,
+      sessionId: id, cwd: "/cli", timestamp: new Date(Date.UTC(2026, 8, 23, 0, 0, n)).toISOString(),
+      message: type === "user" ? { role: "user", content }
+        : { role: "assistant", model: "claude-sonnet-5", id: `msg_${n}`, content: [{ type: "text", text: content }], stop_reason: "end_turn" },
+    });
+    const turns = Array.from({ length: 130 }, (_, index) => index + 1);
+    writeFileSync(join(directory, `${id}.jsonl`), turns.flatMap((n) => [record(n, "user", `question ${n}`), record(n, "assistant", `answer ${n}`)])
+      .map((line) => `${JSON.stringify(line)}\n`).join(""));
+    const started = await client.waitFor("thread/started", (params) => params.thread.id === id);
+    expect(started.thread).toMatchObject({ preview: "question 1", modelProvider: "claude", cwd: "/cli" });
     const list = await client.request("thread/list", { limit: 200 });
-    const row = list.data.find((thread: any) => thread.id === id);
-    expect(row).toMatchObject({ preview: "made in the claude CLI", modelProvider: "claude", cwd: "/cli" });
-    expect(row.archived).toBe(false);
+    expect(list.data.find((thread: any) => thread.id === id)).toMatchObject({ preview: "question 1", archived: false });
+
+    await client.request("thread/resume", { threadId: id });
+    const pages: string[][] = [];
+    let cursor = null;
+    do {
+      const page: any = await client.request("thread/turns/list", { threadId: id, cursor, limit: 100, sortDirection: "desc" });
+      pages.push(page.data.map((turn: any) => itemsOf([turn]).join(" / ")));
+      cursor = page.nextCursor;
+    } while (cursor);
+    expect(pages.map((page) => page.length)).toEqual([100, 30]);
+    expect(pages.flat().reverse()).toEqual(turns.map((n) => `user:question ${n} / agent:answer ${n}`));
   });
 
   it("pages through the list whatever rows fall on a page boundary (switched threads included)", async () => {
@@ -178,6 +194,39 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
     expect(itemsOf(thread.turns).at(-1)).toBe("agent:approval allow");
     expect(client.notifications("serverRequest/resolved", threadId)).toHaveLength(1);
+  });
+
+  it("follows Desktop's approval toggle on a Claude thread (ask / full access / approve for me)", async () => {
+    const { thread } = await client.request("thread/start", { model: "claude:claude-haiku-4-5-20251001", cwd: "/work" });
+    const threadId = thread.id;
+    const asked: string[] = [];
+    client.onRequest = (message) => { asked.push(message.method); return { decision: "accept" }; };
+    const turn = async (settings: object, model?: string) => {
+      asked.length = 0;
+      await client.request("turn/start", { threadId, input: text("this needs approval"), ...(model ? { model } : {}), ...settings });
+      await client.waitFor("turn/completed", (params) => params.threadId === threadId);
+      client.messages.length = 0;
+      return asked.length;
+    };
+    // Desktop's three options, as it sends them.
+    const ask = { approvalPolicy: { granular: { sandbox_approval: false, rules: true, mcp_elicitations: true } }, permissions: ":workspace" };
+    const full = { approvalPolicy: "never", permissions: ":danger-full-access" };
+    const approveForMe = { approvalPolicy: "on-request", approvalsReviewer: "guardian_subagent", permissions: ":workspace" };
+    expect(await turn(ask)).toBe(1);
+    expect(await turn(full)).toBe(0);
+    expect(await turn(ask)).toBe(1);
+    // Claude has no auto mode on Haiku (it asks), but does once the thread moves to a model that has it.
+    expect(await turn(approveForMe)).toBe(1);
+    expect(await turn(approveForMe, CLAUDE)).toBe(0);
+  });
+
+  it("keeps a Claude model switch out of the thread's history", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "on opus");
+    await client.request("thread/settings/update", { threadId, model: "claude:claude-haiku-4-5-20251001" });
+    await client.turn(threadId, "on haiku");
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(itemsOf(thread.turns)).toEqual(["user:on opus", "agent:claude: on opus", "user:on haiku", "agent:claude: on haiku"]);
   });
 
   it("answers /ccstatus and /ccstate with a synthetic turn", async () => {

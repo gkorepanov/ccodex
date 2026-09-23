@@ -344,7 +344,8 @@ export class ClaudeSession {
     this.settings = next;
     if (this.sdk) {
       if (next.model !== previous.model) await this.sdk.setModel(next.model ?? undefined);
-      if (next.permissionMode !== previous.permissionMode) await this.sdk.setPermissionMode(next.permissionMode);
+      // The CLI settles the mode per model (no auto mode on Haiku falls back to default): a new model re-applies it.
+      if (next.permissionMode !== previous.permissionMode || next.model !== previous.model) await this.sdk.setPermissionMode(next.permissionMode);
       if (next.effort !== previous.effort || next.fast !== previous.fast) {
         await this.sdk.applyFlagSettings({ effortLevel: next.effort as never, fastMode: next.fast });
       }

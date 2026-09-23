@@ -144,7 +144,9 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     const tool = { type: "assistant", message: { id: messageId, role: "assistant", model: "claude-opus-5-5", content: [{ type: "tool_use", id: toolUseId, name, input }], stop_reason: "tool_use", usage: { input_tokens: 5, output_tokens: 1 } } };
     transcript.write({ ...tool, apiBlockIndex: 0 });
     yield base(sessionId, tool);
-    const decision = await options.canUseTool(name, input, { toolUseID: toolUseId, signal: new AbortController().signal, suggestions: [] });
+    // Like the CLI: auto mode and bypass decide without asking.
+    const decision = ["auto", "bypassPermissions"].includes(options.permissionMode) ? { behavior: "allow" }
+      : await options.canUseTool(name, input, { toolUseID: toolUseId, signal: new AbortController().signal, suggestions: [] });
     const result = decision.behavior === "allow" ? "done" : `denied: ${decision.message}`;
     transcript.write({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: result }] }, toolUseResult: { stdout: result, stderr: "" } });
     yield base(sessionId, { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: result }] }, tool_use_result: { stdout: result, stderr: "" } });
@@ -204,6 +206,9 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
 
 export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<Message>; options: Message }): any {
   fakeClaude.options.push(options);
+  // Like the CLI: auto mode is unavailable on Haiku and falls back to default (and stays there after a model switch).
+  const settle = (mode: string) => mode === "auto" && String(options.model).includes("haiku") ? "default" : mode;
+  options.permissionMode = settle(options.permissionMode);
   const sessionId: string = options.sessionId ?? options.resume ?? randomUUID();
   const transcript = new Transcript(sessionId, options.cwd ?? process.cwd());
   if (options.resumeSessionAt) transcript.last = options.resumeSessionAt;
@@ -226,8 +231,15 @@ export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<Message>;
     supportedCommands: () => Promise.resolve([{ name: "review-pr", description: "Review a PR", argumentHint: "<n>" }]),
     askSideQuestion: (question: string) => Promise.resolve({ response: `side: ${question}` }),
     interrupt: record("interrupt"),
-    setModel: record("setModel"),
-    setPermissionMode: record("setPermissionMode"),
+    setModel: (model: string) => {
+      // Like the CLI: the switch lands in the transcript as a local `/model` command.
+      transcript.write({ type: "user", isMeta: true, message: { role: "user", content: "<local-command-caveat>Caveat</local-command-caveat>" } });
+      transcript.write({ type: "user", message: { role: "user", content: `<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>${model}</command-args>` } });
+      transcript.write({ type: "user", message: { role: "user", content: `<local-command-stdout>Set model to ${model}</local-command-stdout>` } });
+      options.model = model;
+      return record("setModel")(model);
+    },
+    setPermissionMode: (mode: string) => { options.permissionMode = settle(mode); return record("setPermissionMode")(mode); },
     applyFlagSettings: record("applyFlagSettings"),
     stopTask: record("stopTask"),
     close: () => { closed = true; void iterator.return(undefined); },
