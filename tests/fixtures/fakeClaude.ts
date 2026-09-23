@@ -146,6 +146,7 @@ export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<Message>;
   fakeClaude.options.push(options);
   const sessionId: string = options.sessionId ?? options.resume ?? randomUUID();
   const transcript = new Transcript(sessionId, options.cwd ?? process.cwd());
+  if (options.resumeSessionAt) transcript.last = options.resumeSessionAt;
   let closed = false;
   const record = (method: string) => (...args: unknown[]) => {
     fakeClaude.calls.push({ method, args });

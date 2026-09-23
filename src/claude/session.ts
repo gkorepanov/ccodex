@@ -194,6 +194,7 @@ export class ClaudeSession {
     });
     this.sdk = sdk;
     this.exists = true;
+    if (this.resumeAt) this.host.resumedAtLeaf(this.threadId);
     this.resumeAt = undefined;
     void this.consume(sdk);
     return sdk;

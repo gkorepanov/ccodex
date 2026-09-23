@@ -326,6 +326,11 @@ export class ClaudeThreads {
     return session;
   }
 
+  /** The session continued from the rollback leaf: its new records end the history from now on. */
+  public resumedAtLeaf(threadId: string): void {
+    this.gateway.meta.setLeaf(threadId, null);
+  }
+
   public turnCompleted(session: ClaudeSession, turnId: string): void {
     const threadId = session.threadId;
     const before = JSON.stringify(this.goal(threadId));
@@ -505,7 +510,6 @@ export class ClaudeThreads {
       case "thread/items/list": return paginateItems((await this.read(threadId)).turns, params);
       case "turn/start": {
         this.gateway.subscribe(threadId, connection);
-        this.gateway.meta.setLeaf(threadId, null);
         return { turn: await this.session(threadId).startTurn(params) };
       }
       case "turn/steer": return { turnId: await this.session(threadId).steer(params) };

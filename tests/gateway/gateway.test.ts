@@ -191,6 +191,24 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(texts).toEqual(["start", "/goal ship it", "this meets the goal: ship it", "/goal again"]);
   });
 
+  it("continues Claude from before a reverted turn (Desktop's message edit)", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "apple");
+    const { turn } = await client.turn(threadId, "banana");
+    await client.request("thread/revert", { threadId, beforeTurnId: turn.id });
+    await client.turn(threadId, "cherry");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(thread.turns.map((t: any) => t.items[0].content[0].text)).toEqual(["apple", "cherry"]);
+    // Any input continues from the leaf, not only turn/start (here a queued message on an idle thread).
+    await client.request("thread/revert", { threadId, beforeTurnId: thread.turns[1].id });
+    await client.request("thread/queue/add", { threadId, input: [{ type: "text", text: "date", text_elements: [] }] });
+    await client.waitFor("turn/completed", (params) => params.threadId === threadId && fakeClaude.prompts.at(-1)?.text === "date");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const after = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(after.thread.turns.map((t: any) => t.items[0].content[0].text)).toEqual(["apple", "date"]);
+  });
+
   it("announces a Claude sub-agent before its spawn completes, before Claude has written its transcript", async () => {
     const threadId = await claudeThread();
     const before = client.messages.length;
