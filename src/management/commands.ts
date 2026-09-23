@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { delegate } from "../cli/delegate.js";
-import { defaultConfigToml, productHome, type Config } from "../config.js";
+import { defaultConfigToml, displacedCodexPath, isCcodex, productHome, remoteCodexPath, type Config } from "../config.js";
 import { probeAppServer } from "../daemon/probe.js";
 import { reconcileManagedProcess, stopManagedProcess } from "../daemon/supervisor.js";
 import { reconcileOwnedGateway, stopSocketOwner } from "../daemon/ownership.js";
@@ -111,21 +111,24 @@ function writeShellBlock(path: string, bin: string): void {
   if (next !== existing) atomicWrite(path, next, existsSync(path) ? statSync(path).mode & 0o777 : 0o600);
 }
 
-/** `~/.local/bin/codex` → the managed shim, so SSH Desktop sessions (which use that path) reach CCodex. */
-function installRemoteShim(home: string, bin: string, previous: Manifest["remoteCodexShim"]): Manifest["remoteCodexShim"] {
-  const path = join(resolve(process.env.CODEX_INSTALL_DIR ?? join(homedir(), ".local", "bin")), "codex");
+/**
+ * `~/.local/bin/codex` → the managed shim: Desktop over SSH puts that directory first on PATH. A codex found there
+ * (Codex's installer puts it there, also over our link) moves aside and stays CCodex's stock codex.
+ */
+function installRemoteShim(home: string, bin: string): Manifest["remoteCodexShim"] {
+  const path = remoteCodexPath();
   const target = join(bin, "codex");
   if (path === target) return undefined;
-  let backupPath = previous?.backupPath;
-  const ours = existsSync(path) && lstatSync(path).isSymbolicLink() && resolve(dirname(path), readlinkSync(path)) === target;
-  if (existsSync(path) && !ours && !backupPath) {
-    backupPath = join(home, "backups", "remote-codex");
+  const backupPath = displacedCodexPath(home);
+  if (existsSync(path) && !isCcodex(path, home)) {
     mkdirSync(dirname(backupPath), { recursive: true, mode: 0o700 });
-    renameSync(path, backupPath);
+    // The installer's link points at `…/standalone/current/…`, which follows its updates: keep pointing there.
+    if (lstatSync(path).isSymbolicLink()) atomicSymlink(resolve(dirname(path), readlinkSync(path)), backupPath);
+    else renameSync(path, backupPath);
   }
   mkdirSync(dirname(path), { recursive: true });
   atomicSymlink(target, path);
-  return { path, target, ...(backupPath ? { backupPath } : {}) };
+  return { path, target, ...(existsSync(backupPath) ? { backupPath } : {}) };
 }
 
 export async function setup(args: readonly string[]): Promise<number> {
@@ -167,7 +170,7 @@ export async function setup(args: readonly string[]): Promise<number> {
   }
   const managedShellFiles = shellFiles();
   for (const path of managedShellFiles) writeShellBlock(path, paths.bin);
-  const remoteCodexShim = installRemoteShim(paths.home, paths.bin, previous?.remoteCodexShim);
+  const remoteCodexShim = installRemoteShim(paths.home, paths.bin);
   const configPath = join(paths.home, "config.toml");
   if (!existsSync(configPath)) atomicWrite(configPath, defaultConfigToml(), 0o600);
   const desktopCliPath = process.platform === "darwin" ? installCliPathAgent(join(paths.bin, "codex"), previous?.desktopCliPath) : undefined;
@@ -285,6 +288,9 @@ export async function doctor(config: Config, json: boolean): Promise<number> {
     check("install", () => {
       const manifest = readManifest();
       if (!manifest) throw new Error("not activated → run: ccodex setup");
+      const remote = manifest.remoteCodexShim;
+      // Codex's installer (or Desktop's "Update Codex") puts its own codex there, and SSH sessions skip CCodex.
+      if (remote && !(existsSync(remote.path) && isCcodex(remote.path))) throw new Error(`${remote.path} is not CCodex, Desktop over SSH bypasses it → run: ccodex setup`);
       return `${manifest.activeVersion} (${basename(readlinkSync(layout().current))})`;
     }),
   ]);

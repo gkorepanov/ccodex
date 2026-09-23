@@ -84,15 +84,32 @@ function inside(path: string, root: string): boolean {
   return child === "" || (child !== ".." && !child.startsWith("../"));
 }
 
-/** First `codex` on PATH that is not CCodex itself (shims, managed installs, this entrypoint). */
-export function findInstalledCodex(home = productHome()): string | undefined {
+/** Where Codex's installer (and Desktop over SSH) puts `codex`; `ccodex setup` links it to CCodex. */
+export function remoteCodexPath(): string {
+  return join(resolve(expandHome(process.env.CODEX_INSTALL_DIR ?? join(homedir(), ".local", "bin"))), "codex");
+}
+
+/** The `codex` that `ccodex setup` moved away from `remoteCodexPath()`. */
+export function displacedCodexPath(home = productHome()): string {
+  return join(home, "backups", "remote-codex");
+}
+
+/** CCodex itself: its shims, managed installs, this entrypoint. */
+export function isCcodex(path: string, home = productHome()): boolean {
+  const real = realpathSync(path);
   const own = process.argv[1] && existsSync(process.argv[1]) ? realpathSync(process.argv[1]) : undefined;
+  return inside(path, join(home, "bin")) || inside(path, join(home, "versions")) || real === own || real.includes("/@gkorepanov/ccodex/");
+}
+
+/** First `codex` on PATH that is not CCodex; at `remoteCodexPath()` that is the codex CCodex displaced there. */
+export function findInstalledCodex(home = productHome()): string | undefined {
+  const remote = remoteCodexPath();
+  const displaced = displacedCodexPath(home);
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     const candidate = resolve(directory || ".", "codex");
-    if (!existsSync(candidate) || inside(candidate, home)) continue;
-    const real = realpathSync(candidate);
-    if (real === own || real.includes("/@gkorepanov/ccodex/")) continue;
-    return candidate;
+    if (!existsSync(candidate)) continue;
+    if (!isCcodex(candidate, home)) return candidate;
+    if (candidate === remote && existsSync(displaced) && !isCcodex(displaced, home)) return displaced;
   }
   return undefined;
 }

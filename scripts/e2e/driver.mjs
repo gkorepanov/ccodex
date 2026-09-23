@@ -102,8 +102,8 @@ function check(condition, message, detail) {
   if (!condition) throw Object.assign(new Error(message), { detail });
 }
 
-async function daemon(command) {
-  const output = execFileSync("codex", ["app-server", "daemon", command], { encoding: "utf8", timeout: 60_000 });
+async function daemon(command, env = process.env) {
+  const output = execFileSync("codex", ["app-server", "daemon", command], { encoding: "utf8", timeout: 60_000, env });
   for (let attempt = 0; command !== "stop" && !existsSync(SOCKET) && attempt < 100; attempt += 1) await sleep(100);
   return output.trim();
 }
@@ -463,6 +463,41 @@ const scenarios = {
     const key = (map) => [...map.values()].map((thread) => `${thread.id}:${thread.archived}:${thread.name}`).sort().join("\n");
     check(key(again) === key(rows), "same list after restart", { before: rows.size, after: again.size });
     return { migrated: migrated.split("\n").filter((line) => !line.startsWith("fork ")), listed: rows.size, readable: readable.length, alias: alias.publicId, names: readable.filter((entry) => entry.name).length };
+  },
+
+  /**
+   * Codex's own installer (what Desktop's "Update Codex" runs) replaces the `~/.local/bin/codex` link that Desktop over
+   * SSH runs first: doctor flags it, `ccodex setup` takes the link back and keeps the installed codex as stock.
+   */
+  async officialInstaller() {
+    const remote = join(HOME, ".local", "bin", "codex");
+    const desktopSsh = { ...process.env, PATH: `${dirname(remote)}:${process.env.PATH}` };
+    const script = execFileSync("curl", ["-fsSL", "https://chatgpt.com/codex/install.sh"], { encoding: "utf8", timeout: 60_000 });
+    execFileSync("sh", ["-c", script], { encoding: "utf8", timeout: 300_000, env: { ...process.env, CODEX_NON_INTERACTIVE: "1" } });
+    const installed = execFileSync("readlink", [remote], { encoding: "utf8" }).trim();
+    check(installed.includes("/.codex/packages/standalone/"), "the installer took ~/.local/bin/codex", installed);
+    const flagged = JSON.parse(spawnSync("ccodex", ["doctor", "--json"], { encoding: "utf8" }).stdout).checks.find((entry) => entry.id === "install");
+    check(!flagged.ok && flagged.detail.includes("ccodex setup"), "doctor flags the takeover", flagged);
+    const setup = execFileSync("ccodex", ["setup"], { encoding: "utf8", timeout: 120_000 }).trim();
+    check(execFileSync("readlink", [remote], { encoding: "utf8" }).trim() === join(HOME, ".ccodex", "bin", "codex"), "setup took the link back", setup);
+    check(execFileSync("readlink", [join(HOME, ".ccodex", "backups", "remote-codex")], { encoding: "utf8" }).trim() === installed, "the installed codex kept aside");
+    // Like Desktop over SSH: ~/.local/bin first. The gateway runs on the installer's codex.
+    client.close();
+    await daemon("restart", desktopSsh);
+    client = await Client.connect();
+    const doctor = JSON.parse(spawnSync("ccodex", ["doctor", "--json"], { encoding: "utf8", env: desktopSsh }).stdout);
+    const codex = doctor.checks.find((entry) => entry.id === "codex").detail;
+    check(doctor.checks.every((entry) => entry.ok) && codex.startsWith(join(HOME, ".ccodex", "backups", "remote-codex")), "doctor: stock is the installed codex", doctor.checks);
+    const standalone = execFileSync(installed, ["--version"], { encoding: "utf8" }).trim();
+    const replies = [];
+    for (const [model, word] of [[state.haiku, "CLAUDE-AFTER-INSTALL"], [GPT, "GPT-AFTER-INSTALL"]]) {
+      const { thread } = await client.request("thread/start", { model, cwd: WORK });
+      const reply = await client.turn(thread.id, `Reply with exactly: ${word}`);
+      check(reply.answers.some((answer) => answer.includes(word)), `${model} turn after setup`, reply.answers);
+      replies.push(...reply.answers);
+    }
+    check(codex.includes(standalone.split(" ").at(-1)), "the gateway's codex is the installed version", { codex, standalone });
+    return { installed, standalone, codex, replies };
   },
 
   /** Desktop's terminal/git helpers (process/spawn, no thread) run on stock; doctor; uninstall leaves plain codex. */
