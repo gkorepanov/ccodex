@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { access, mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { query, type ModelInfo, type Options, type PermissionMode, type Query, type SDKUserMessage, type SlashCommand } from "@anthropic-ai/claude-agent-sdk";
 import type { Config } from "../config.js";
 import type { JsonObject } from "../protocol/codex.js";
@@ -136,11 +137,23 @@ export async function withProbeQuery<T>(config: Config, cwd: string | undefined,
   }
 }
 
-export function mapSkill(config: Config, skill: SlashCommand): JsonObject {
+/**
+ * A Claude skill as stock lists it. Its path is Claude's own file for it, which a GPT chat mentioning it reads; a
+ * built-in, plugin or MCP command has none and points at a note that it runs only in Claude chats.
+ */
+export async function mapSkill(config: Config, cwd: string, skill: SlashCommand): Promise<JsonObject> {
+  const command = `${skill.name.split(":").join("/")}.md`;
+  const files = [config.claudeHome, join(cwd, ".claude")].flatMap((root) => [join(root, "skills", skill.name, "SKILL.md"), join(root, "commands", command)]);
+  let path = (await Promise.all(files.map((file) => access(file).then(() => file, () => null)))).find(Boolean);
+  if (!path) {
+    path = join(config.dataDir, "virtual", "claude-skills", encodeURIComponent(skill.name), "SKILL.md");
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, `---\nname: claude:${skill.name}\ndescription: ${JSON.stringify(skill.description)}\n---\n\n\`/${skill.name}\` is a Claude Code command without a file of its own (built in, or from a plugin or MCP server). It runs only in Claude chats: to use it, the user switches this chat to a Claude model.\n`);
+  }
   return {
     name: `claude:${skill.name}`,
     description: skill.argumentHint ? `${skill.description} Arguments: ${skill.argumentHint}` : skill.description,
-    path: join(config.dataDir, "virtual", "claude-skills", encodeURIComponent(skill.name), "SKILL.md"),
+    path,
     scope: "user",
     enabled: true,
     pluginId: null,

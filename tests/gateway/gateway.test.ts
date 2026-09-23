@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fakeClaude, fakeQuery } from "../fixtures/fakeClaude.js";
 import { startTestGateway, type Client, type TestGateway } from "./harness.js";
@@ -59,6 +59,16 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     // What Desktop mostly sends: no cwds, stock's own cwd.
     const defaults = await client.request("skills/list", { forceReload: true });
     expect(defaults.data.map((entry: any) => [entry.cwd, entry.skills.map((skill: any) => skill.name)])).toEqual([["/home/fake", ["stock-skill", "claude:review-pr"]]]);
+  });
+
+  it("points a Claude skill at Claude's file for it, or at a note, so a GPT chat mentioning it can read it", async () => {
+    const project = join(gateway.root, "project");
+    const file = join(project, ".claude", "skills", "review-pr", "SKILL.md");
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "---\nname: review-pr\n---\n");
+    const [found, builtin] = (await client.request("skills/list", { cwds: [project, "/work"] })).data.map((entry: any) => entry.skills.at(-1).path);
+    expect(found).toBe(file);
+    expect(readFileSync(builtin, "utf8")).toContain("`/review-pr` is a Claude Code command without a file of its own");
   });
 
   it("runs a Claude thread: stream, persist, read back, list", async () => {

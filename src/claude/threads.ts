@@ -505,7 +505,7 @@ export class ClaudeThreads {
       const cached = this.skillCache.get(cwd);
       if (!cached || Date.now() - cached.at > 5 * 60_000) {
         const skills = withProbeQuery(this.config, cwd, (probe) => probe.supportedCommands())
-          .then((commands) => commands.map((command) => mapSkill(this.config, command)))
+          .then((commands) => Promise.all(commands.map((command) => mapSkill(this.config, cwd, command))))
           .catch(() => []);
         this.skillCache.set(cwd, { at: Date.now(), skills });
       }

@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { crc32, deflateSync } from "node:zlib";
 
 const HOME = homedir();
 const PACKAGE = join(HOME, ".ccodex", "current", "node_modules", "@gkorepanov", "ccodex");
@@ -15,6 +16,18 @@ const SOCKET = join(HOME, ".codex", "app-server-control", "app-server-control.so
 const WORK = join(HOME, "work");
 const GPT = "gpt-6-luna";
 
+/** A solid red size×size PNG. */
+const redPng = (size) => {
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const length = Buffer.alloc(4); length.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([length, body, crc]);
+  };
+  const header = Buffer.alloc(13); header.writeUInt32BE(size, 0); header.writeUInt32BE(size, 4); header.set([8, 2, 0, 0, 0], 8);
+  const row = Buffer.concat([Buffer.from([0]), Buffer.from(Array(size).fill([255, 0, 0]).flat())]);
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header), chunk("IDAT", deflateSync(Buffer.concat(Array(size).fill(row)))), chunk("IEND", Buffer.alloc(0))]);
+};
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const text = (value) => [{ type: "text", text: value, text_elements: [] }];
 const itemsOf = (turns) => turns.flatMap((turn) => turn.items.map((item) => item.type === "userMessage"
@@ -264,6 +277,31 @@ const scenarios = {
     const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/u;
     check(childItems.includes("mcpToolCall") && childItems.some((item) => item.startsWith("agent:◆") && uuid.test(item)), "Codex's call and messages in the sub-agent's chat", childItems);
     return { name: children[0].agentNickname, childItems, answers: done.answers };
+  },
+
+  /** An image attached in Desktop (a local file) reaches Claude and stays on the user message. */
+  async claudeImage() {
+    const image = join(WORK, "red.png");
+    writeFileSync(image, redPng(64));
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
+    const input = [...text("What single color fills this image? Reply with one lowercase word."), { type: "localImage", path: image }];
+    const done = await client.turn(thread.id, "", { input });
+    check(/\bred\b/iu.test(done.answers.join(" ")), "Claude saw the image", done.answers);
+    const user = (await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread.turns[0].items.find((item) => item.type === "userMessage");
+    // Read back from Claude's transcript, the file comes back inlined.
+    check(user.content.some((part) => part.type === "image" && part.url.startsWith("data:image/png;base64,")), "image kept on the user message", user.content.map((part) => part.type));
+    return { answers: done.answers };
+  },
+
+  /** Both providers' skills are listed in every chat (Desktop asks per cwd): a Claude skill mentioned in a GPT chat is Claude's own file. */
+  async claudeSkillInGpt() {
+    const skill = join(HOME, ".claude", "skills", "workforce", "SKILL.md");
+    const listed = (await client.request("skills/list", { cwds: [WORK] })).data[0].skills.find((entry) => entry.name === "claude:workforce");
+    check(listed?.path === skill, "Claude skill listed with its file", listed);
+    const { thread } = await client.request("thread/start", { model: GPT, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    const done = await client.turn(thread.id, `[$claude:workforce](${skill}) Reply with only the first markdown heading of this skill's file.`, { model: GPT });
+    check(done.answers.join(" ").includes("Subagents and token usage"), "GPT read the Claude skill", done.answers);
+    return { answers: done.answers };
   },
 
   async codexMcpStreaming() {
