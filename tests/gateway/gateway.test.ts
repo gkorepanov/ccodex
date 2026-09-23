@@ -127,6 +127,8 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "context");
     const { thread: side } = await client.request("thread/fork", { threadId, ephemeral: true, excludeTurns: true, threadSource: "user" });
+    // Desktop opens a side chat with a boundary message.
+    await client.request("thread/inject_items", { threadId: side.id, items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Side conversation boundary." }] }] });
     await client.turn(side.id, "what did I say?");
     const answer = client.notifications("item/completed", side.id).map((message) => message.params.item).find((item) => item.type === "agentMessage");
     expect(answer.text).toBe("side: what did I say?");

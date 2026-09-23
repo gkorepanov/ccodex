@@ -608,6 +608,8 @@ export class ClaudeThreads {
       case "thread/settings/update":
       case "thread/name/set":
       case "thread/metadata/update":
+      // Desktop's "side conversation boundary": Claude's side question already treats the thread as reference only.
+      case "thread/inject_items":
         return {};
       case "thread/attachment/list":
       case "thread/queue/list":

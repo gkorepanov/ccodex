@@ -221,11 +221,15 @@ const scenarios = {
     const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
     await client.turn(thread.id, "My favorite color is teal. Reply only with OK.");
     const { thread: side } = await client.request("thread/fork", { threadId: thread.id, ephemeral: true, excludeTurns: true, threadSource: "user" });
+    // Desktop opens a side chat with a boundary message.
+    const boundary = [{ type: "message", role: "user", content: [{ type: "input_text", text: "Side conversation boundary." }] }];
+    await client.request("thread/inject_items", { threadId: side.id, items: boundary });
     const done = await client.turn(side.id, "What is my favorite color? One word.");
     check(done.answers.join(" ").toLowerCase().includes("teal"), "side sees the context", done.answers);
     const main = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
     check(main.thread.turns.length === 1, "side leaves the thread alone", itemsOf(main.thread.turns));
     const stockSide = await client.request("thread/fork", { threadId: state.stock, ephemeral: true, excludeTurns: true, threadSource: "user" });
+    await client.request("thread/inject_items", { threadId: stockSide.thread.id, items: boundary });
     const stockDone = await client.turn(stockSide.thread.id, "Reply with the word SIDE-OK.", { model: GPT });
     return { claude: done.answers, stock: stockDone.answers };
   },
