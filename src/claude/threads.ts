@@ -32,6 +32,8 @@ interface RateLimitWindow {
   resetsAt: number | null;
 }
 
+/** Claude's standard context window, until a session of the model reports its own. */
+const DEFAULT_CONTEXT_WINDOW = 200_000;
 const WINDOW_MINUTES: Record<string, number> = { five_hour: 300, seven_day: 10_080, seven_day_opus: 10_080, seven_day_sonnet: 10_080 };
 
 /** The Claude side of the gateway: catalog of native sessions, live sessions, side chats, models, skills. */
@@ -43,6 +45,8 @@ export class ClaudeThreads {
   private readonly subagentRoots = new Map<string, string>();
   /** Sub-agents spawned live, shown until Claude has written their transcript. */
   private readonly spawnedSubagents = new Map<string, Thread>();
+  /** Context window of each Claude model, as its sessions report it. */
+  public readonly contextWindows = new Map<string, number>();
   /** Running sub-agents: their thread follows the transcript Claude writes (what was shown: item id → item). */
   private readonly liveSubagents = new Map<string, { turnId?: string; shown: Map<string, string>; size: number; poll: NodeJS.Timeout; refresh?: Promise<void> }>();
   private models_?: Promise<JsonObject[]>;
@@ -281,7 +285,7 @@ export class ClaudeThreads {
   }
 
   /** Thread with its turns (history + the live turn). */
-  public async read(threadId: string): Promise<{ thread: Thread; turns: Turn[] }> {
+  public async read(threadId: string): Promise<{ thread: Thread; turns: Turn[]; usage?: TranscriptProjection["tokenUsage"] }> {
     await this.models().catch(() => undefined);
     const side = this.sides.get(threadId);
     if (side) return { thread: this.sideThread(side), turns: side.turns };
@@ -305,7 +309,7 @@ export class ClaudeThreads {
     const thread = header
       ? nativeThread(threadId, header, { status: this.status(threadId) })
       : { ...projection.thread, turns: [] };
-    return { thread: this.decorate(thread), turns };
+    return { thread: this.decorate(thread), turns, usage: projection.tokenUsage };
   }
 
   public settings(threadId: string): SessionSettings {
@@ -744,7 +748,12 @@ export class ClaudeThreads {
   private async resume(connection: Connection, params: JsonObject): Promise<JsonObject> {
     const threadId: string = params.threadId;
     this.gateway.subscribe(threadId, connection);
-    const { thread, turns } = await this.read(threadId);
+    const { thread, turns, usage } = await this.read(threadId);
+    // Like stock, the context meter follows a resume (Desktop's /status reads it).
+    if (usage?.last) {
+      const modelContextWindow = this.contextWindows.get((thread.model ?? "").slice(this.config.modelPrefix.length)) ?? DEFAULT_CONTEXT_WINDOW;
+      setImmediate(() => this.gateway.emit(threadId, "thread/tokenUsage/updated", { threadId, turnId: turns.at(-1)?.id ?? null, tokenUsage: { ...usage, modelContextWindow } }));
+    }
     // A sub-agent has no session of its own: it shows the model and directory it runs with.
     const settings = thread.parentThreadId && thread.model
       ? { ...this.settings(threadId), cwd: thread.cwd, model: this.pickerModel(thread.model.slice(this.config.modelPrefix.length)) }

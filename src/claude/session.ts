@@ -11,6 +11,7 @@ import {
 import { claudeContent, normalizeUserInput, userMessage } from "./inputMapper.js";
 import { completedToolItem } from "./native/projector.js";
 import { assistantBlockItemId } from "./native/ids.js";
+import { normalizeClaudeModelIdentifier } from "./modelSelection.js";
 import { baseOptions } from "./sdk.js";
 import { proposedChanges, startTool, updateToolInput, type ActiveTool } from "./toolMapper.js";
 import type { ClaudeThreads } from "./threads.js";
@@ -711,6 +712,9 @@ export class ClaudeSession {
     if (!this.turn) return;
     this.turn.resultSeen = true;
     this.costUsd += Number(m.total_cost_usd ?? 0);
+    for (const [model, usage] of Object.entries<any>(m.modelUsage ?? {})) {
+      if (usage?.contextWindow) this.host.contextWindows.set(normalizeClaudeModelIdentifier(model), Number(usage.contextWindow));
+    }
     const windows = Object.values(m.modelUsage ?? {}).map((usage: any) => Number(usage?.contextWindow ?? 0)).filter(Boolean);
     if (windows.length) this.contextWindow = Math.max(...windows);
     if (m.subtype !== "success" && !this.turn.interrupted) {

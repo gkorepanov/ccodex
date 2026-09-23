@@ -132,6 +132,18 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(usage.total).toMatchObject({ inputTokens: 20, outputTokens: 6 });
   });
 
+  it("reports a resumed Claude thread's context usage like stock does (Desktop's /status shows it)", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "first");
+    const other = await gateway.connect("other");
+    const resumed = other.messages.length;
+    await other.request("thread/resume", { threadId });
+    const usage = await other.waitFor("thread/tokenUsage/updated", (params) => params.threadId === threadId);
+    expect(other.messages.slice(resumed).findIndex((message) => message.method === "thread/tokenUsage/updated"))
+      .toBeGreaterThan(other.messages.slice(resumed).findIndex((message) => message.result?.thread?.id === threadId));
+    expect(usage.tokenUsage).toMatchObject({ last: { inputTokens: 10, outputTokens: 3, totalTokens: 13 }, modelContextWindow: 200_000 });
+  });
+
   it("asks the client to approve Claude tool use", async () => {
     const threadId = await claudeThread();
     const asked: any[] = [];

@@ -55,7 +55,7 @@ export interface TranscriptProjection {
   readonly thread: Thread;
   readonly turns: readonly Turn[];
   readonly lastAssistantUuid: string | null;
-  readonly tokenUsageTotal: TokenUsageBreakdown;
+  readonly tokenUsage: { readonly total: TokenUsageBreakdown; readonly last: TokenUsageBreakdown | null };
   readonly skippedLines: number;
   readonly compactionBoundaries: ReadonlySet<string>;
   readonly turnBoundaries: readonly TurnProviderBoundary[];
@@ -63,7 +63,8 @@ export interface TranscriptProjection {
   readonly selectedRecordUuids: ReadonlySet<string>;
 }
 
-function projectedUsage(records: readonly TranscriptChainRecord[]): TokenUsageBreakdown {
+/** Claude's token use over a history, and of its last request (Desktop's context meter). */
+function projectedUsage(records: readonly TranscriptChainRecord[]): { total: TokenUsageBreakdown; last: TokenUsageBreakdown | null } {
   const total = {
     totalTokens: 0,
     inputTokens: 0,
@@ -72,6 +73,7 @@ function projectedUsage(records: readonly TranscriptChainRecord[]): TokenUsageBr
     outputTokens: 0,
     reasoningOutputTokens: 0,
   };
+  let last: TokenUsageBreakdown | null = null;
   const messageIds = new Set<string>();
   for (const record of records) {
     if (record.type !== "assistant" || !record.message.usage) continue;
@@ -83,13 +85,17 @@ function projectedUsage(records: readonly TranscriptChainRecord[]): TokenUsageBr
     const cached = Number(usage.cache_read_input_tokens ?? 0);
     const cacheWrite = Number(usage.cache_creation_input_tokens ?? 0);
     const output = Number(usage.output_tokens ?? 0);
-    total.inputTokens += input + cached + cacheWrite;
+    last = {
+      totalTokens: input + cached + cacheWrite + output, inputTokens: input + cached + cacheWrite, cachedInputTokens: cached,
+      cacheWriteInputTokens: cacheWrite, outputTokens: output, reasoningOutputTokens: 0,
+    };
+    total.inputTokens += last.inputTokens;
     total.cachedInputTokens += cached;
     total.cacheWriteInputTokens += cacheWrite;
     total.outputTokens += output;
-    total.totalTokens += input + cached + cacheWrite + output;
+    total.totalTokens += last.totalTokens;
   }
-  return total;
+  return { total, last };
 }
 
 export interface ToolCompletion {
@@ -562,7 +568,7 @@ export async function projectTranscript(input: ProjectTranscriptInput): Promise<
     thread,
     turns,
     lastAssistantUuid: lastAssistant?.uuid ?? null,
-    tokenUsageTotal: projectedUsage(selected),
+    tokenUsage: projectedUsage(selected),
     skippedLines,
     compactionBoundaries: history.compactionBoundaries,
     turnBoundaries: projectTurnBoundaries(selected, input.subagent?.promptRecordUuid),
