@@ -54,7 +54,7 @@ export class Titles {
     } finally {
       void this.gateway.stock.request("thread/unsubscribe", { threadId: thread.id }).catch(() => undefined);
     }
-    title = collapse(title.split("\n").find((line) => line.trim()) ?? "").replace(/^["'`]+|["'`]+$/gu, "");
+    title = collapse(title.split("\n").find((line) => line.trim()) ?? "").replace(/^["'`*_]+|["'`*_]+$/gu, "");
     if (!title) return;
     if (this.gateway.claude.owns(threadId)) await this.gateway.claude.rename(threadId, `${title} ✳️`);
     else await this.gateway.stock.request("thread/name/set", { threadId, name: title });

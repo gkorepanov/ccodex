@@ -46,7 +46,8 @@ function broadcast(method, params) {
 
 function reply(thread, text) {
   if (text.includes("CONTEXT CHECKPOINT COMPACTION")) return `GPT-SUMMARY(${thread.forkedFromId})`;
-  if (text.includes("<user_prompt>")) return "🦊 Fox Title";
+  // Title models sometimes wrap the title in markdown.
+  if (text.includes("<user_prompt>")) return "**🦊 Fox Title_**";
   return `gpt: ${text}`;
 }
 
