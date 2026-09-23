@@ -197,11 +197,12 @@ export class NativeSessionCatalog {
     }));
     const entries = scanned.filter((entry): entry is CatalogEntry => entry !== undefined);
     this.entries = new Map(entries.map((entry) => [entry.path, entry]));
-    const summaries = entries.map((entry) => entry.summary)
+    const threads = entries.filter((entry) => entry.state.hasConversation);
+    const summaries = threads.map((entry) => entry.summary)
       .sort((left, right) => right.updatedAt - left.updatedAt || left.sessionId.localeCompare(right.sessionId));
     this.ordered = summaries;
     this.bySessionId = new Map(summaries.map((summary) => [summary.sessionId, summary]));
-    this.entriesBySessionId = new Map(entries.map((entry) => [entry.sessionId, entry]));
+    this.entriesBySessionId = new Map(threads.map((entry) => [entry.sessionId, entry]));
   }
 
   private async discover(): Promise<DiscoveredFile[]> {

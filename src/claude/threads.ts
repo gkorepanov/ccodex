@@ -785,6 +785,7 @@ export class ClaudeThreads {
     const session = this.sessions.get(threadId);
     session?.unload();
     this.sessions.delete(threadId);
+    await this.catalog.refresh();
     if (this.catalog.get(threadId)) await deleteSession(threadId);
     this.gateway.meta.forget(threadId);
     await this.catalog.refresh();

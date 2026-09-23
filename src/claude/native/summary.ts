@@ -28,6 +28,8 @@ export interface NativeGoal {
 export interface TranscriptSummaryState extends TranscriptHeader {
   readonly hasCreatedAt: boolean;
   readonly hasFirstPrompt: boolean;
+  /** Any conversation record: Claude may rewrite a closed session's metadata (title, cost) into a deleted file. */
+  readonly hasConversation: boolean;
 }
 
 export function timestampSeconds(timestamp: string | undefined): number | null {
@@ -84,6 +86,7 @@ const EMPTY_STATE: TranscriptSummaryState = {
   goal: null,
   hasCreatedAt: false,
   hasFirstPrompt: false,
+  hasConversation: false,
 };
 
 function serviceTier(record: TranscriptRecord): string | null {
@@ -113,6 +116,7 @@ export class TranscriptSummarizer {
     if (timestamp !== null) this.state.updatedAt = timestamp;
 
     if (isChainRecord(record)) {
+      this.state.hasConversation = true;
       if (record.cwd !== undefined) this.state.cwd = record.cwd;
       if (record.gitBranch !== undefined) this.state.gitBranch = record.gitBranch;
       if (record.version !== undefined) this.state.cliVersion = record.version;

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -99,6 +99,23 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     } while (cursor);
     expect(pages.map((page) => page.length)).toEqual([100, 30]);
     expect(pages.flat().reverse()).toEqual(turns.map((n) => `user:question ${n} / agent:answer ${n}`));
+  });
+
+  it("keeps a deleted Claude thread gone when Claude writes its closing metadata into the file afterwards", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "hello");
+    const projects = join(process.env.CLAUDE_CONFIG_DIR!, "projects");
+    const transcript = join(projects, readdirSync(projects).find((key) => existsSync(join(projects, key, `${threadId}.jsonl`)))!, `${threadId}.jsonl`);
+    await client.request("thread/delete", { threadId });
+    expect(existsSync(transcript)).toBe(false);
+    // What the CLI writes after close() while a background task runs: a file with no conversation in it.
+    writeFileSync(transcript, [
+      { type: "last-prompt", lastPrompt: "hello", sessionId: threadId },
+      { type: "ai-title", aiTitle: "Greeting", sessionId: threadId },
+    ].map((line) => `${JSON.stringify(line)}\n`).join(""));
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const list = await client.request("thread/list", { limit: 50 });
+    expect(list.data.map((row: any) => row.id)).not.toContain(threadId);
   });
 
   it("pages through the list whatever rows fall on a page boundary (switched threads included)", async () => {
