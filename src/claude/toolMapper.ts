@@ -107,28 +107,6 @@ function mcpName(name: string): { server: string; tool: string } | undefined {
   return { server, tool: parts.join("__") || name };
 }
 
-function planText(input: Record<string, unknown>): string {
-  const todos = Array.isArray(input.todos) ? input.todos : [];
-  return todos.flatMap((value) => {
-    if (!value || typeof value !== "object") return [];
-    const todo = value as Record<string, unknown>;
-    const marker = todo.status === "completed" ? "[x]" : todo.status === "in_progress" ? "[-]" : "[ ]";
-    return [`${marker} ${text(todo.content) || "Task"}`];
-  }).join("\n");
-}
-
-export function planSteps(input: Record<string, unknown>) {
-  const todos = Array.isArray(input.todos) ? input.todos : [];
-  return todos.flatMap((value) => {
-    if (!value || typeof value !== "object") return [];
-    const todo = value as Record<string, unknown>;
-    return [{
-      step: text(todo.content) || "Task",
-      status: todo.status === "completed" ? "completed" as const : todo.status === "in_progress" ? "inProgress" as const : "pending" as const,
-    }];
-  });
-}
-
 export function startTool(
   index: number,
   block: Record<string, unknown>,
@@ -172,7 +150,6 @@ export function startTool(
       model: text(input.model) || null, reasoningEffort: null, agentsStates: {},
     } };
   }
-  if (name === "TodoWrite") return { state, item: { type: "plan", id: state.itemId, text: planText(input) } };
   return { state, item: {
     type: "dynamicToolCall", id: state.itemId, namespace: "claude", tool: name,
     arguments: input as JsonValue, status: "inProgress", contentItems: null, success: null, durationMs: null,
@@ -195,7 +172,6 @@ export function updateToolInput(
   else if (item.type === "collabAgentToolCall" && item.tool === "sendInput") {
     item.prompt = text(input.message) || text(input.content) || item.prompt;
   }
-  else if (item.type === "plan") item.text = planText(input);
   return item;
 }
 

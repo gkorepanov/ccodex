@@ -152,6 +152,40 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     yield base(sessionId, { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: result }] }, tool_use_result: { stdout: result, stderr: "" } });
     reply = `approval ${decision.behavior}`;
   }
+  const question = /^ask me: (.+\?) (.+)$/u.exec(text);
+  if (question) {
+    const toolUseId = `toolu_${randomUUID().slice(0, 8)}`;
+    const input = { questions: [{ question: question[1]!, header: "Pick", options: question[2]!.split("|").map((label) => ({ label, description: `${label} option` })), multiSelect: false }] };
+    const tool = { type: "assistant", message: { id: `msg_${randomUUID().slice(0, 8)}`, role: "assistant", model: "claude-opus-5-5", content: [{ type: "tool_use", id: toolUseId, name: "AskUserQuestion", input }], stop_reason: "tool_use", usage: { input_tokens: 5, output_tokens: 1 } } };
+    transcript.write({ ...tool, apiBlockIndex: 0 });
+    yield base(sessionId, tool);
+    const decision = await options.canUseTool("AskUserQuestion", input, { toolUseID: toolUseId, signal: new AbortController().signal, suggestions: [] });
+    const answer = decision.updatedInput.answers[question[1]!];
+    const content = [{ type: "tool_result", tool_use_id: toolUseId, content: `User has answered your questions: "${question[1]}"="${answer}".` }];
+    transcript.write({ type: "user", message: { role: "user", content }, toolUseResult: { questions: input.questions, answers: decision.updatedInput.answers } });
+    yield base(sessionId, { type: "user", message: { role: "user", content } });
+    reply = `you picked ${answer}`;
+  }
+  const tracked = /^track tasks: (.+)$/u.exec(text);
+  if (tracked) {
+    const call = async function* (name: string, input: Message, result: Message, output: string): AsyncGenerator<Message> {
+      const toolUseId = `toolu_${randomUUID().slice(0, 8)}`;
+      const tool = { type: "assistant", message: { id: `msg_${randomUUID().slice(0, 8)}`, role: "assistant", model: "claude-opus-5-5", content: [{ type: "tool_use", id: toolUseId, name, input }], stop_reason: "tool_use", usage: { input_tokens: 5, output_tokens: 1 } } };
+      transcript.write({ ...tool, apiBlockIndex: 0 });
+      yield base(sessionId, tool);
+      const content = [{ type: "tool_result", tool_use_id: toolUseId, content: output }];
+      transcript.write({ type: "user", message: { role: "user", content }, toolUseResult: result });
+      yield base(sessionId, { type: "user", message: { role: "user", content }, tool_use_result: result });
+    };
+    // Like Claude Code's task tools: TaskCreate hands out ids, TaskUpdate changes a task by id.
+    const subjects = tracked[1]!.split("|");
+    for (const [index, subject] of subjects.entries()) {
+      yield* call("TaskCreate", { subject, description: subject }, { task: { id: String(index + 1), subject } }, `Task #${index + 1} created successfully: ${subject}`);
+    }
+    yield* call("TaskUpdate", { taskId: "1", status: "in_progress" }, { success: true, taskId: "1" }, "Updated task #1 status");
+    yield* call("TaskUpdate", { taskId: "1", status: "completed", subject: `${subjects[0]} (done)` }, { success: true, taskId: "1" }, "Updated task #1 status");
+    yield* call("TaskUpdate", { taskId: "2", status: "deleted" }, { success: true, taskId: "2" }, "Updated task #2 status");
+  }
   const asked = /^ask codex: (.+)$/u.exec(text);
   if (asked) yield* codexCall(transcript, sessionId, options, asked[1]!);
   const delegated = /^ask a codex sub-agent: (.+)$/u.exec(text);
@@ -192,11 +226,21 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   }
   const messageId = `msg_${randomUUID().slice(0, 8)}`;
   yield base(sessionId, { type: "stream_event", event: { type: "message_start", message: { id: messageId } } });
-  yield base(sessionId, { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
-  yield base(sessionId, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: reply } } });
+  // Like the CLI: Claude 5 thinking comes back empty unless the session asks for summarized thinking.
+  const thought = text.startsWith("think: ") ? options.extraArgs?.["thinking-display"] === "summarized" ? `pondering ${text.slice(7)}` : "" : undefined;
+  const textIndex = thought === undefined ? 0 : 1;
+  if (thought !== undefined) {
+    yield base(sessionId, { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } } });
+    if (thought) yield base(sessionId, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: thought } } });
+    const thinking = { type: "assistant", message: { id: messageId, role: "assistant", model: "claude-opus-5-5", content: [{ type: "thinking", thinking: thought, signature: "sig" }], stop_reason: null, usage: { input_tokens: 10, output_tokens: 3 } } };
+    transcript.write({ ...thinking, apiBlockIndex: 0 });
+    yield base(sessionId, thinking);
+  }
+  yield base(sessionId, { type: "stream_event", event: { type: "content_block_start", index: textIndex, content_block: { type: "text", text: "" } } });
+  yield base(sessionId, { type: "stream_event", event: { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text: reply } } });
   yield base(sessionId, { type: "stream_event", event: { type: "message_stop" } });
   const assistant = { type: "assistant", message: { id: messageId, role: "assistant", model: "claude-opus-5-5", content: [{ type: "text", text: reply }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 3 } } };
-  transcript.write({ ...assistant, apiBlockIndex: 0 });
+  transcript.write({ ...assistant, apiBlockIndex: textIndex });
   const met = /meets the goal: (.+)/u.exec(text);
   if (met) transcript.write({ type: "attachment", attachment: { type: "goal_status", met: true, condition: met[1] } });
   // Streamed assistant messages never carry the stop reason (only the transcript does).

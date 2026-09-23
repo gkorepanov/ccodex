@@ -144,6 +144,8 @@ export class ClaudeSession {
   private exists: boolean;
   public compactSummary?: (summary: string) => void;
   private readonly codexTails = new Map<string, () => void>();
+  /** Claude's task list (TaskCreate/TaskUpdate), sent like stock's plan updates: the client shows it as the turn's to-do list. */
+  private readonly plan = new Map<string, { step: string; status: string }>();
 
   public constructor(
     private readonly host: ClaudeThreads,
@@ -177,6 +179,8 @@ export class ClaudeSession {
         ...(settings.effort ? { effort: settings.effort as never } : {}),
         ...(settings.fast ? { settings: { fastMode: true } } : {}),
         permissionMode: settings.permissionMode,
+        // Claude 5 omits its thinking by default: summarized, it shows as the turn's reasoning summary like stock's.
+        extraArgs: { "thinking-display": "summarized" },
         allowDangerouslySkipPermissions: true,
         includePartialMessages: true,
         ...(this.exists ? { resume: this.threadId } : { sessionId: this.threadId }),
@@ -706,7 +710,19 @@ export class ClaudeSession {
       const item = completedToolItem(tool, { record: { toolUseResult: result }, block }, this.settings.cwd);
       if (item.type === "collabAgentToolCall" && item.tool === "spawnAgent" && item.receiverThreadIds.length) this.host.subagentSpawned(this, item);
       this.itemCompleted(item);
+      if (tool.state.name === "TaskCreate" || tool.state.name === "TaskUpdate") this.updatePlan(tool.state.input, result);
     }
+  }
+
+  private updatePlan(input: Record<string, any>, result: any): void {
+    const id = String(result?.task?.id ?? input.taskId);
+    const current = this.plan.get(id);
+    if (input.status === "deleted") this.plan.delete(id);
+    else this.plan.set(id, {
+      step: String(input.subject ?? current?.step ?? `Task #${id}`),
+      status: input.status === "in_progress" ? "inProgress" : input.status ?? current?.status ?? "pending",
+    });
+    this.emit("turn/plan/updated", { threadId: this.threadId, turnId: this.turn!.id, explanation: null, plan: [...this.plan.values()] });
   }
 
   private onResult(m: any): void {

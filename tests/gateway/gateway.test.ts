@@ -196,6 +196,48 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(client.notifications("serverRequest/resolved", threadId)).toHaveLength(1);
   });
 
+  it("puts Claude's question to the user in the client's own question UI, even with full access", async () => {
+    const threadId = await claudeThread();
+    const asked: any[] = [];
+    client.onRequest = (message) => {
+      asked.push(message);
+      return { answers: { [message.params.questions[0].id]: { answers: ["Blue"] } } };
+    };
+    await client.request("turn/start", { threadId, input: text("ask me: Which color? Red|Blue"), approvalPolicy: "never", permissions: ":danger-full-access" });
+    await client.waitFor("turn/completed", (params) => params.threadId === threadId);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ method: "item/tool/requestUserInput", params: { threadId, isBlocking: true } });
+    expect(asked[0].params.questions).toEqual([expect.objectContaining({
+      question: "Which color?", header: "Pick", options: [{ label: "Red", description: "Red option" }, { label: "Blue", description: "Blue option" }],
+    })]);
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(itemsOf(thread.turns).at(-1)).toBe("agent:you picked Blue");
+  });
+
+  it("shows Claude's thinking as a reasoning summary, live and in history", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "think: the answer");
+    const summaries = (items: any[]) => items.filter((item) => item.type === "reasoning").map((item) => item.summary.join(""));
+    const live = client.notifications("item/completed", threadId).map((message) => message.params.item);
+    expect(summaries(live)).toEqual(["pondering the answer"]);
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(summaries(thread.turns[0].items)).toEqual(["pondering the answer"]);
+  });
+
+  it("shows Claude's task list as the turn's to-do list, like stock's plan updates", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "track tasks: Count files|Report|Clean up");
+    const plans = client.notifications("turn/plan/updated", threadId).map((message) => message.params.plan);
+    expect(plans).toEqual([
+      [{ step: "Count files", status: "pending" }],
+      [{ step: "Count files", status: "pending" }, { step: "Report", status: "pending" }],
+      [{ step: "Count files", status: "pending" }, { step: "Report", status: "pending" }, { step: "Clean up", status: "pending" }],
+      [{ step: "Count files", status: "inProgress" }, { step: "Report", status: "pending" }, { step: "Clean up", status: "pending" }],
+      [{ step: "Count files (done)", status: "completed" }, { step: "Report", status: "pending" }, { step: "Clean up", status: "pending" }],
+      [{ step: "Count files (done)", status: "completed" }, { step: "Clean up", status: "pending" }],
+    ]);
+  });
+
   it("follows Desktop's approval toggle on a Claude thread (ask / full access / approve for me)", async () => {
     const { thread } = await client.request("thread/start", { model: "claude:claude-haiku-4-5-20251001", cwd: "/work" });
     const threadId = thread.id;
