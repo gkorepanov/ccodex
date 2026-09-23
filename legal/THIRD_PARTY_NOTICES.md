@@ -1131,15 +1131,15 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | cargo:zvariant | 4.2.0 | MIT |
 | cargo:zvariant_derive | 4.2.0 | MIT |
 | cargo:zvariant_utils | 2.1.0 | MIT |
-| npm:@anthropic-ai/claude-agent-sdk | 0.3.261 | SEE LICENSE IN README.md |
-| npm:@anthropic-ai/claude-agent-sdk-darwin-arm64 | 0.3.261 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-darwin-x64 | 0.3.261 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-linux-arm64 | 0.3.261 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-linux-arm64-musl | 0.3.261 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-linux-x64 | 0.3.261 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-linux-x64-musl | 0.3.261 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-win32-arm64 | 0.3.261 | SEE LICENSE IN LICENSE.md |
-| npm:@anthropic-ai/claude-agent-sdk-win32-x64 | 0.3.261 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk | 0.3.280 | SEE LICENSE IN README.md |
+| npm:@anthropic-ai/claude-agent-sdk-darwin-arm64 | 0.3.280 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-darwin-x64 | 0.3.280 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-linux-arm64 | 0.3.280 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-linux-arm64-musl | 0.3.280 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-linux-x64 | 0.3.280 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-linux-x64-musl | 0.3.280 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-win32-arm64 | 0.3.280 | SEE LICENSE IN LICENSE.md |
+| npm:@anthropic-ai/claude-agent-sdk-win32-x64 | 0.3.280 | SEE LICENSE IN LICENSE.md |
 | npm:@anthropic-ai/sdk | 0.111.0 | MIT |
 | npm:@babel/runtime | 7.29.7 | MIT |
 | npm:@emnapi/core | 1.11.1 | MIT |
@@ -1175,13 +1175,13 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | npm:@jridgewell/sourcemap-codec | 1.5.5 | MIT |
 | npm:@modelcontextprotocol/sdk | 1.29.0 | MIT |
 | npm:@napi-rs/wasm-runtime | 1.1.6 | MIT |
-| npm:@openai/codex | 0.153.3 | Apache-2.0 |
-| npm:@openai/codex-darwin-arm64 | 0.153.3-darwin-arm64 | Apache-2.0 |
-| npm:@openai/codex-darwin-x64 | 0.153.3-darwin-x64 | Apache-2.0 |
-| npm:@openai/codex-linux-arm64 | 0.153.3-linux-arm64 | Apache-2.0 |
-| npm:@openai/codex-linux-x64 | 0.153.3-linux-x64 | Apache-2.0 |
-| npm:@openai/codex-win32-arm64 | 0.153.3-win32-arm64 | Apache-2.0 |
-| npm:@openai/codex-win32-x64 | 0.153.3-win32-x64 | Apache-2.0 |
+| npm:@openai/codex | 0.156.0 | Apache-2.0 |
+| npm:@openai/codex-darwin-arm64 | 0.156.0-darwin-arm64 | Apache-2.0 |
+| npm:@openai/codex-darwin-x64 | 0.156.0-darwin-x64 | Apache-2.0 |
+| npm:@openai/codex-linux-arm64 | 0.156.0-linux-arm64 | Apache-2.0 |
+| npm:@openai/codex-linux-x64 | 0.156.0-linux-x64 | Apache-2.0 |
+| npm:@openai/codex-win32-arm64 | 0.156.0-win32-arm64 | Apache-2.0 |
+| npm:@openai/codex-win32-x64 | 0.156.0-win32-x64 | Apache-2.0 |
 | npm:@oxc-project/types | 0.139.0 | MIT |
 | npm:@rolldown/binding-android-arm64 | 1.1.5 | MIT |
 | npm:@rolldown/binding-darwin-arm64 | 1.1.5 | MIT |
@@ -1233,7 +1233,6 @@ Generated from package-lock.json and locked Cargo metadata. Review entries and u
 | npm:debug | 4.4.3 | MIT |
 | npm:depd | 2.0.0 | MIT |
 | npm:detect-libc | 2.1.2 | Apache-2.0 |
-| npm:diff | 8.0.3 | BSD-3-Clause |
 | npm:dunder-proto | 1.0.1 | MIT |
 | npm:ee-first | 1.1.1 | MIT |
 | npm:encodeurl | 2.0.0 | MIT |

@@ -25,6 +25,7 @@ import {
   startsTurn,
   summarizeTranscript,
   timestampSeconds,
+  userText,
   type TranscriptHeader,
 } from "./summary.js";
 
@@ -359,7 +360,7 @@ function turnStatus(records: readonly TranscriptChainRecord[], hasFollowingTurn:
   const failed = records.some((record) => record.type === "system" && record.subtype === "api_error"
     || record.type === "assistant" && (record.isApiErrorMessage === true || Boolean(record.error)));
   const interrupted = records.some((record) => record.type === "user" && (record.interruptedByShutdown === true
-    || record.toolUseResult?.interrupted === true));
+    || record.toolUseResult?.interrupted === true || /^\[Request interrupted by user(?: for tool use)?\]$/u.test(userText(record))));
   if (interrupted) return "interrupted";
   if (failed) return "failed";
   const lastAssistant = records.findLast((record): record is AssistantRecord => record.type === "assistant");

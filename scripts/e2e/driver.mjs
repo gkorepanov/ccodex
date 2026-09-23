@@ -257,6 +257,70 @@ const scenarios = {
     return { streamed, tools, answers: done.answers };
   },
 
+  async interruptSteerQueue() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    let since = client.messages.length;
+    const { turn } = await client.request("turn/start", { threadId: thread.id, input: text("Use the Bash tool to run `sleep 20`, then reply DONE.") });
+    await client.waitFor("item/started", (p) => p.threadId === thread.id && p.item.type === "commandExecution", 60_000, since);
+    await client.request("turn/interrupt", { threadId: thread.id, turnId: turn.id });
+    const interrupted = await client.waitFor("turn/completed", (p) => p.threadId === thread.id, 60_000, since);
+    check(interrupted.turn.status === "interrupted", "interrupted", interrupted.turn);
+
+    since = client.messages.length;
+    const second = await client.request("turn/start", { threadId: thread.id, input: text("Use the Bash tool to run `sleep 6`, then reply with one short sentence.") });
+    await client.waitFor("item/started", (p) => p.threadId === thread.id && p.item.type === "commandExecution", 60_000, since);
+    await client.request("turn/steer", { threadId: thread.id, expectedTurnId: second.turn.id, input: text("Also include the word ZEBRA in your reply.") });
+    const queued = await client.request("thread/queue/add", { threadId: thread.id, input: text("Reply with the word QUEUED-OK."), clientUserMessageId: "e2e-queue" });
+    const listed = await client.request("thread/queue/list", { threadId: thread.id });
+    await client.waitFor("item/completed", (p) => p.threadId === thread.id && p.item.type === "agentMessage" && /QUEUED-OK/u.test(p.item.text), 180_000, since);
+    const steered = answers(client, thread.id, since).join(" ");
+    check(/ZEBRA/u.test(steered), "steer reached the running turn", steered);
+    const { thread: read } = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
+    check(read.turns[0].status === "interrupted", "interrupted in history", read.turns.map((t) => t.status));
+    state.lifecycle = thread.id;
+    return { queuedId: queued.queuedSubmission.id, listed: listed.data.length, answers: answers(client, thread.id, since), turns: read.turns.map((t) => `${t.status}:${t.items.length}`) };
+  },
+
+  async compactRollbackManage() {
+    const threadId = state.lifecycle;
+    const since = client.messages.length;
+    await client.request("thread/compact/start", { threadId });
+    await client.waitFor("item/completed", (p) => p.threadId === threadId && p.item.type === "contextCompaction", 180_000, since);
+    await client.waitFor("turn/completed", (p) => p.threadId === threadId, 60_000, since);
+    const before = (await client.request("thread/read", { threadId, includeTurns: true })).thread.turns.length;
+    const after = await client.turn(threadId, "What word did I ask you to include earlier? One word.");
+    check(after.answers.join(" ").toUpperCase().includes("ZEBRA"), "context survives /compact", after.answers);
+    await client.request("thread/rollback", { threadId, numTurns: 1 });
+    const rolled = (await client.request("thread/read", { threadId, includeTurns: true })).thread.turns.length;
+    check(rolled === before, "rollback drops the last turn", { before, rolled });
+    await client.request("thread/name/set", { threadId, name: "Manual name" });
+    check((await client.request("thread/read", { threadId })).thread.name === "Manual name", "manual rename");
+    await client.request("thread/archive", { threadId });
+    const archived = (await client.request("thread/list", { limit: 100, archived: true })).data.some((row) => row.id === threadId);
+    await client.request("thread/unarchive", { threadId });
+    const back = (await client.request("thread/list", { limit: 100 })).data.some((row) => row.id === threadId);
+    check(archived && back, "archive round trip", { archived, back });
+    await client.request("thread/delete", { threadId });
+    const gone = !(await client.request("thread/list", { limit: 100 })).data.some((row) => row.id === threadId);
+    check(gone, "deleted");
+    return { before, rolled };
+  },
+
+  async askUserQuestion() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
+    const previous = client.onRequest;
+    client.onRequest = (message) => message.method === "item/tool/requestUserInput"
+      ? { answers: Object.fromEntries(message.params.questions.map((q) => [q.id, { answers: [q.options?.[1]?.label ?? "Blue"] }])) }
+      : previous(message);
+    client.asked.length = 0;
+    const done = await client.turn(thread.id, "Use the AskUserQuestion tool to ask me to pick a color with the options Red and Blue. Then tell me which one I picked.");
+    client.onRequest = previous;
+    const asked = client.asked.filter((m) => m.method === "item/tool/requestUserInput");
+    check(asked.length === 1, "question asked", client.asked.map((m) => m.method));
+    check(/blue/iu.test(done.answers.join(" ")), "answer reached Claude", done.answers);
+    return { question: asked[0].params.questions[0], answers: done.answers };
+  },
+
   async cliSession() {
     const claude = join(dirname(require.resolve("@anthropic-ai/claude-agent-sdk-linux-x64/package.json")), "claude");
     const run = spawnSync(claude, ["-p", "Reply with the word CLI-OK", "--model", "haiku"], { cwd: WORK, encoding: "utf8", timeout: 120_000 });

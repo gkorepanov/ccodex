@@ -69,6 +69,11 @@ describe("wire objects of Claude threads validate against the installed codex sc
     await call("thread/goal/set", { threadId, objective: "ship it" }, "ThreadGoalSetResponse");
     await client.waitFor("turn/completed", (params) => params.threadId === threadId && client.notifications("thread/goal/updated").length > 0);
     await call("thread/goal/get", { threadId }, "ThreadGoalGetResponse");
+    // Queue responses are not in the bundle; their QueuedSubmission is.
+    errors.push(...validate("QueuedSubmission", (await call("thread/queue/add", { threadId, input: text("queued"), clientUserMessageId: "c-1" })).queuedSubmission, "thread/queue/add"));
+    await client.waitFor("turn/completed", (params) => params.threadId === threadId && client.notifications("item/completed", threadId).some((m) => m.params.item.text === "claude: queued"));
+    expect(await call("thread/queue/list", { threadId })).toEqual({ data: [], nextCursor: null });
+    expect(await call("thread/queue/delete", { threadId, queuedSubmissionId: "missing" })).toEqual({ deleted: false });
     await client.turn(threadId, "/ccstate");
     const side = await call("thread/fork", { threadId, ephemeral: true, excludeTurns: true }, "ThreadForkResponse");
     await client.turn(side.thread.id, "side question");

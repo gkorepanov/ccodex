@@ -660,8 +660,8 @@ export class ClaudeThreads {
     // A brand-new session has no transcript until its first message is written; its name waits for that turn.
     if (summary) await renameSession(threadId, name, { dir: summary.cwd });
     else this.pendingNames.set(threadId, name);
+    await this.catalog.refresh();
     this.gateway.emit(threadId, "thread/name/updated", { threadId, threadName: name });
-    void this.catalog.refresh();
     return {};
   }
 
@@ -753,21 +753,32 @@ export class ClaudeThreads {
   private async queue(threadId: string, method: string, params: JsonObject): Promise<JsonObject> {
     const session = this.session(threadId);
     const index = session.queued.findIndex((entry) => entry.id === params.queuedSubmissionId);
-    if (method === "thread/queue/delete" && index >= 0) session.queued.splice(index, 1);
-    if (method === "thread/queue/update" && index >= 0) session.queued[index] = { ...session.queued[index]!, input: normalizeUserInput(params.input ?? []) };
-    if (method === "thread/queue/reorder") {
-      const order: string[] = params.queuedSubmissionIds ?? [];
-      session.queued.sort((left, right) => order.indexOf(left.id) - order.indexOf(right.id));
-    }
-    if (method === "thread/queue/start") {
-      const entry = index >= 0 ? session.queued.splice(index, 1)[0]! : session.queued.shift();
-      if (entry) {
-        if (session.busy) await session.steer({ input: entry.input, clientUserMessageId: entry.clientUserMessageId });
-        else await session.startTurn({ input: entry.input, clientUserMessageId: entry.clientUserMessageId });
+    const changed = () => this.gateway.emit(threadId, "thread/queue/changed", { threadId });
+    switch (method) {
+      case "thread/queue/delete":
+        if (index >= 0) session.queued.splice(index, 1);
+        changed();
+        return { deleted: index >= 0 };
+      case "thread/queue/update":
+        session.queued[index] = { ...session.queued[index]!, input: normalizeUserInput(params.input ?? []) };
+        changed();
+        return { queuedSubmission: session.queued[index] };
+      case "thread/queue/reorder": {
+        const order: string[] = params.queuedSubmissionIds ?? [];
+        session.queued.sort((left, right) => order.indexOf(left.id) - order.indexOf(right.id));
+        changed();
+        return {};
+      }
+      default: {
+        const entry = index >= 0 ? session.queued.splice(index, 1)[0] : session.queued.shift();
+        if (!entry) throw invalidRequest("nothing queued");
+        changed();
+        const turn = { input: entry.input, clientUserMessageId: entry.clientUserMessageId };
+        if (!session.busy) return { turn: await session.startTurn(turn) };
+        await session.steer(turn);
+        return { turn: startedTurn(session.liveTurn()!) };
       }
     }
-    this.gateway.emit(threadId, "thread/queue/changed", { threadId });
-    return {};
   }
 
   /** Summary-less description of a thread for /ccstate. */
