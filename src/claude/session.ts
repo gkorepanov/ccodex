@@ -137,7 +137,7 @@ export class ClaudeSession {
   private readonly usageByMessage = new Map<string, TokenUsageBreakdown>();
   private readonly pendingInputs = new Map<string, { input: UserInput[]; clientId: string | null; hidden: boolean }>();
   /** Injected context (`shouldQuery: false`) runs a silent query of its own: no turn is shown for it. */
-  private readonly injections = new Map<string, () => void>();
+  private readonly injections = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   private readonly turnWaiters = new Map<string, (status: string) => void>();
   private continuationTimer?: NodeJS.Timeout;
   private idleTimer?: NodeJS.Timeout;
@@ -207,6 +207,7 @@ export class ClaudeSession {
 
   private async consume(sdk: Query): Promise<void> {
     let slice = Date.now();
+    let failure = "";
     try {
       for await (const message of sdk) {
         try {
@@ -221,9 +222,13 @@ export class ClaudeSession {
       }
     } catch (error) {
       this.host.logger.warn("claude.query.ended", { threadId: this.threadId, error: String(error) });
-      if (this.turn) this.turn.error ??= `Claude stopped: ${error instanceof Error ? error.message : String(error)}`;
+      failure = `: ${error instanceof Error ? error.message : String(error)}`;
+      if (this.turn) this.turn.error ??= `Claude stopped${failure}`;
     }
     if (this.sdk !== sdk) return;
+    // Context Claude never took (it stopped, or never started) fails whoever waits on it.
+    for (const { reject } of this.injections.values()) reject(new Error(`Claude stopped${failure}`));
+    this.injections.clear();
     this.sdk = undefined;
     this.inbox = undefined;
     this.state = "idle";
@@ -293,8 +298,8 @@ export class ClaudeSession {
   public inject(text: string): Promise<void> {
     const uuid = randomUUID();
     this.ensureQuery();
-    return new Promise((resolve) => {
-      this.injections.set(uuid, resolve);
+    return new Promise((resolve, reject) => {
+      this.injections.set(uuid, { resolve, reject });
       this.inbox!.push(userMessage(`${INJECTED_PREFIX}\n${text}`, uuid, { shouldQuery: false, origin: undefined } as unknown as Partial<SDKUserMessage>));
     });
   }
@@ -486,7 +491,7 @@ export class ClaudeSession {
   private onCommand(m: any): void {
     const uuid = m.command_uuid as string | undefined;
     if (uuid && m.state === "completed" && this.injections.has(uuid)) {
-      this.injections.get(uuid)!();
+      this.injections.get(uuid)!.resolve();
       this.injections.delete(uuid);
     }
     const pending = uuid ? this.pendingInputs.get(uuid) : undefined;

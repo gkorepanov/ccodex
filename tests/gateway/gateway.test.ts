@@ -531,6 +531,24 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
       "contextCompaction", "user:third", "agent:gpt: third"]);
   });
 
+  it("fails a switch to Claude with Claude's error when Claude can't start, instead of compacting forever", async () => {
+    const threadId = await stockThread();
+    await client.turn(threadId, "first");
+    fakeClaude.spawnError = "spawn claude EAGAIN";
+    await client.request("turn/start", { threadId, model: CLAUDE, input: text("second") });
+    const { turn } = await client.waitFor("turn/completed", (params) => params.threadId === threadId && params.turn.status !== "completed");
+    expect(turn.status).toBe("failed");
+    expect(turn.error.message).toContain("spawn claude EAGAIN");
+  });
+
+  it("fails a Claude turn with Claude's error when Claude can't start", async () => {
+    const threadId = await claudeThread();
+    fakeClaude.spawnError = "spawn claude EAGAIN";
+    const done = await client.turn(threadId, "hello");
+    expect(done.turn.status).toBe("failed");
+    expect(done.turn.error.message).toContain("spawn claude EAGAIN");
+  });
+
   it("switches gpt → claude: summary from an ephemeral fork, injected without a reply", async () => {
     const threadId = await stockThread();
     await client.turn(threadId, "first");

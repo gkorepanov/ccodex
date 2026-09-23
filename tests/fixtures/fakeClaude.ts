@@ -12,16 +12,19 @@ export interface FakeClaudeLog {
   readonly calls: Array<{ method: string; args: unknown[] }>;
 }
 
-export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string } = {
+export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string; spawnError: string | null } = {
   prompts: [],
   options: [],
   calls: [],
   reply: (text) => `claude: ${text}`,
+  /** Set: the CLI process fails to start (like `spawn … EAGAIN` when the machine is out of processes). */
+  spawnError: null,
   reset() {
     this.prompts.length = 0;
     this.options.length = 0;
     this.calls.length = 0;
     this.reply = (text) => `claude: ${text}`;
+    this.spawnError = null;
   },
 };
 
@@ -262,6 +265,7 @@ export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<Message>;
     return Promise.resolve(undefined);
   };
   async function* run(): AsyncGenerator<Message> {
+    if (fakeClaude.spawnError) throw new Error(`Failed to spawn Claude Code process: ${fakeClaude.spawnError}`);
     yield base(sessionId, { type: "system", subtype: "init", model: options.model ?? "claude-opus-5-5" });
     for await (const message of prompt) {
       if (closed) return;
