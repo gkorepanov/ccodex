@@ -127,6 +127,7 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     const content = [{ type: "tool_result", tool_use_id: toolUseId, content: "Async agent launched" }];
     transcript.write({ type: "user", message: { role: "user", content }, toolUseResult: launched });
     yield base(sessionId, { type: "user", message: { role: "user", content }, tool_use_result: launched });
+    yield base(sessionId, { type: "system", subtype: "task_notification", task_id: "a1b2c3", tool_use_id: toolUseId, status: "completed", output_file: "", summary: "Helper" });
   }
   const messageId = `msg_${randomUUID().slice(0, 8)}`;
   yield base(sessionId, { type: "stream_event", event: { type: "message_start", message: { id: messageId } } });

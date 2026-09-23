@@ -217,6 +217,14 @@ export class ClaudeThreads {
     this.gateway.broadcast("thread/started", { thread });
   }
 
+  /** A live sub-agent's task settled (Claude's task id is its agent id). */
+  public subagentFinished(childId: string): void {
+    const thread = this.spawnedSubagents.get(childId);
+    if (!thread) return;
+    this.spawnedSubagents.set(childId, { ...thread, status: { type: "idle" } });
+    this.gateway.emit(childId, "thread/status/changed", { threadId: childId, status: { type: "idle" } });
+  }
+
   /** Thread with its turns (history + the live turn). */
   public async read(threadId: string): Promise<{ thread: Thread; turns: Turn[] }> {
     await this.models().catch(() => undefined);

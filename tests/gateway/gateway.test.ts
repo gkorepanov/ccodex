@@ -218,7 +218,8 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
       : message.method === "item/completed" && message.params.item.type === "collabAgentToolCall" ? `spawned ${message.params.item.receiverThreadIds}` : null).filter(Boolean);
     expect(events).toEqual([`started ${childId}`, `spawned ${childId}`]);
     const { thread } = await client.request("thread/read", { threadId: childId });
-    expect(thread).toMatchObject({ parentThreadId: threadId, agentNickname: "Helper [Haiku 4.5]", preview: "Reply SUB-OK" });
+    expect(thread).toMatchObject({ parentThreadId: threadId, agentNickname: "Helper [Haiku 4.5]", preview: "Reply SUB-OK", status: { type: "idle" } });
+    expect(client.notifications("thread/status/changed", childId).map((message) => message.params.status.type)).toEqual(["idle"]);
     const listed = await client.request("thread/list", { ancestorThreadId: threadId, sourceKinds: ["subAgentThreadSpawn"] });
     expect(listed.data.map((row: any) => row.id)).toEqual([childId]);
   });

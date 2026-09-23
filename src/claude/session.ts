@@ -520,6 +520,7 @@ export class ClaudeSession {
         return;
       case "task_notification":
         this.tasks.delete(m.task_id);
+        this.host.subagentFinished(`agent-${m.task_id}`);
         if (this.state === "idle" && this.turn) {
           clearTimeout(this.continuationTimer);
           this.continuationTimer = setTimeout(() => {
