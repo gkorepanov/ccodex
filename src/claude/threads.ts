@@ -59,6 +59,7 @@ export class ClaudeThreads {
     // The model list maps transcripts' resolved model ids to picker values (see pickerModel).
     void this.models().catch(() => undefined);
     await this.catalog.refresh();
+    this.gateway.meta.prune((segment) => segment.provider === "codex" || this.catalog.get(segment.threadId) !== undefined);
     const known = new Map(this.catalog.sessions().map((summary) => [summary.sessionId, summary.customTitle ?? summary.aiTitle]));
     // Sessions and titles changed outside CCodex (the claude CLI, /rename) show up without a reload.
     this.stopWatching = this.catalog.watch(() => {

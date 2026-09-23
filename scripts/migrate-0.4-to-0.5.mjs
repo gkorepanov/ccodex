@@ -5,12 +5,17 @@
 // - Every 0.4 Claude thread keeps its id: meta.lineages[<0.4 id>] = [{ claude, <session id> }].
 // - Provider-switch lineages become segment lists; forks whose 0.4 id was no backend move to their current backend.
 // - Archive flags, sections and section order of Claude threads carry over; names go into the transcripts.
+// - A lineage is archived when its current backend was (0.4 archived sealed stock backends to hide them); 0.5 reads
+//   the flag from the row's backend, so that one is set to match, stock ones through `codex app-server`.
 // SQLite files are only read. meta.json is backed up before it is replaced.
+import { spawn } from "node:child_process";
 import { appendFileSync, copyFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { startsTurn } from "../dist/claude/native/summary.js";
+import { codexHome, loadConfig } from "../dist/config.js";
 
 const dryRun = process.argv.includes("--dry-run");
 const home = process.env.CCODEX_HOME ?? join(homedir(), ".ccodex");
@@ -22,6 +27,8 @@ const log = (...args) => console.log(...args);
 const state = new DatabaseSync(join(stateDir, "state.sqlite"), { readOnly: true });
 const handoffsPath = join(stateDir, "handoffs.sqlite");
 const handoffs = existsSync(handoffsPath) ? new DatabaseSync(handoffsPath, { readOnly: true }) : undefined;
+const stockDb = readdirSync(codexHome()).filter((file) => /^state_\d+\.sqlite$/.test(file)).sort().at(-1);
+const stock = new DatabaseSync(join(codexHome(), stockDb), { readOnly: true });
 
 // Claude transcripts by session id.
 const transcripts = new Map();
@@ -79,14 +86,17 @@ if (handoffs) {
       };
     });
     // 0.5 names a fork by its current backend; a lineage started from a thread keeps that thread's id.
-    const publicId = parts[0].epoch.backend_thread_id === task.public_thread_id ? task.public_thread_id : segments.at(-1).threadId;
-    if (publicId !== task.public_thread_id) log(`fork ${task.public_thread_id} is now ${publicId}`);
+    // Stock never lists threads without a user message of their own (0.4 made such forks); those take the current id.
+    const unlisted = segments[0].provider === "codex"
+      && stock.prepare("select first_user_message from threads where id = ?").get(segments[0].threadId)?.first_user_message === "";
+    const publicId = parts[0].epoch.backend_thread_id === task.public_thread_id && !unlisted ? task.public_thread_id : segments.at(-1).threadId;
+    if (publicId !== task.public_thread_id) log(`${unlisted ? "unlisted" : "fork"} ${task.public_thread_id} is now ${publicId}`);
     if (segments.length === 1 && segments[0].threadId === publicId) continue;
     lineages[publicId] = segments;
   }
 }
 
-const archived = [];
+const archived = new Set();
 const sections = {};
 const named = [];
 for (const thread of claudeThreads.values()) {
@@ -95,12 +105,50 @@ for (const thread of claudeThreads.values()) {
   if (!lineages[thread.id] && !lineageBackends.has(thread.id) && thread.id !== sessionId) {
     lineages[thread.id] = [{ provider: "claude", threadId: sessionId, lastTurnId: null }];
   }
-  if (thread.archived) archived.push(sessionId);
+  if (thread.archived) archived.add(sessionId);
   if (thread.section) sections[sessionId] = { sectionId: JSON.parse(thread.section).id, enteredAt: thread.section_entered_at ?? thread.updated_at };
   if (thread.name) {
     const titles = records(sessionId).filter((record) => record.type === "custom-title");
     if (titles.at(-1)?.customTitle !== thread.name) named.push({ sessionId, name: thread.name });
   }
+}
+
+const archived04 = new Set([...claudeThreads.values()].filter((thread) => thread.archived).map((thread) => thread.claude_session_id));
+const stockArchives = [];
+for (const [publicId, segments] of Object.entries(lineages)) {
+  const row = segments.find((segment) => segment.threadId === publicId) ?? segments[0];
+  const isArchived = (segment) => segment.provider === "codex"
+    ? stock.prepare("select archived from threads where id = ?").get(segment.threadId)?.archived === 1
+    : archived04.has(segment.threadId);
+  const wanted = isArchived(segments.at(-1));
+  if (isArchived(row) === wanted) continue;
+  log(`${wanted ? "archive" : "unarchive"} ${publicId} (its current backend is${wanted ? "" : " not"} archived)`);
+  if (row.provider === "codex") stockArchives.push([wanted ? "thread/archive" : "thread/unarchive", { threadId: row.threadId }]);
+  else if (wanted) archived.add(row.threadId);
+  else archived.delete(row.threadId);
+}
+
+/** Runs requests on a stdio `codex app-server` of the installed codex. */
+async function stockRequests(requests) {
+  const child = spawn(loadConfig().codex, ["app-server"], { stdio: ["pipe", "pipe", "inherit"] });
+  const pending = new Map();
+  createInterface({ input: child.stdout }).on("line", (line) => {
+    const message = JSON.parse(line);
+    pending.get(message.id)?.(message);
+  });
+  let next = 0;
+  const request = (method, params) => new Promise((resolve) => {
+    next += 1;
+    pending.set(next, resolve);
+    child.stdin.write(`${JSON.stringify({ id: next, method, params })}\n`);
+  });
+  await request("initialize", { clientInfo: { name: "ccodex_migration", title: "CCodex migration", version: "0.5.0" } });
+  child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
+  for (const [method, params] of requests) {
+    const { error } = await request(method, params);
+    if (error) log(`${method} ${params.threadId} failed: ${error.message}`);
+  }
+  child.kill();
 }
 
 /** A 0.4 id as 0.5 lists it (the row's backend). */
@@ -123,13 +171,14 @@ const meta = {
 
 const aliases = Object.values(lineages).filter((segments) => segments.length === 1).length;
 log(`lineages: ${Object.keys(lineages).length} (${aliases} kept 0.4 Claude ids, ${Object.keys(lineages).length - aliases} provider switches), skipped ${skipped}`);
-log(`archived: ${archived.length}, in sections: ${Object.keys(sections).length}, section orders: ${Object.keys(sectionOrder).length}, names to write: ${named.length}`);
+log(`archived: ${archived.size}, stock archive changes: ${stockArchives.length}, in sections: ${Object.keys(sections).length}, section orders: ${Object.keys(sectionOrder).length}, names to write: ${named.length}`);
 if (dryRun) {
   log("dry run: nothing written");
   process.exit(0);
 }
 if (existsSync(metaPath)) copyFileSync(metaPath, `${metaPath}.pre-migration-${Date.now()}`);
 writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`, { mode: 0o600 });
+await stockRequests(stockArchives);
 for (const { sessionId, name } of named) {
   appendFileSync(transcripts.get(sessionId), `${JSON.stringify({ type: "custom-title", customTitle: name, sessionId })}\n`);
 }

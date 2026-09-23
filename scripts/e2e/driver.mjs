@@ -352,6 +352,91 @@ const scenarios = {
     check(!diffs.length, "identical after restart", diffs);
     return { restart: restart.slice(0, 200), threads: ids.length };
   },
+
+  /** 0.4 → 0.5 on copies of a real install mounted at /mig (experiments/…/migration_e2e.sh prepares them). */
+  async migration() {
+    client.close();
+    await daemon("stop");
+    execFileSync("sh", ["-c", "cp -r /mig/claude/projects ~/.claude/ && cp -r /mig/codex/. ~/.codex/ && mkdir -p ~/.ccodex/state && cp /mig/state04/*.sqlite ~/.ccodex/state/"]);
+    const migrated = execFileSync("node", [join(PACKAGE, "scripts", "migrate-0.4-to-0.5.mjs")], { encoding: "utf8" });
+    await daemon("start");
+    client = await Client.connect();
+    const meta = JSON.parse(readFileSync(join(HOME, ".ccodex", "state", "meta.json"), "utf8"));
+    const transcripts = new Set(readdirSync(join(HOME, ".claude", "projects"))
+      .flatMap((directory) => readdirSync(join(HOME, ".claude", "projects", directory))).map((file) => file.replace(/\.jsonl$/, "")));
+    const { DatabaseSync } = await import("node:sqlite");
+    const stock = new DatabaseSync(join(HOME, ".codex", "state_5.sqlite"), { readOnly: true });
+    const stockRow = (id) => stock.prepare("select archived from threads where id = ?").get(id);
+    const exists = (segment) => segment.provider === "codex" ? Boolean(stockRow(segment.threadId)) : transcripts.has(segment.threadId);
+    const isArchived = (segment) => segment.provider === "codex" ? stockRow(segment.threadId).archived === 1 : meta.archived.includes(segment.threadId);
+
+    const list = async () => {
+      const rows = new Map();
+      for (const archived of [false, true]) {
+        let cursor = null;
+        do {
+          const page = await client.request("thread/list", { limit: 100, cursor, archived });
+          for (const thread of page.data) rows.set(thread.id, { ...thread, archived });
+          cursor = page.nextCursor;
+        } while (cursor);
+      }
+      return rows;
+    };
+    const rows = await list();
+    const lineages = Object.entries(meta.lineages);
+    const rowOf = (publicId, segments) => segments.find((segment) => segment.threadId === publicId) ?? segments[0];
+    const rowIds = new Set(lineages.map(([publicId, segments]) => rowOf(publicId, segments).threadId));
+    const hidden = lineages.flatMap(([, segments]) => segments.map((segment) => segment.threadId)).filter((id) => !rowIds.has(id));
+    check(!hidden.some((id) => rows.has(id)), "hidden segments are not listed", hidden.filter((id) => rows.has(id)));
+
+    const problems = [];
+    const readable = [];
+    for (const [publicId, segments] of lineages) {
+      const current = segments.at(-1);
+      if (!exists(rowOf(publicId, segments)) || !exists(current)) continue;
+      const row = rows.get(publicId);
+      if (!row) { problems.push({ publicId, problem: "not listed" }); continue; }
+      if (row.archived !== isArchived(current)) problems.push({ publicId, problem: `archived ${row.archived}, current backend ${isArchived(current)}` });
+      try {
+        const { thread } = await client.request("thread/read", { threadId: publicId, includeTurns: true });
+        // Switches to Claude show a synthetic compaction turn (switches to gpt have it in the stock thread).
+        const switches = thread.turns.filter((turn) => turn.id.startsWith("switch:")).length;
+        const toClaude = segments.filter((segment, index) => index > 0 && segment.provider === "claude").length;
+        if (!thread.turns.length || switches !== toClaude) problems.push({ publicId, problem: `turns ${thread.turns.length}, switches ${switches}/${toClaude}` });
+        else readable.push({ publicId, segments: segments.length, turns: thread.turns.length, size: JSON.stringify(thread).length, name: thread.name, model: thread.model });
+      } catch (error) {
+        problems.push({ publicId, problem: error.message });
+      }
+    }
+    check(!problems.length, "migrated lineages list and read", problems);
+    // Every visible 0.4 Claude thread that still has a transcript is listed under its 0.4 id (lineage parts aside).
+    const backends = new Set(lineages.flatMap(([, segments]) => segments.map((segment) => segment.threadId)));
+    const state04 = new DatabaseSync("/mig/state04/state.sqlite", { readOnly: true });
+    const missing = state04.prepare(`select id, claude_session_id session from threads where ephemeral = 0 and deletion_pending = 0
+      and json_extract(thread_json, '$.parentThreadId') is null`).all()
+      .filter((thread) => {
+        const expected = meta.lineages[thread.id] ? thread.id : thread.session;
+        return transcripts.has(thread.session) && !(expected === thread.session && backends.has(expected)) && !rows.has(expected);
+      });
+    check(!missing.length, "0.4 Claude threads listed", missing.slice(0, 20));
+
+    // A turn on the smallest migrated Claude thread keeps its 0.4 id.
+    const alias = readable.filter((entry) => entry.segments === 1).sort((a, b) => a.size - b.size)[0];
+    const { thread: before } = await client.request("thread/resume", { threadId: alias.publicId });
+    execFileSync("mkdir", ["-p", before.cwd]);
+    const reply = await client.turn(alias.publicId, "Reply with exactly: MIGRATED-OK", { model: state.haiku });
+    check(reply.answers.some((answer) => answer.includes("MIGRATED-OK")), "turn on a migrated thread", reply.answers);
+    const { thread: after } = await client.request("thread/read", { threadId: alias.publicId, includeTurns: true });
+    check(after.turns.length === alias.turns + 1, "the turn is in its history", { before: alias.turns, after: after.turns.length });
+
+    client.close();
+    await daemon("restart");
+    client = await Client.connect();
+    const again = await list();
+    const key = (map) => [...map.values()].map((thread) => `${thread.id}:${thread.archived}:${thread.name}`).sort().join("\n");
+    check(key(again) === key(rows), "same list after restart", { before: rows.size, after: again.size });
+    return { migrated: migrated.split("\n").filter((line) => !line.startsWith("fork ")), listed: rows.size, readable: readable.length, alias: alias.publicId, names: readable.filter((entry) => entry.name).length };
+  },
 };
 
 const wanted = process.argv.slice(2);

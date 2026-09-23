@@ -232,6 +232,28 @@ describe("threads migrated from 0.4", () => {
     await client.request("thread/archive", { threadId: legacy });
     expect((await client.request("thread/list", { limit: 200, archived: true })).data.map((row: any) => row.id)).toContain(legacy);
   });
+
+  it("stay listed and readable when Claude cleaned up the transcript of an earlier segment", async () => {
+    fakeClaude.reset();
+    const expired = "0c0c0c0c-0000-4000-8000-000000000001";
+    const session = "0c0c0c0c-0000-4000-8000-000000000002";
+    const directory = join(process.env.CLAUDE_CONFIG_DIR!, "projects", "-work");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, `${session}.jsonl`), `${JSON.stringify({
+      type: "user", uuid: "n1", parentUuid: null, sessionId: session, cwd: "/work", timestamp: "2026-09-20T00:00:00.000Z",
+      origin: { kind: "human" }, message: { role: "user", content: "after the switch" },
+    })}\n`);
+    gateway = await startTestGateway({}, { lineages: { [expired]: [
+      { provider: "claude", threadId: expired, lastTurnId: "gone" },
+      { provider: "claude", threadId: session, lastTurnId: null },
+    ] } });
+    client = await gateway.connect();
+    const ids = (await client.request("thread/list", { limit: 200 })).data.map((row: any) => row.id);
+    expect(ids).toContain(expired);
+    expect(ids).not.toContain(session);
+    const { thread } = await client.request("thread/read", { threadId: expired, includeTurns: true });
+    expect(itemsOf(thread.turns)).toEqual(["user:after the switch"]);
+  });
 });
 
 describe("titles (rename_prompt)", () => {

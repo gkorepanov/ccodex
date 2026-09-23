@@ -80,6 +80,21 @@ export class Meta {
     this.save();
   }
 
+  /** Drops finished segments whose backend is gone: Claude deletes transcripts after `cleanupPeriodDays`. */
+  public prune(exists: (segment: Segment) => boolean): void {
+    let changed = false;
+    for (const [publicId, segments] of Object.entries(this.data.lineages)) {
+      const kept = segments.filter((segment, index) => index === segments.length - 1 || exists(segment));
+      if (kept.length === segments.length) continue;
+      changed = true;
+      if (kept.length === 1 && kept[0]!.threadId === publicId) delete this.data.lineages[publicId];
+      else this.data.lineages[publicId] = kept;
+    }
+    if (!changed) return;
+    this.reindex();
+    this.save();
+  }
+
   public isArchived(threadId: string): boolean { return this.data.archived.includes(threadId); }
 
   public setArchived(threadId: string, archived: boolean): void {
