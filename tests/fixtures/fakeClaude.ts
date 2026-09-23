@@ -123,7 +123,8 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   yield base(sessionId, { type: "stream_event", event: { type: "message_stop" } });
   const assistant = { type: "assistant", message: { id: messageId, role: "assistant", model: "claude-opus-5-5", content: [{ type: "text", text: reply }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 3 } } };
   transcript.write({ ...assistant, apiBlockIndex: 0 });
-  yield base(sessionId, assistant);
+  // Streamed assistant messages never carry the stop reason (only the transcript does).
+  yield base(sessionId, { ...assistant, message: { ...assistant.message, stop_reason: null } });
   yield* finish(reply);
 }
 

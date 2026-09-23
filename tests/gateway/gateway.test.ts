@@ -107,6 +107,15 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     });
   });
 
+  it("reports Claude token usage (Desktop's context meter)", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "first");
+    await client.turn(threadId, "second");
+    const usage = client.notifications("thread/tokenUsage/updated", threadId).at(-1)!.params.tokenUsage;
+    expect(usage.last).toMatchObject({ inputTokens: 10, outputTokens: 3 });
+    expect(usage.total).toMatchObject({ inputTokens: 20, outputTokens: 6 });
+  });
+
   it("asks the client to approve Claude tool use", async () => {
     const threadId = await claudeThread();
     const asked: any[] = [];

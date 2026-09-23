@@ -132,7 +132,8 @@ export class ClaudeSession {
   private response?: Response;
   private readonly tools = new Map<string, Tool>();
   private readonly streamed = new Set<string>();
-  private readonly usageSeen = new Set<string>();
+  /** Usage per model response; streamed assistant messages repeat it and never carry a stop reason. */
+  private readonly usageByMessage = new Map<string, TokenUsageBreakdown>();
   private readonly pendingInputs = new Map<string, { input: UserInput[]; clientId: string | null; hidden: boolean }>();
   /** Injected context (`shouldQuery: false`) runs a silent query of its own: no turn is shown for it. */
   private readonly injections = new Map<string, () => void>();
@@ -628,10 +629,10 @@ export class ClaudeSession {
   private onAssistant(m: any): void {
     this.ensureTurn();
     const message = m.message;
-    if (message.id && message.usage && !this.usageSeen.has(message.id) && message.stop_reason) {
-      this.usageSeen.add(message.id);
+    if (message.id && message.usage) {
       this.lastUsage = breakdown(message.usage);
-      this.totalUsage = addUsage(this.totalUsage, this.lastUsage);
+      this.usageByMessage.set(message.id, this.lastUsage);
+      this.totalUsage = [...this.usageByMessage.values()].reduce(addUsage, EMPTY_USAGE);
       this.emitUsage();
     }
     if (m.error && this.turn) this.turn.error = typeof m.error === "string" ? `Claude error: ${m.error}` : "Claude request failed.";
