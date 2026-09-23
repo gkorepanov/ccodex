@@ -13,6 +13,9 @@ if [ "${E2E_SKIP_BUILD:-0}" != 1 ]; then
   cp "$WORK/gkorepanov-ccodex-relay-linux-x64-gnu-$VERSION.tgz" "$ROOT/scripts/e2e/relay.tgz"
   podman build -q -t ccodex-e2e --build-arg CCODEX_VERSION="$VERSION" -f "$ROOT/scripts/e2e/Containerfile" "$ROOT/scripts/e2e" >/dev/null
   rm -f "$ROOT/scripts/e2e/ccodex.tgz" "$ROOT/scripts/e2e/relay.tgz"
+  # Each build leaves the previous image dangling (and podman 3.4 its interrupted layers): drop them.
+  podman image prune -f >/dev/null
+  podman unshare python3 "$ROOT/scripts/e2e/prune_layers.py"
 fi
 node -e '
 const fs = require("fs"); const home = process.env.HOME; const out = process.argv[1];
@@ -23,7 +26,7 @@ const codex = JSON.parse(fs.readFileSync(home + "/.codex/auth.json", "utf8"));
 codex.tokens.refresh_token = "stripped-for-container"; codex.last_refresh = new Date().toISOString();
 fs.writeFileSync(out + "/codex.json", JSON.stringify(codex), { mode: 0o600 });
 ' "$WORK/creds"
-exec podman run --rm --userns=keep-id ${E2E_PODMAN_ARGS:-} \
+exec podman run --rm --init --userns=keep-id ${E2E_PODMAN_ARGS:-} \
   -v "$WORK/creds/claude.json:/tmp/creds/claude.json:ro" -v "$WORK/creds/codex.json:/tmp/creds/codex.json:ro" \
   -v "$ROOT/scripts/e2e:/e2e:ro" -v "$WORK:/out" \
   ccodex-e2e sh -c 'cp /tmp/creds/claude.json ~/.claude/.credentials.json && cp /tmp/creds/codex.json ~/.codex/auth.json && node /e2e/driver.mjs "$@"' driver "$@"
