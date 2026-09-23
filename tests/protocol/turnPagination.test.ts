@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Turn } from "../../src/codex/generated/v2/Turn.js";
+import type { Turn } from "../../src/protocol/codex.js";
 import { historyCursors, itemCursor, paginateItems, paginateTurns, turnCursor } from "../../src/protocol/turnPagination.js";
 
 function turn(id: string, itemIds: readonly string[]): Turn {

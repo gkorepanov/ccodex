@@ -1,15 +1,9 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { NativeSessionCatalog } from "../../../src/claude/native/catalog.js";
-import { summarizeTranscript, type TranscriptHeader } from "../../../src/claude/native/summary.js";
+import { summarizeTranscript } from "../../../src/claude/native/summary.js";
 import type { TranscriptRecord } from "../../../src/claude/native/records.js";
-import { providerPermissionMode } from "../../../src/claude/session/providerRuntimeFactory.js";
-import type { RuntimeTransportSettings } from "../../../src/claude/session/commands.js";
-import {
-  nativePermissions,
-  nativeThreadSettings,
-  type NativeThreadSettingsDefaults,
-} from "../../../src/claude/threadSettings.js";
+import { codexPermissions, permissionModeFrom } from "../../../src/claude/sdk.js";
 
 const fixtureProjects = fileURLToPath(new URL("../../fixtures/nativeClaudeHome/projects/", import.meta.url));
 const cwd = "/synthetic";
@@ -18,45 +12,6 @@ function record(fields: Record<string, unknown>): TranscriptRecord {
   return fields as unknown as TranscriptRecord;
 }
 
-function header(fields: Partial<TranscriptHeader> = {}): TranscriptHeader {
-  return {
-    cwd,
-    gitBranch: null,
-    createdAt: 0,
-    updatedAt: 0,
-    preview: "",
-    customTitle: null,
-    aiTitle: null,
-    model: null,
-    reasoningEffort: null,
-    serviceTier: null,
-    permissionMode: null,
-    cliVersion: null,
-    ...fields,
-  };
-}
-
-const defaults: NativeThreadSettingsDefaults = {
-  modelPickerId: "claude:default-model",
-  claudeModelValue: "default-model",
-  reasoningEffort: "medium",
-  serviceTier: "fast",
-  modelPickerIdFor: (model) => `catalog:${model}`,
-};
-
-function transport(permissionMode: "default" | "auto" | "dontAsk" | "bypassPermissions"): RuntimeTransportSettings {
-  return {
-    cwd,
-    runtimeWorkspaceRoots: [cwd],
-    model: "claude:test",
-    settingsGeneration: 0,
-    ...nativePermissions(permissionMode, cwd),
-    serviceTier: null,
-    reasoningEffort: null,
-    reasoningSummary: null,
-    collaborationMode: null,
-  };
-}
 
 describe("native Claude thread settings", () => {
   it("reduces fixture model, effort, canonical permission, and standard tier", async () => {
@@ -104,41 +59,23 @@ describe("native Claude thread settings", () => {
     })]).serviceTier).toBeNull();
   });
 
-  it("adapts transcript values and pre-response catalog defaults", () => {
-    expect(nativeThreadSettings(header(), cwd, defaults)).toMatchObject({
-      cwd,
-      runtimeWorkspaceRoots: [cwd],
-      modelPickerId: "claude:default-model",
-      claudeModelValue: "default-model",
-      reasoningEffort: "medium",
-      serviceTier: "fast",
-      approvalPolicy: "on-request",
-      approvalsReviewer: "user",
-      reasoningSummary: null,
-      personality: null,
-      collaborationMode: null,
-      outputSchema: null,
-    });
-    expect(nativeThreadSettings(header({
-      model: "claude-fable-5",
-      reasoningEffort: "xhigh",
-      serviceTier: null,
-      permissionMode: "auto",
-    }), cwd, defaults)).toMatchObject({
-      modelPickerId: "catalog:claude-fable-5",
-      claudeModelValue: "claude-fable-5",
-      reasoningEffort: "xhigh",
-      serviceTier: null,
-      approvalPolicy: "on-request",
-      approvalsReviewer: "auto_review",
-    });
+  it("round-trips Claude permission modes through the Codex settings Desktop sends back", () => {
+    for (const mode of ["default", "auto", "dontAsk", "bypassPermissions"] as const) {
+      const codex = codexPermissions(mode, cwd);
+      expect(permissionModeFrom({ ...codex, permissions: codex.activePermissionProfile.id })).toBe(mode);
+    }
+    expect(permissionModeFrom({ collaborationMode: { mode: "plan" }, approvalPolicy: "never" })).toBe("plan");
   });
 
-  it("round-trips all four canonical native permission modes", () => {
-    for (const mode of ["default", "auto", "dontAsk", "bypassPermissions"] as const) {
-      const settings = transport(mode);
-      expect(providerPermissionMode(settings)).toBe(mode);
-      expect(nativePermissions(providerPermissionMode(settings), cwd)).toEqual(nativePermissions(mode, cwd));
-    }
+  it("follows native /goal: set, goal_status updates, clear", () => {
+    const at = (second: number) => `2026-09-23T00:00:${String(second).padStart(2, "0")}.000Z`;
+    const set = [
+      record({ type: "system", subtype: "local_command", timestamp: at(1), content: "<local-command-stdout>Goal set: ship it</local-command-stdout>", commandRun: { command: "goal", args: "ship it" } }),
+    ];
+    expect(summarizeTranscript(set).goal).toEqual({ objective: "ship it", met: false, createdAt: 1790121601, updatedAt: 1790121601 });
+    const met = [...set, record({ type: "attachment", timestamp: at(9), attachment: { type: "goal_status", met: true, condition: "ship it" } })];
+    expect(summarizeTranscript(met).goal).toMatchObject({ objective: "ship it", met: true, createdAt: 1790121601, updatedAt: 1790121609 });
+    const cleared = [...met, record({ type: "system", subtype: "local_command", timestamp: at(12), content: "<local-command-stdout>Goal cleared</local-command-stdout>", commandRun: { command: "goal", args: "clear" } })];
+    expect(summarizeTranscript(cleared).goal).toBeNull();
   });
 });

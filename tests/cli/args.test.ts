@@ -1,21 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { classifyInvocation, withProxySocket } from "../../src/cli/args.js";
-import type { HybridConfig } from "../../src/config/config.js";
+import { testConfig } from "../fixtures/config.js";
 
-const config: HybridConfig = {
-  realCodex: "/usr/bin/codex",
-  claudeBinary: "/usr/bin/claude",
-  claudeProjectsDir: "/tmp/hybrid-claude/projects",
-  dataDir: "/tmp/hybrid",
-  publicSocket: "/tmp/hybrid.sock",
-  modelPrefix: "claude:",
-  idleTimeoutSeconds: 900,
-  modelCacheSeconds: 300,
-  logLevel: "info",
-  logPrompts: false,
-  debugCapture: false,
-  debugLogMaxBytes: 1_048_576,
-};
+const config = testConfig();
 
 describe("classifyInvocation", () => {
   it("delegates normal Codex commands", () => {
@@ -30,7 +17,7 @@ describe("classifyInvocation", () => {
       ),
     ).toEqual({
       kind: "gateway",
-      socketPath: "/tmp/hybrid.sock",
+      socketPath: config.publicSocket,
       stockArgs: ["-c", "features.code_mode_host=true", "app-server"],
     });
   });
@@ -45,7 +32,7 @@ describe("classifyInvocation", () => {
     const invocation = classifyInvocation(["app-server", "proxy"], config);
     expect(invocation).toEqual({
       kind: "proxy",
-      socketPath: "/tmp/hybrid.sock",
+      socketPath: config.publicSocket,
       proxyArgs: ["app-server", "proxy"],
     });
     expect(withProxySocket(invocation.kind === "proxy" ? invocation.proxyArgs : [], "/x.sock"))
@@ -80,11 +67,11 @@ describe("classifyInvocation", () => {
 
   it("routes bare and explicit stdio app-server launches through the existing gateway", () => {
     expect(classifyInvocation(["app-server", "--analytics-default-enabled"], config))
-      .toEqual({ kind: "stdioFrontend", socketPath: "/tmp/hybrid.sock", configOverrides: [] });
+      .toEqual({ kind: "stdioFrontend", socketPath: config.publicSocket, configOverrides: [] });
     expect(classifyInvocation(["app-server", "--stdio"], config))
-      .toEqual({ kind: "stdioFrontend", socketPath: "/tmp/hybrid.sock", configOverrides: [] });
+      .toEqual({ kind: "stdioFrontend", socketPath: config.publicSocket, configOverrides: [] });
     expect(classifyInvocation(["app-server", "--listen", "unix://"], config))
-      .toMatchObject({ kind: "gateway", socketPath: "/tmp/hybrid.sock" });
+      .toMatchObject({ kind: "gateway", socketPath: config.publicSocket });
   });
 
   it("preserves Codex App launch config for the stdio connection", () => {
@@ -94,7 +81,7 @@ describe("classifyInvocation", () => {
       "app-server",
     ], config)).toEqual({
       kind: "stdioFrontend",
-      socketPath: "/tmp/hybrid.sock",
+      socketPath: config.publicSocket,
       configOverrides: [
         "features.code_mode_host=true",
         "mcp_servers.codex_app={ command=\"app-tools\" }",

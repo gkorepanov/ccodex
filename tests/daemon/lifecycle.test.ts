@@ -3,7 +3,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { HybridConfig } from "../../src/config/config.js";
+import type { Config } from "../../src/config.js";
+import { testConfig } from "../fixtures/config.js";
 import { runDaemonCommand } from "../../src/daemon/daemon.js";
 import { socketOwnerPids } from "../../src/daemon/ownership.js";
 import { probeAppServer } from "../../src/daemon/probe.js";
@@ -28,7 +29,7 @@ const alive = (pid: number) => {
 
 const wire = (value: unknown) => JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
 
-function harness(): { config: HybridConfig; home: string; record: string } {
+function harness(): { config: Config; home: string; record: string } {
   const root = mkdtempSync(join(process.platform === "darwin" ? "/private/tmp" : tmpdir(), "hdt-"));
   temporary.push(root);
   const realCodex = join(root, "codex-real");
@@ -43,20 +44,10 @@ function harness(): { config: HybridConfig; home: string; record: string } {
   return {
     home,
     record,
-    config: {
-      realCodex,
-      claudeBinary: "/fake/claude",
-      claudeProjectsDir: join(root, "claude-projects"),
-      dataDir: join(root, "hybrid"),
-      publicSocket: socket,
-      modelPrefix: "claude:",
-      idleTimeoutSeconds: 900,
-      modelCacheSeconds: 300,
-      logLevel: "warn",
-      logPrompts: false,
-      debugCapture: false,
-      debugLogMaxBytes: 1_048_576,
-    },
+    config: testConfig({
+      codex: realCodex, delegateCodex: realCodex, claudeBinary: "/fake/claude", claudeHome: join(root, "claude"),
+      productHome: join(root, "ccodex"), dataDir: join(root, "hybrid"), publicSocket: socket,
+    }),
   };
 }
 
@@ -78,7 +69,7 @@ async function waitFor(path: string): Promise<void> {
   expect(existsSync(path)).toBe(true);
 }
 
-async function startUnmanaged(config: HybridConfig, home: string, exitAfterProbe = false): Promise<number> {
+async function startUnmanaged(config: Config, home: string, exitAfterProbe = false): Promise<number> {
   const ready = join(home, "unmanaged-ready");
   const gate = join(home, "unmanaged-gate");
   mkdirSync(dirname(config.publicSocket), { recursive: true });

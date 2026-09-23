@@ -5,6 +5,9 @@ import {
 import type { JsonObject, QueuedSubmissionLike, ThreadItem, TokenUsageBreakdown, Turn, UserInput } from "../protocol/codex.js";
 import { invalidRequest } from "../protocol/codex.js";
 import { startedTurn } from "../protocol/turnPagination.js";
+import {
+  CODEX_MCP_MESSAGE_LABEL, CODEX_MCP_PROMPT_LABEL, CODEX_MCP_REASONING_LABEL, CODEX_MCP_TOOLS, tailCodexRollout,
+} from "./codexRollout.js";
 import { claudeContent, normalizeUserInput, userMessage } from "./inputMapper.js";
 import { completedToolItem } from "./native/projector.js";
 import { assistantBlockItemId } from "./native/ids.js";
@@ -138,7 +141,7 @@ export class ClaudeSession {
   private idleTimer?: NodeJS.Timeout;
   private exists: boolean;
   public compactSummary?: (summary: string) => void;
-  public onPreToolUse?: (toolName: string, input: JsonObject, toolUseId: string) => void;
+  private readonly codexTails = new Map<string, () => void>();
 
   public constructor(
     private readonly host: ClaudeThreads,
@@ -180,8 +183,8 @@ export class ClaudeSession {
         onElicitation: async (request) => this.elicit(request),
         hooks: {
           PostCompact: [{ hooks: [async (input: any) => { this.compactSummary?.(String(input.compact_summary ?? "")); return {}; }] }],
-          PreToolUse: [{ hooks: [async (input: any) => {
-            this.onPreToolUse?.(String(input.tool_name), input.tool_input ?? {}, String(input.tool_use_id));
+          PreToolUse: [{ matcher: "mcp__codex__.*", hooks: [async (input: any) => {
+            this.codexMcpCall(String(input.tool_name), input.tool_input ?? {}, String(input.tool_use_id));
             return {};
           }] }],
         },
@@ -394,6 +397,8 @@ export class ClaudeSession {
       }
     }
     this.tools.clear();
+    for (const stop of this.codexTails.values()) stop();
+    this.codexTails.clear();
     this.turn = undefined;
     const status = turn.interrupted ? "interrupted" : turn.error ? "failed" : "completed";
     const completedAt = Math.floor(Date.now() / 1000);
@@ -661,11 +666,24 @@ export class ClaudeSession {
     this.itemStarted(started.item);
   }
 
+  /** Codex MCP calls: the prompt and everything codex says while it works show up in this chat. */
+  private codexMcpCall(toolName: string, input: JsonObject, toolUseId: string): void {
+    if (!CODEX_MCP_TOOLS.has(toolName)) return;
+    if (typeof input.prompt === "string" && input.prompt) this.systemText(`${CODEX_MCP_PROMPT_LABEL}\n\n${input.prompt}`);
+    this.codexTails.set(toolUseId, tailCodexRollout(toolName, input, (event) => {
+      if (event.kind === "message") this.systemText(`${CODEX_MCP_MESSAGE_LABEL}\n\n${event.text}`);
+      else if (event.kind === "reasoning") this.systemText(`${CODEX_MCP_REASONING_LABEL}\n\n${event.text}`);
+      else this.codexTails.get(toolUseId)?.();
+    }));
+  }
+
   private onUser(m: any): void {
     const content = m.message?.content;
     if (!Array.isArray(content)) return;
     for (const block of content) {
       if (block.type !== "tool_result") continue;
+      this.codexTails.get(block.tool_use_id)?.();
+      this.codexTails.delete(block.tool_use_id);
       const tool = this.tools.get(block.tool_use_id);
       if (!tool) continue;
       this.tools.delete(block.tool_use_id);

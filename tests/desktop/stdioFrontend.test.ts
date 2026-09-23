@@ -5,27 +5,14 @@ import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
-import type { HybridConfig } from "../../src/config/config.js";
+import { testConfig } from "../fixtures/config.js";
 import { runStdioFrontend } from "../../src/desktop/stdioFrontend.js";
 
 const roots: string[] = [];
 const servers: Server[] = [];
 const webSockets: WebSocketServer[] = [];
 
-const config: HybridConfig = {
-  realCodex: "/usr/bin/codex",
-  claudeBinary: "/usr/bin/claude",
-  claudeProjectsDir: "/tmp/hybrid-claude/projects",
-  dataDir: "/tmp/hybrid",
-  publicSocket: "/tmp/hybrid.sock",
-  modelPrefix: "claude:",
-  idleTimeoutSeconds: 900,
-  modelCacheSeconds: 300,
-  logLevel: "warn",
-  logPrompts: false,
-  debugCapture: false,
-  debugLogMaxBytes: 1_048_576,
-};
+const config = testConfig();
 
 afterEach(async () => {
   for (const webSocket of webSockets.splice(0)) {

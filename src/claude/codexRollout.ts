@@ -149,3 +149,53 @@ export function parseRolloutChunk(buffer: string, chunk: string): { rest: string
   }
   return { rest: combined.slice(boundary + 1), events };
 }
+
+const claimedRollouts = new Set<string>();
+
+/**
+ * Follows the rollout journal codex writes for one `mcp__codex__*` call and reports its messages and
+ * reasoning as they are appended. Purely observational: codex's own MCP server is untouched.
+ */
+export function tailCodexRollout(
+  toolName: string,
+  input: Record<string, unknown>,
+  onEvent: (event: CodexRolloutEvent) => void,
+  locator: CodexRolloutLocator = defaultCodexRolloutLocator(),
+): () => void {
+  const startedAt = Date.now();
+  const threadId = typeof input.threadId === "string" ? input.threadId : typeof input.conversationId === "string" ? input.conversationId : undefined;
+  let path: string | undefined;
+  let offset = 0;
+  let rest = "";
+  let stopped = false;
+  const poll = () => {
+    if (stopped) return;
+    if (!path) {
+      path = toolName === "mcp__codex__codex-reply" && threadId
+        ? locator.byThreadId(threadId)
+        : locator.freshMcpSession(startedAt, claimedRollouts);
+      if (!path) return;
+      claimedRollouts.add(path);
+      // A reply appends to an existing journal: only what is written from now on belongs to this call.
+      if (toolName === "mcp__codex__codex-reply") offset = statSync(path).size;
+    }
+    const size = statSync(path).size;
+    if (size <= offset) return;
+    const buffer = Buffer.alloc(size - offset);
+    const fd = openSync(path, "r");
+    try { readSync(fd, buffer, 0, buffer.length, offset); } finally { closeSync(fd); }
+    offset = size;
+    const parsed = parseRolloutChunk(rest, buffer.toString("utf8"));
+    rest = parsed.rest;
+    for (const event of parsed.events) onEvent(event);
+  };
+  const timer = setInterval(() => {
+    try { poll(); } catch { /* the journal may not exist yet */ }
+  }, 400);
+  return () => {
+    if (stopped) return;
+    try { poll(); } catch { /* best effort final read */ }
+    stopped = true;
+    clearInterval(timer);
+  };
+}

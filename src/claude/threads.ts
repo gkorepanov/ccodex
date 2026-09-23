@@ -57,7 +57,20 @@ export class ClaudeThreads {
 
   public async start(): Promise<void> {
     await this.catalog.refresh();
-    this.stopWatching = this.catalog.watch(() => undefined);
+    const known = new Map(this.catalog.sessions().map((summary) => [summary.sessionId, summary.customTitle ?? summary.aiTitle]));
+    // Sessions and titles changed outside CCodex (the claude CLI, /rename) show up without a reload.
+    this.stopWatching = this.catalog.watch(() => {
+      for (const summary of this.catalog.sessions()) {
+        const name = summary.customTitle ?? summary.aiTitle;
+        const id = summary.sessionId;
+        if (!known.has(id) && !this.sessions.has(id) && !this.gateway.meta.hidden(id)) {
+          this.gateway.broadcast("thread/started", { thread: this.decorate(nativeThread(id, summary, { status: this.status(id) })) });
+        } else if (known.has(id) && known.get(id) !== name && name) {
+          this.gateway.emit(id, "thread/name/updated", { threadId: id, threadName: name });
+        }
+        known.set(id, name);
+      }
+    });
     void this.models().catch((error: unknown) => this.logger.warn("claude.models.unavailable", { error: String(error) }));
   }
 

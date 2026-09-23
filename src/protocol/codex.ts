@@ -97,11 +97,11 @@ export interface Thread {
   path: string | null;
   cwd: string;
   cliVersion: string;
-  source: JsonValue;
+  source: any;
   threadSource?: string | null;
   agentNickname: string | null;
   agentRole: string | null;
-  gitInfo: JsonValue | null;
+  gitInfo: any;
   name: string | null;
   turns: Turn[];
   [key: string]: unknown;

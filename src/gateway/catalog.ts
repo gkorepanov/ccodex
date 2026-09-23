@@ -138,6 +138,7 @@ export class Catalog {
     const { cursor: _cursor, limit: _limit, ...filters } = params;
     const key = JSON.stringify(filters);
     const offset = decodeCursor(params.cursor, key);
+    if (!params.cursor) await this.gateway.claude.catalog.refresh();
     const claude = await this.project(await this.claudeThreads(params));
     const stock = await this.stockThreads(connection, params, offset + limit + 1, !params.cursor);
     const complete = this.stockCache!.done;

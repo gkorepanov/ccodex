@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { defaultCodexRolloutLocator, parseRolloutChunk } from "../../../src/claude/session/codexRollout.js";
+import { defaultCodexRolloutLocator, parseRolloutChunk } from "../../src/claude/codexRollout.js";
 
 const line = (value: unknown) => `${JSON.stringify(value)}\n`;
 
