@@ -7,7 +7,7 @@ import { ClaudeThreads } from "../claude/threads.js";
 import type { Config } from "../config.js";
 import { Logger, RpcRecorder } from "../log.js";
 import { Meta } from "../meta.js";
-import type { JsonObject } from "../protocol/codex.js";
+import { RpcFailure, type JsonObject } from "../protocol/codex.js";
 import { Catalog } from "./catalog.js";
 import { Connection } from "./connection.js";
 import { Lineages } from "./lineage.js";
@@ -172,6 +172,10 @@ export class Gateway {
       return (conn, p) => this.claude.handle(conn, method, p);
     }
     if (!threadId) return undefined;
+    // A row a client kept from a backend's announcement: gone, as stock says (Desktop then drops the row).
+    if (this.lineages.isBackend(threadId)) {
+      return async () => { throw new RpcFailure(-32600, `no rollout found for thread id ${threadId}`, undefined, true); };
+    }
     if (method === "turn/start") {
       const command = ccodexCommand(params);
       if (command) return (conn, p) => synthesizeTurn(this, conn, p, command);
@@ -210,9 +214,11 @@ export class Gateway {
     if (connection.provider === "claude" && text.startsWith("{\"method\":\"account/rateLimits/updated\"")) return undefined;
     // A new backend of a switched thread is announced by stock like any new thread; the public row stays.
     if (text.startsWith("{\"method\":\"thread/started\"")) {
-      if (this.lineages.isBackendAnnouncement(text)) return undefined;
+      const thread = (JSON.parse(text) as JsonObject).params.thread;
+      if (this.lineages.isBackend(thread.id)) return undefined;
       // CCodex's own (titles, switch summaries) or another client's ephemeral thread would show as a sidebar row.
-      if (!connection.ephemeralRequests.size && (JSON.parse(text) as JsonObject).params.thread.ephemeral === true) return undefined;
+      if (thread.ephemeral === true) return connection.ephemeralRequests.size ? text : undefined;
+      if (this.lineages.holdAnnouncement(connection, thread.id, text)) return undefined;
     }
     if (text.startsWith("{\"method\":\"remoteControl/status/changed\"")) {
       this.remote.intercept(connection, (JSON.parse(text) as JsonObject).params);

@@ -45,6 +45,10 @@ export class Lineages {
   /** Model of the other provider chosen through `thread/settings/update`; the switch runs on the next turn. */
   private readonly pending = new Map<string, JsonObject>();
   private readonly resumed = new WeakMap<Connection, Set<string>>();
+  /** Stock backends being created by switches, their held announcements, and the backends created so far. */
+  private creatingBackends = 0;
+  private readonly heldAnnouncements: Array<{ connection: Connection; threadId: string; text: string }> = [];
+  private readonly newBackends = new Set<string>();
 
   public constructor(private readonly gateway: Gateway) {}
 
@@ -70,11 +74,32 @@ export class Lineages {
     return rewrites.size ? text.replace(UUID, (id) => rewrites.get(id) ?? id) : text;
   }
 
-  public isBackendAnnouncement(text: string): boolean {
-    const rewrites = this.gateway.meta.rewrites;
-    if (!rewrites.size) return false;
-    const id = (JSON.parse(text) as JsonObject).params?.thread?.id;
-    return rewrites.has(id) || this.gateway.meta.hidden(id);
+  /** A backend of a switched thread: never a thread of its own for clients. */
+  public isBackend(threadId: string): boolean {
+    return this.newBackends.has(threadId) || this.gateway.meta.rewrites.has(threadId) || this.gateway.meta.hidden(threadId);
+  }
+
+  /** Holds a new thread's announcement while a switch creates a stock backend; false = deliver it now. */
+  public holdAnnouncement(connection: Connection, threadId: string, text: string): boolean {
+    if (!this.creatingBackends) return false;
+    this.heldAnnouncements.push({ connection, threadId, text });
+    return true;
+  }
+
+  /** Stock announces a new thread to every connection before its creator learns the id: a backend's announcement
+   *  is held until then and dropped, or Desktop keeps it as a row that can never open. */
+  private async startBackend(connection: Connection, params: JsonObject): Promise<string> {
+    this.creatingBackends += 1;
+    try {
+      const started: JsonObject = await connection.upstream.request("thread/start", params);
+      this.newBackends.add(started.thread.id);
+      return started.thread.id;
+    } finally {
+      this.creatingBackends -= 1;
+      if (!this.creatingBackends) {
+        for (const held of this.heldAnnouncements.splice(0)) if (!this.isBackend(held.threadId)) held.connection.send(held.text);
+      }
+    }
   }
 
   // ---- routing ----
@@ -374,20 +399,17 @@ export class Lineages {
   private async toCodex(connection: Connection, publicId: string, segments: Segment[], source: Segment, summary: string, params: JsonObject): Promise<unknown> {
     const settings = this.gateway.claude.settings(source.threadId);
     const permissions = codexPermissions(settings.permissionMode, settings.cwd);
-    const started: JsonObject = await connection.upstream.request("thread/start", {
+    const threadId = await this.startBackend(connection, {
       model: requestedModel(params), cwd: settings.cwd,
       approvalPolicy: params.approvalPolicy ?? permissions.approvalPolicy,
       approvalsReviewer: params.approvalsReviewer ?? permissions.approvalsReviewer,
       ...(params.permissions || params.sandboxPolicy ? {} : { permissions: permissions.activePermissionProfile.id }),
     });
-    const threadId: string = started.thread.id;
     await connection.upstream.request("thread/inject_items", {
       threadId,
       items: [{ type: "message", role: "user", content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\n${summary}` }] }],
     });
     this.gateway.meta.setLineage(publicId, [...segments.slice(0, -1), source, { provider: "codex", threadId, lastTurnId: null }]);
-    // Stock announced the new backend as a thread of its own before we knew it; take that row back.
-    for (const client of this.gateway.connections) client.send(JSON.stringify({ method: "thread/deleted", params: { threadId } }), true);
     const resumed = this.resumed.get(connection) ?? new Set();
     resumed.add(threadId);
     this.resumed.set(connection, resumed);

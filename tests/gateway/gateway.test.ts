@@ -565,6 +565,22 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(client.notifications("thread/started").map((message) => message.params.thread.id)).toContain(side.id);
   });
 
+  it("never announces a switch's new stock backend (Desktop keeps a row it was once told of, unopenable)", async () => {
+    const other = await gateway.connect();
+    const threadId = await claudeThread();
+    await client.turn(threadId, "first");
+    await client.turn(threadId, "second", { model: "gpt-6-luna" });
+    const backendId: string = JSON.parse(readFileSync(join(gateway.config.dataDir, "meta.json"), "utf8")).lineages[threadId][1].threadId;
+    for (const connection of [client, other]) {
+      expect(JSON.stringify(connection.messages.filter((message) => message.method?.startsWith("thread/")))).not.toContain(backendId);
+    }
+    // A row some client kept anyway is gone, as stock says it (Desktop drops the row); the backend is untouched.
+    await expect(other.request("thread/archive", { threadId: backendId })).rejects.toThrow(`no rollout found for thread id ${backendId}`);
+    const next = await client.turn(threadId, "third", { model: "gpt-6-luna" });
+    expect(next.threadId).toBe(threadId);
+    expect(client.notifications("item/completed", threadId).some((message) => message.params.item.text === "gpt: third")).toBe(true);
+  });
+
   it("leaves no empty Claude thread behind when a switch to Claude fails", async () => {
     const threadId = await stockThread();
     await client.turn(threadId, "first");
