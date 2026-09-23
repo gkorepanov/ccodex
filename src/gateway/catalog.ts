@@ -111,18 +111,23 @@ export class Catalog {
     return Promise.all(threads.filter((thread) => !this.gateway.meta.hidden(thread.id)).map((thread) => this.gateway.lineages.projectRow(thread)));
   }
 
-  private merge(stock: Thread[], claude: Thread[], params: JsonObject): Thread[] {
+  /** Position of a row in the requested order: negative sorts first. */
+  private order(params: JsonObject): (thread: Thread) => number {
     const key = sortKey(params);
     const direction = params.sortDirection === "asc" ? 1 : -1;
-    const value = (thread: Thread) => Number(thread[key] ?? thread.updatedAt ?? 0);
+    return (thread) => direction * Number(thread[key] ?? thread.updatedAt ?? 0);
+  }
+
+  private merge(stock: Thread[], claude: Thread[], params: JsonObject): Thread[] {
+    const order = this.order(params);
     if (params.sortKey === "section_position") return this.sectionOrdered(params.sectionId, stock, claude);
-    const claudeSorted = [...claude].sort((left, right) => direction * (value(left) - value(right)) || left.id.localeCompare(right.id));
+    const claudeSorted = [...claude].sort((left, right) => order(left) - order(right) || left.id.localeCompare(right.id));
     const merged: Thread[] = [];
     let s = 0;
     let c = 0;
     while (s < stock.length || c < claudeSorted.length) {
       const takeStock = c >= claudeSorted.length
-        || (s < stock.length && direction * (value(stock[s]!) - value(claudeSorted[c]!)) <= 0);
+        || (s < stock.length && order(stock[s]!) <= order(claudeSorted[c]!));
       merged.push(takeStock ? stock[s++]! : claudeSorted[c++]!);
     }
     return merged;
@@ -153,12 +158,15 @@ export class Catalog {
     const claude = await this.project(await this.claudeThreads(params));
     const stock = await this.stockThreads(connection, { ...params, limit }, offset + limit, !params.cursor);
     const complete = this.stockCache!.done;
-    let merged = this.merge(await this.project(stock), claude, params);
-    // Without all stock rows, only the part of the merge that no unseen stock row can precede is final.
+    const shown = await this.project(stock);
+    let merged = this.merge(shown, claude, params);
+    // Without all stock rows, only the part of the merge that no unseen stock row can precede is final (the last
+    // stock row read may itself be hidden or projected: its sort value is the boundary).
     if (!complete && stock.length) {
-      const boundary = stock.at(-1)!;
-      const index = merged.indexOf(boundary);
-      merged = merged.slice(0, index + 1);
+      const order = this.order(params);
+      const boundary = order(stock.at(-1)!);
+      const seen = new Set(shown);
+      merged = merged.filter((thread) => seen.has(thread) || order(thread) <= boundary);
     }
     const data = merged.slice(offset, offset + limit);
     const more = offset + limit < merged.length || !complete;

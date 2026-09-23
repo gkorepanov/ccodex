@@ -85,6 +85,30 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(row.archived).toBe(false);
   });
 
+  it("pages through the list whatever rows fall on a page boundary (switched threads included)", async () => {
+    const older = await stockThread();
+    await client.turn(older, "old");
+    const claude = await claudeThread();
+    await client.turn(claude, "claude");
+    const switched = await stockThread();
+    await client.turn(switched, "first");
+    await client.request("turn/start", { threadId: switched, model: CLAUDE, input: text("second") });
+    await client.waitFor("turn/completed", (params) => params.threadId === switched
+      && client.notifications("item/completed", switched).some((message) => message.params.item.text === "claude: second"));
+    const all = (await client.request("thread/list", { limit: 200 })).data.map((row: any) => row.id);
+    expect(all).toEqual(expect.arrayContaining([older, claude, switched]));
+    for (const limit of [1, 2]) {
+      const paged: string[] = [];
+      let cursor = null;
+      do {
+        const page: any = await client.request("thread/list", { limit, cursor });
+        paged.push(...page.data.map((row: any) => row.id));
+        cursor = page.nextCursor;
+      } while (cursor);
+      expect(paged).toEqual(all);
+    }
+  });
+
   it("keeps Claude threads in stock's sections", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "pin me");
