@@ -12,19 +12,22 @@ export interface FakeClaudeLog {
   readonly calls: Array<{ method: string; args: unknown[] }>;
 }
 
-export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string; spawnError: string | null } = {
+export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string; spawnError: string | null; compactError: string | null } = {
   prompts: [],
   options: [],
   calls: [],
   reply: (text) => `claude: ${text}`,
   /** Set: the CLI process fails to start (like `spawn … EAGAIN` when the machine is out of processes). */
   spawnError: null,
+  /** Set: `/compact` fails, as Claude reports it (`Error during compaction: …`). */
+  compactError: null,
   reset() {
     this.prompts.length = 0;
     this.options.length = 0;
     this.calls.length = 0;
     this.reply = (text) => `claude: ${text}`;
     this.spawnError = null;
+    this.compactError = null;
   },
 };
 
@@ -58,6 +61,13 @@ class Transcript {
     })}\n`);
     this.last = uuid;
     return uuid;
+  }
+
+  /** Claude compacts only a session with a message of the user's since its last compaction. */
+  public humanSinceCompaction(): boolean {
+    if (!existsSync(this.path)) return false;
+    const records = readFileSync(this.path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    return records.slice(records.findLastIndex((record) => record.isCompactSummary) + 1).some((record) => record.origin?.kind === "human");
   }
 }
 
@@ -116,6 +126,14 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     return;
   }
   const command = /^\/(\w+)\s*([\s\S]*)$/u.exec(text);
+  if (command?.[1] === "compact" && (!transcript.humanSinceCompaction() || fakeClaude.compactError)) {
+    const output = fakeClaude.compactError ?? "Not enough messages to compact.";
+    transcript.write({ type: "user", uuid, message: { role: "user", content: `<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args>${command[2]}</command-args>` } });
+    transcript.write({ type: "system", subtype: "local_command", content: `<local-command-stdout>${output}</local-command-stdout>` });
+    yield base(sessionId, { type: "system", subtype: "local_command_output", content: output });
+    yield* finish("");
+    return;
+  }
   if (command?.[1] === "compact") {
     const summary = `SUMMARY(${command[2] || "default"})`;
     const logical = transcript.last;

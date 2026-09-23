@@ -129,6 +129,8 @@ export class ClaudeSession {
   public costUsd = 0;
   public liveModel: string | null = null;
   private sdk?: Query;
+  /** Settles once the query's process is gone: Claude writes its last transcript records on the way out. */
+  private consumed: Promise<void> = Promise.resolve();
   private inbox?: Inbox;
   private response?: Response;
   private readonly tools = new Map<string, Tool>();
@@ -201,7 +203,7 @@ export class ClaudeSession {
     this.exists = true;
     if (this.resumeAt) this.host.resumedAtLeaf(this.threadId);
     this.resumeAt = undefined;
-    void this.consume(sdk);
+    this.consumed = this.consume(sdk);
     return sdk;
   }
 
@@ -240,13 +242,14 @@ export class ClaudeSession {
   }
 
   /** Closes the query; the next turn resumes the session from disk. */
-  public unload(): void {
+  public unload(): Promise<void> {
     clearTimeout(this.idleTimer);
     const sdk = this.sdk;
     this.sdk = undefined;
     this.inbox?.close();
     this.inbox = undefined;
     sdk?.close();
+    return this.consumed;
   }
 
   private scheduleUnload(): void {

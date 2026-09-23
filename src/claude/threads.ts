@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { deleteSession, forkSession, renameSession, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { v7 as uuidv7 } from "uuid";
@@ -14,7 +14,8 @@ import { claudeModelLabel, modelCatalogValue, normalizeClaudeModelIdentifier } f
 import { NativeSessionCatalog, type SessionSummary } from "./native/catalog.js";
 import { nativeThread, type TranscriptProjection } from "./native/projector.js";
 import { projectSubagents, type ProjectedSubagent } from "./native/subagents.js";
-import { summarizeTranscript, type TranscriptHeader } from "./native/summary.js";
+import { readTranscriptRecords } from "./native/records.js";
+import { summarizeTranscript, userText, type TranscriptHeader } from "./native/summary.js";
 import { codexPermissions, mapClaudeModel, mapSkill, permissionModeFrom, withProbeQuery } from "./sdk.js";
 import { ClaudeSession, type SessionSettings } from "./session.js";
 
@@ -157,7 +158,7 @@ export class ClaudeThreads {
     const now = Math.floor(Date.now() / 1000);
     return nativeThread(session.threadId, {
       cwd: session.settings.cwd, gitBranch: null, createdAt: now, updatedAt: now, preview: "",
-      customTitle: null, aiTitle: null, model: session.settings.model, reasoningEffort: session.settings.effort,
+      customTitle: this.pendingNames.get(session.threadId) ?? null, aiTitle: null, model: session.settings.model, reasoningEffort: session.settings.effort,
       serviceTier: session.settings.fast ? "fast" : null, permissionMode: session.settings.permissionMode, cliVersion: null, goal: null,
     }, { status: this.status(session.threadId) });
   }
@@ -790,7 +791,7 @@ export class ClaudeThreads {
 
   /** Removes a session with its transcript (also what a failed switch to Claude leaves behind). */
   public async discard(threadId: string): Promise<void> {
-    this.sessions.get(threadId)?.unload();
+    await this.sessions.get(threadId)?.unload();
     this.sessions.delete(threadId);
     await this.catalog.refresh();
     if (this.catalog.get(threadId)) await deleteSession(threadId);
@@ -843,22 +844,21 @@ export class ClaudeThreads {
   private async truncate(threadId: string, leaf: string | null): Promise<void> {
     const session = this.sessions.get(threadId);
     if (session?.busy) throw invalidRequest("Cannot roll back while a turn is running.");
-    session?.unload();
+    const settings = this.settings(threadId);
+    await session?.unload();
     this.sessions.delete(threadId);
     if (leaf) {
       this.gateway.meta.setLeaf(threadId, leaf);
       return;
     }
-    // Everything rolled back: keep only the session's metadata records (titles, modes).
-    const path = this.catalog.get(threadId)!.path;
-    const kept = readFileSync(path, "utf8").split("\n").filter((line) => {
-      if (!line.trim()) return false;
-      const type = (JSON.parse(line) as { type?: string }).type;
-      return type === "custom-title" || type === "ai-title" || type === "permission-mode" || type === "mode";
-    });
-    writeFileSync(path, kept.length ? `${kept.join("\n")}\n` : "");
+    // Everything rolled back: Claude neither resumes nor starts anew a transcript without messages, so the session
+    // starts over under its id with its settings, and its name comes back with its first turn.
+    const name = this.catalog.get(threadId)!.customTitle;
+    await deleteSession(threadId);
     this.gateway.meta.setLeaf(threadId, null);
     await this.catalog.refresh();
+    this.sessions.set(threadId, new ClaudeSession(this, threadId, settings, { exists: false }));
+    if (name) this.pendingNames.set(threadId, name);
   }
 
   private async rollback(threadId: string, numTurns: number): Promise<JsonObject> {
@@ -926,6 +926,16 @@ export class ClaudeThreads {
       costUsd: session?.costUsd ?? 0,
       backgroundTasks: session?.tasks.size ?? 0,
     };
+  }
+
+  /** The summary of Claude's latest compaction if nothing was said since ("" otherwise). */
+  public async compactedSummary(threadId: string): Promise<string> {
+    let summary = "";
+    for await (const record of readTranscriptRecords(this.catalog.get(threadId)!.path)) {
+      if (record.type === "user" && record.isCompactSummary) summary = userText(record);
+      else if (record.type === "assistant" || (record.type === "user" && record.origin?.kind === "human")) summary = "";
+    }
+    return summary;
   }
 
   public summary(threadId: string): SessionSummary | undefined {

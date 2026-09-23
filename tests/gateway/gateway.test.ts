@@ -420,6 +420,16 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(after.thread.turns.map((t: any) => t.items[0].content[0].text)).toEqual(["apple", "date"]);
   });
 
+  it("continues Claude after an edit of its first message", async () => {
+    const threadId = await claudeThread();
+    const { turn } = await client.turn(threadId, "apple");
+    await client.request("thread/revert", { threadId, beforeTurnId: turn.id });
+    await client.turn(threadId, "cherry");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(itemsOf(thread.turns)).toEqual(["user:cherry", "agent:claude: cherry"]);
+  });
+
   it("announces a Claude sub-agent before its spawn completes, before Claude has written its transcript", async () => {
     const threadId = await claudeThread();
     const before = client.messages.length;
@@ -528,6 +538,60 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     // The next turn goes straight to the stock backend, answered under the public id.
     const next = await client.turn(threadId, "third", { model: "gpt-6-luna" });
     expect(next.threadId).toBe(threadId);
+  });
+
+  it("switches claude → gpt again after an edit of the switched turn (Claude has nothing new to compact)", async () => {
+    const other = await gateway.connect();
+    const threadId = await claudeThread();
+    await client.turn(threadId, "first");
+    const { turn: switched } = await client.turn(threadId, "second", { model: "gpt-6-luna" });
+    await client.request("thread/revert", { threadId, beforeTurnId: switched.id });
+    // Undoing the switch archives only its backend: the thread stays loaded and listed for every client.
+    for (const connection of [client, other]) {
+      expect(connection.notifications("thread/archived", threadId)).toEqual([]);
+      expect(connection.notifications("thread/status/changed", threadId).map((message) => message.params.status.type)).not.toContain("notLoaded");
+    }
+    const before = client.notifications("turn/started", threadId).length;
+    const { turn } = await client.request("turn/start", { threadId, model: "gpt-6-luna", input: text("second, edited") });
+    await client.waitFor("turn/completed", (params) => params.threadId === threadId && client.notifications("item/completed", threadId)
+      .some((message) => message.params.item.text === "gpt: second, edited"));
+    expectLiveSwitch(threadId, before, turn.id);
+    const { threads } = await client.request("test/threads");
+    expect(threads.filter((thread: any) => thread.injected.length).at(-1).injected[0].content[0].text).toContain("SUMMARY(You are performing");
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(itemsOf(thread.turns)).toEqual(["user:first", "agent:claude: first", "contextCompaction", "user:second, edited", "agent:gpt: second, edited"]);
+  });
+
+  it("switches claude → gpt again after an edit of the thread's first message", async () => {
+    const threadId = await claudeThread();
+    const { turn: first } = await client.turn(threadId, "first");
+    await client.turn(threadId, "second", { model: "gpt-6-luna" });
+    await client.request("thread/revert", { threadId, beforeTurnId: first.id });
+    await client.turn(threadId, "first, edited");
+    await client.turn(threadId, "second, again", { model: "gpt-6-luna" });
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(itemsOf(thread.turns)).toEqual(["user:first, edited", "agent:claude: first, edited", "contextCompaction", "user:second, again", "agent:gpt: second, again"]);
+  });
+
+  it("fails a switch to gpt Desktop can see fail: the failed turn was announced as started", async () => {
+    const threadId = await claudeThread();
+    // A Claude thread without a message has nothing to compact and no summary to carry over.
+    await client.request("turn/start", { threadId, model: "gpt-6-luna", input: text("hello") });
+    const { turn } = await client.waitFor("turn/completed", (params) => params.threadId === threadId);
+    expect(turn.status).toBe("failed");
+    expect(turn.error.message).toBe("Switching provider failed: Not enough messages to compact.");
+    expect(client.notifications("turn/started", threadId).map((message) => message.params.turn.id)).toEqual([turn.id]);
+  });
+
+  it("fails a switch to gpt with Claude's compaction error, never with an earlier compaction's summary", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "first");
+    const { turn: switched } = await client.turn(threadId, "second", { model: "gpt-6-luna" });
+    await client.request("thread/revert", { threadId, beforeTurnId: switched.id });
+    await client.turn(threadId, "second, on claude");
+    fakeClaude.compactError = "Error during compaction: summarization produced empty response";
+    const { turn } = await client.turn(threadId, "third", { model: "gpt-6-luna" });
+    expect(turn.error.message).toBe(`Switching provider failed: ${fakeClaude.compactError}`);
   });
 
   it("resumes gpt → claude → gpt with the row's rollout path (Desktop after a restart)", async () => {

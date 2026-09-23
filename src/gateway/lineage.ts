@@ -306,15 +306,16 @@ export class Lineages {
     }
     if (!dropSegment) await this.forward(connection, segments[at.segment]!, "thread/revert", { threadId: publicId, beforeTurnId });
     const kept = segments.slice(0, keep).map((segment, index) => index === keep - 1 ? { ...segment, lastTurnId: null } : segment);
-    // Rolled-back backends leave the lineage; they stay on disk, archived.
-    for (const segment of dropped) {
-      if (segment.provider === "claude") this.gateway.meta.setArchived(segment.threadId, true);
-      else await this.gateway.stock.request("thread/archive", { threadId: segment.threadId }).catch(() => undefined);
-    }
     // A lineage back to its own single thread is dropped, unless forks still list that thread as a segment.
     const shared = Object.entries(this.gateway.meta.lineages).some(([id, other]) => id !== publicId && other.some((segment) => segment.threadId === publicId));
     if (kept.length === 1 && kept[0]!.threadId === publicId && !shared) this.gateway.meta.deleteLineage(publicId);
     else this.gateway.meta.setLineage(publicId, kept);
+    // Rolled-back backends leave the lineage first, or stock's news of them would read as the public thread
+    // archived and unloaded for every client. They stay on disk, archived.
+    for (const segment of dropped) {
+      if (segment.provider === "claude") this.gateway.meta.setArchived(segment.threadId, true);
+      else await this.gateway.stock.request("thread/archive", { threadId: segment.threadId }).catch(() => undefined);
+    }
     const turns = await this.stitchedTurns(kept);
     const row = await this.thread(rowSegment);
     const thread = this.merge(row, await this.thread(kept.at(-1)!), publicId);
@@ -353,9 +354,23 @@ export class Lineages {
       try {
         const status = await session.turnDone(turn.id);
         session.compactSummary = undefined;
-        if (status !== "completed" || !summary) throw new Error(`compaction ${status}`);
-        return await this.toCodex(connection, publicId, segments, { ...source, lastTurnId: turn.id }, summary, params);
+        if (status !== "completed") throw new Error(`compaction ${status}`);
+        let lastTurnId = turn.id;
+        if (!summary) {
+          // Nothing said since the last compaction (switching again after an edit undid a switch): Claude compacts
+          // nothing, the session still continues from that compaction's summary, and the no-op leaves the history.
+          const { turns } = await this.gateway.claude.read(source.threadId);
+          summary = await this.gateway.claude.compactedSummary(source.threadId);
+          if (!summary) {
+            const output = turns.at(-1)!.items.flatMap((item) => item.type === "agentMessage" ? [item.text] : []).join("\n");
+            throw new Error(output || "Claude wrote no summary");
+          }
+          lastTurnId = turns.at(-2)!.id;
+        }
+        return await this.toCodex(connection, publicId, segments, { ...source, lastTurnId }, summary, params);
       } catch (error) {
+        // Desktop only settles its pending message on a turn it saw start.
+        connection.notify("turn/started", { threadId: publicId, turn: startedTurn(turn) });
         return failed(turn, error);
       }
     }
