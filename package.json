@@ -14,8 +14,7 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "ccodex": "./dist/cli/main.js",
-    "codex-hybrid": "./dist/cli/main.js"
+    "ccodex": "./dist/cli/main.js"
   },
   "publishConfig": {
     "access": "public",
@@ -31,7 +30,6 @@
     "README.md",
     "scripts/install.sh",
     "scripts/uninstall.sh",
-    "scripts/postinstall.mjs",
     "scripts/install-claude-stack.sh",
     "agents/*.md",
     "skills/**/*.md",
@@ -43,25 +41,21 @@
   "scripts": {
     "build": "npm run build:ts && npm run build:relay",
     "clean:dist": "rm -rf dist",
-    "postinstall": "node scripts/postinstall.mjs",
     "build:ts": "npm run clean:dist && tsc -p config/tsconfig.build.json",
     "build:relay": "./scripts/build-relay.sh",
     "check": "tsc -p tsconfig.json --noEmit && npm run check:public-tree",
     "check:public-tree": "node scripts/check-public-tree.mjs",
     "dev": "tsx src/cli/main.ts",
     "claude:install": "./scripts/install-claude-stack.sh",
-    "sync:codex-assets": "node scripts/codex-assets.mjs",
-    "check:codex-assets": "node scripts/codex-assets.mjs --check",
-    "update:codex-pin": "node scripts/update-codex-pin.mjs",
     "generate:notices": "node release/generate-notices.mjs",
     "release:version": "node release/set-version.mjs",
     "release:promote": "node release/promote.mjs",
     "test": "vitest run --config config/vitest.config.ts && cargo test --manifest-path relay/Cargo.toml --quiet",
     "test:unit": "vitest run --config config/vitest.config.ts",
     "test:watch": "vitest --config config/vitest.config.ts",
-    "test:package": "./scripts/probe-package.sh",
-    "test:public-package": "./scripts/probe-public-package.sh",
-    "prepack": "npm run build:ts && npm run generate:notices"
+    "prepack": "npm run build:ts && npm run generate:notices",
+    "sync:relay-transport": "node scripts/relay-transport.mjs",
+    "check:relay-transport": "node scripts/relay-transport.mjs --check"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.280",

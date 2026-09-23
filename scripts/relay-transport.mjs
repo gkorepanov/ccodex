@@ -13,8 +13,6 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 
 export const root = resolve(import.meta.dirname, "..");
-export const upstreamAssetPath = "codex-rs/ext/goal/templates/goals/continuation.md";
-export const vendoredAssetPath = join(root, "vendor", "codex", "continuation.md");
 
 const upstreamTransportRoot = "codex-rs/app-server-transport";
 export const vendoredTransportDir = join(root, "relay", "vendor", "app-server-transport");
@@ -75,7 +73,7 @@ function openUpstream(ref) {
       }
     }
   }
-  const temporary = mkdtempSync(join(tmpdir(), "ccodex-codex-assets-"));
+  const temporary = mkdtempSync(join(tmpdir(), "ccodex-relay-transport-"));
   try {
     execFileSync("git", ["init", "--bare", temporary], { stdio: "ignore" });
     execFileSync("git", ["-C", temporary, "fetch", "--quiet", "--depth=1", "https://github.com/openai/codex.git", ref]);
@@ -86,15 +84,6 @@ function openUpstream(ref) {
   return { dir: temporary, cleanup: () => rmSync(temporary, { recursive: true, force: true }) };
 }
 
-export function upstreamAsset(ref = pinnedCodexRef()) {
-  const repo = openUpstream(ref);
-  try {
-    return git(repo.dir, ["show", `${ref}:${upstreamAssetPath}`]);
-  } finally {
-    repo.cleanup();
-  }
-}
-
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 
 function expectedTransportTree(repo, ref) {
@@ -102,7 +91,7 @@ function expectedTransportTree(repo, ref) {
   if (!overlay) {
     throw new Error(
       `No pinned transport overlay for Codex ref ${ref}.`
-      + " Review upstream app-server-transport changes and pin one in scripts/codex-assets.mjs.",
+      + " Review upstream app-server-transport changes and pin one in scripts/relay-transport.mjs.",
     );
   }
   const names = git(repo.dir, ["ls-tree", "-r", "--name-only", ref, upstreamTransportRoot])
@@ -138,7 +127,7 @@ function syncTransport(repo, ref, check) {
     if (stale.length) {
       throw new Error(
         `relay/vendor/app-server-transport is out of sync with ${ref}:`
-        + ` ${[...new Set(stale)].join(", ")}. Run npm run sync:codex-assets.`,
+        + ` ${[...new Set(stale)].join(", ")}. Run npm run sync:relay-transport.`,
       );
     }
     return;
@@ -150,30 +139,17 @@ function syncTransport(repo, ref, check) {
   }
 }
 
-export function syncCodexAsset(check = false) {
+export function syncRelayTransport(check = false) {
   const ref = pinnedCodexRef();
   const repo = openUpstream(ref);
   try {
-    const upstream = git(repo.dir, ["show", `${ref}:${upstreamAssetPath}`]);
-    if (check) {
-      const vendored = readFileSync(vendoredAssetPath);
-      if (!vendored.equals(upstream)) {
-        throw new Error(
-          `vendor/codex/continuation.md is out of sync with ${ref}:${upstreamAssetPath}`
-          + ` (vendor ${digest(vendored)}, upstream ${digest(upstream)}). Run npm run sync:codex-assets.`,
-        );
-      }
-    } else {
-      mkdirSync(dirname(vendoredAssetPath), { recursive: true });
-      writeFileSync(vendoredAssetPath, upstream);
-    }
     syncTransport(repo, ref, check);
-    console.log(check ? `Codex assets match ${ref}.` : `Synced codex assets from ${ref}.`);
+    console.log(check ? `Relay transport matches ${ref}.` : `Synced relay transport from ${ref}.`);
   } finally {
     repo.cleanup();
   }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
-  syncCodexAsset(process.argv.includes("--check"));
+  syncRelayTransport(process.argv.includes("--check"));
 }

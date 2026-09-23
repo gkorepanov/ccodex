@@ -21,7 +21,7 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 codex-app-server-protocol = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
 # Vendored at the same ref with OutgoingResponse.result relaxed back to raw
 # serde_json::Value so gateway responses relay byte-for-byte; managed by
-# scripts/codex-assets.mjs (sync:codex-assets / check:codex-assets).
+# scripts/relay-transport.mjs (sync:relay-transport / check:relay-transport).
 codex-app-server-transport = { path = "vendor/app-server-transport" }
 codex-core = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
 codex-login = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }

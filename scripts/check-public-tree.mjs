@@ -5,8 +5,6 @@ const allowedMarkdown = new Set([
   "README.md",
   "legal/LICENSES.md",
   "legal/THIRD_PARTY_NOTICES.md",
-  "vendor/codex/continuation.md",
-  "assets/ccodex/goals/continuation.md",
 ]);
 const forbiddenCapture = /(^|\/)(captures?|fixtures\/protocol)(\/|$)|\.(?:capture|gateway|lab)\.json$|\.jsonl(?:\.gz)?$/u;
 const allowedMarkdownPattern = /^(?:agents|skills)\/.+\.md$/u;

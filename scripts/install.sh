@@ -32,12 +32,9 @@ node -e 'const [M,m]=process.versions.node.split(".").map(Number);process.exit(M
 command -v npm >/dev/null 2>&1 || fail 'npm >=10 is missing. Reinstall Node.js 22 or 24 LTS.'
 [ "$(npm --version | cut -d. -f1)" -ge 10 ] || fail 'npm >=10 is required. Run: npm install -g npm@latest'
 
-version=${CCODEX_VERSION:-$(npm view "$package" dist-tags.latest --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s)))')}
-stage="$home/staging/bootstrap-$version-$$"
+command -v codex >/dev/null 2>&1 || npm install -g @openai/codex@latest || fail 'could not install Codex: run npm install -g @openai/codex'
+
+version=${CCODEX_VERSION:-$(npm view "$package" dist-tags.latest)}
 umask 077
-mkdir -p "$home/staging"
-trap 'rm -rf "$stage"' EXIT HUP INT TERM
-npm install --prefix "$stage" --include=optional --ignore-scripts --save=false "$package@$version"
-"$stage/node_modules/.bin/ccodex" setup --staged "$stage" --version "$version"
-trap - EXIT HUP INT TERM
+npx --yes --package "$package@$version" ccodex setup --version "$version"
 printf 'CCodex %s installed. Open a new shell.\n' "$version"

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { delimiter, dirname } from "node:path";
 import { classifyInvocation, withProxySocket } from "./args.js";
 import { delegate } from "./delegate.js";
 import { loadConfig } from "../config.js";
@@ -10,6 +11,8 @@ import { loadDaemonSettings } from "../daemon/settings.js";
 import { runManagementCommand } from "../management/commands.js";
 
 async function main(): Promise<number> {
+  // Desktop may start us with a minimal PATH: keep `npm i -g` binaries (codex, `env node` shebangs) reachable.
+  process.env.PATH = `${process.env.PATH ?? ""}${delimiter}${dirname(process.execPath)}`;
   const args = process.argv.slice(2);
   const management = await runManagementCommand(args, loadConfig);
   if (management !== undefined) return management;

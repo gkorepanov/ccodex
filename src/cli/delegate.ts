@@ -12,7 +12,6 @@ function refuseManagedEntrypoint(command: string): void {
     join(home, "bin", "codex"),
     join(home, "bin", "ccodex"),
     join(home, "current", "node_modules", ".bin", "ccodex"),
-    join(home, "current", "node_modules", ".bin", "codex-hybrid"),
   ].filter((path): path is string => typeof path === "string" && existsSync(path));
   if (managed.some((path) => realpathSync(path) === own)) {
     throw new Error(`Refusing recursive delegation to managed CCodex entrypoint '${command}'.`);

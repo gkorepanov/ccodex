@@ -28,7 +28,5 @@ lab/apple-container/.build/
 !README.md
 !legal/LICENSES.md
 !legal/THIRD_PARTY_NOTICES.md
-!vendor/codex/continuation.md
-!assets/ccodex/goals/continuation.md
 !skills/**/*.md
 !agents/*.md
