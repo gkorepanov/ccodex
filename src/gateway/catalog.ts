@@ -86,16 +86,19 @@ export class Catalog {
     return threads.filter((thread) => this.claudeMatches(thread, params));
   }
 
-  /** Stock threads for one filter set, fetched page by page only as far as needed. */
+  /**
+   * Stock threads for one filter set, fetched only as far as needed, in pages of the client's size: stock's
+   * paging depends on the page size, so this walks exactly the pages the client would get from stock itself.
+   */
   private async stockThreads(connection: Connection, params: JsonObject, needed: number, fresh: boolean): Promise<Thread[]> {
-    const { cursor: _cursor, limit: _limit, ...filters } = params;
+    const { cursor: _cursor, ...filters } = params;
     const key = JSON.stringify(filters);
     if (fresh || !this.stockCache || this.stockCache.key !== key || Date.now() - this.stockCache.at > CACHE_MS) {
       this.stockCache = { key, at: Date.now(), threads: [], next: null, done: false };
     }
     const cache = this.stockCache;
     while (!cache.done && cache.threads.length < needed) {
-      const page = await connection.upstream.request("thread/list", { ...filters, cursor: cache.next, limit: 100 });
+      const page = await connection.upstream.request("thread/list", { ...filters, cursor: cache.next });
       cache.threads.push(...page.data);
       cache.next = page.nextCursor;
       cache.done = !page.nextCursor;
@@ -143,7 +146,7 @@ export class Catalog {
       await Promise.all([this.gateway.claude.catalog.refresh(), this.refreshSections(), this.gateway.claude.models().catch(() => undefined)]);
     }
     const claude = await this.project(await this.claudeThreads(params));
-    const stock = await this.stockThreads(connection, params, offset + limit + 1, !params.cursor);
+    const stock = await this.stockThreads(connection, { ...params, limit }, offset + limit, !params.cursor);
     const complete = this.stockCache!.done;
     let merged = this.merge(await this.project(stock), claude, params);
     // Without all stock rows, only the part of the merge that no unseen stock row can precede is final.
@@ -170,27 +173,30 @@ export class Catalog {
   public async search(connection: Connection, params: JsonObject): Promise<JsonObject> {
     const searchTerm = String(params.searchTerm ?? "").trim();
     if (!searchTerm) throw invalidRequest("thread/search requires a non-empty searchTerm");
-    const stockResults: JsonObject[] = [];
-    let cursor: string | null = null;
-    do {
-      const page: JsonObject = await connection.upstream.request("thread/search", { ...params, searchTerm, cursor, limit: 100 });
-      stockResults.push(...page.data);
-      cursor = page.nextCursor;
-    } while (cursor);
-    const claude = (await this.project(await this.claudeThreads({ archived: params.archived, sourceKinds: params.sourceKinds, searchTerm })))
-      .map((thread) => ({ thread, snippet: thread.name ?? thread.preview.slice(0, 120) }));
-    const visible = stockResults.filter((result) => !this.gateway.meta.hidden(result.thread.id));
     const key = sortKey(params);
     const direction = params.sortDirection === "asc" ? 1 : -1;
-    const all = [...visible, ...claude].sort((left, right) =>
-      direction * (Number(left.thread[key] ?? 0) - Number(right.thread[key] ?? 0)));
     const limit = Math.max(1, Math.min(Number(params.limit ?? 25), 100));
     const queryKey = JSON.stringify({ searchTerm, archived: params.archived, sourceKinds: params.sourceKinds, key, direction });
     const offset = decodeCursor(params.cursor, queryKey);
+    // Only as many stock results as this page needs (a full stock search takes seconds), in the client's pages.
+    const stockResults: JsonObject[] = [];
+    let cursor: string | null = null;
+    do {
+      const page: JsonObject = await connection.upstream.request("thread/search", { ...params, searchTerm, cursor, limit });
+      stockResults.push(...page.data);
+      cursor = page.nextCursor;
+    } while (cursor && stockResults.length < offset + limit);
+    const claude = (await this.project(await this.claudeThreads({ archived: params.archived, sourceKinds: params.sourceKinds, searchTerm })))
+      .map((thread) => ({ thread, snippet: thread.name ?? thread.preview.slice(0, 120) }));
+    const visible = stockResults.filter((result) => !this.gateway.meta.hidden(result.thread.id));
+    let all = [...visible, ...claude].sort((left, right) =>
+      direction * (Number(left.thread[key] ?? 0) - Number(right.thread[key] ?? 0)));
+    // Without all stock results, only the part no unseen stock result can precede is final.
+    if (cursor && visible.length) all = all.slice(0, all.indexOf(visible.at(-1)!) + 1);
     const data = all.slice(offset, offset + limit);
     return {
       data,
-      nextCursor: offset + limit < all.length ? encodeCursor({ key: queryKey, offset: offset + limit }) : null,
+      nextCursor: offset + limit < all.length || (cursor && data.length) ? encodeCursor({ key: queryKey, offset: offset + data.length }) : null,
       backwardsCursor: null,
     };
   }
