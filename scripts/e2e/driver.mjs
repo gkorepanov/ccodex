@@ -332,6 +332,28 @@ const scenarios = {
     return { id: row.id, preview: row.preview };
   },
 
+  /** Smoke: the plain `codex` TUI (delegated to the installed codex) runs a gpt turn. */
+  async tui() {
+    const tmux = (...args) => execFileSync("tmux", args, { encoding: "utf8" });
+    tmux("new-session", "-d", "-s", "tui", "-x", "160", "-y", "45", "-c", WORK, `codex -m ${GPT}`);
+    let screen = "";
+    let sent = false;
+    for (let attempt = 0; attempt < 60 && !screen.includes("TUI-OK."); attempt += 1) {
+      await sleep(2000);
+      screen = tmux("capture-pane", "-p", "-t", "tui");
+      if (/trust/iu.test(screen) && !sent) tmux("send-keys", "-t", "tui", "Enter");
+      else if (!sent && /›|context left|send/iu.test(screen)) {
+        tmux("send-keys", "-t", "tui", "-l", "Reply with exactly: TUI-OK.");
+        await sleep(500);
+        tmux("send-keys", "-t", "tui", "Enter");
+        sent = true;
+      }
+    }
+    tmux("kill-server");
+    check(screen.includes("TUI-OK."), "TUI answered", screen);
+    return { screen: screen.split("\n").filter((line) => line.trim()).slice(-12) };
+  },
+
   async restartDeterminism() {
     const ids = [state.claude, state.switched].filter(Boolean);
     const read = async () => Promise.all(ids.map(async (threadId) => {
@@ -355,6 +377,7 @@ const scenarios = {
 
   /** 0.4 → 0.5 on copies of a real install mounted at /mig (experiments/…/migration_e2e.sh prepares them). */
   async migration() {
+    if (!existsSync("/mig")) return { skipped: "no /mig data" };
     client.close();
     await daemon("stop");
     execFileSync("sh", ["-c", "cp -r /mig/claude/projects ~/.claude/ && cp -r /mig/codex/. ~/.codex/ && mkdir -p ~/.ccodex/state && cp /mig/state04/*.sqlite ~/.ccodex/state/"]);
@@ -436,6 +459,25 @@ const scenarios = {
     const key = (map) => [...map.values()].map((thread) => `${thread.id}:${thread.archived}:${thread.name}`).sort().join("\n");
     check(key(again) === key(rows), "same list after restart", { before: rows.size, after: again.size });
     return { migrated: migrated.split("\n").filter((line) => !line.startsWith("fork ")), listed: rows.size, readable: readable.length, alias: alias.publicId, names: readable.filter((entry) => entry.name).length };
+  },
+
+  /** Desktop's terminal/git helpers (process/spawn, no thread) run on stock; doctor; uninstall leaves plain codex. */
+  async management() {
+    const before = client.messages.length;
+    await client.request("process/spawn", { command: ["bash", "-lc", "echo TERM-OK"], cwd: WORK, streamStdoutStderr: true, streamStdin: true, timeoutMs: 10_000, processHandle: "process:e2e" });
+    const exited = await client.waitFor("process/exited", (params) => params.processHandle === "process:e2e", 30_000, before);
+    const output = client.messages.slice(before).filter((m) => m.method === "process/outputDelta" && m.params.processHandle === "process:e2e")
+      .map((m) => Buffer.from(m.params.deltaBase64, "base64").toString()).join("");
+    check(output.includes("TERM-OK") && exited.exitCode === 0, "process/spawn through the gateway", { output, exited });
+    const doctor = JSON.parse(spawnSync("ccodex", ["doctor", "--json"], { encoding: "utf8" }).stdout);
+    check(doctor.checks.every((entry) => entry.ok), "doctor", doctor);
+    client.close();
+    const uninstalled = execFileSync("ccodex", ["uninstall"], { encoding: "utf8" }).trim();
+    const codex = execFileSync("sh", ["-c", "command -v codex"], { encoding: "utf8", env: { ...process.env, PATH: process.env.PATH.replace(`${HOME}/.ccodex/bin:`, "") } }).trim();
+    check(!existsSync(join(HOME, ".ccodex", "bin")) && !existsSync(SOCKET), "uninstalled", { uninstalled, codex });
+    const stock = execFileSync(codex, ["exec", "--skip-git-repo-check", "-m", GPT, "Reply with exactly: PLAIN-OK"], { cwd: WORK, encoding: "utf8", timeout: 180_000 });
+    check(stock.includes("PLAIN-OK"), "plain codex after uninstall", stock);
+    return { output: output.trim(), doctor: doctor.checks.map((entry) => `${entry.id}: ${entry.detail}`), uninstalled, codex };
   },
 };
 

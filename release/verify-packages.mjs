@@ -1,12 +1,8 @@
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import Ajv2020 from "ajv/dist/2020.js";
 
 const root = resolve(import.meta.dirname, "..");
 const main = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-const compatibility = JSON.parse(readFileSync(join(root, "config", "compatibility.json"), "utf8"));
-const compatibilitySchema = JSON.parse(readFileSync(join(root, "release", "compatibility.schema.json"), "utf8"));
-if (!new Ajv2020().validate(compatibilitySchema, compatibility)) throw new Error("compatibility.json does not match its release schema");
 const packages = [
   ["relay-darwin-arm64", "darwin", "arm64", undefined],
   ["relay-linux-arm64-gnu", "linux", "arm64", "glibc"],
@@ -19,14 +15,7 @@ if (existsSync(join(root, "npm-shrinkwrap.json"))) throw new Error("npm-shrinkwr
 if (main.files.includes("npm-shrinkwrap.json") || main.files.includes("package-lock.json")) {
   throw new Error("Lockfiles must not be listed in the published package");
 }
-if (main.version !== compatibility.productVersion) throw new Error("package.json and compatibility.json versions differ");
-if (main.dependencies["@openai/codex"] !== compatibility.codexCli) throw new Error("Pinned Codex version differs from compatibility.json");
-if (main.dependencies["@anthropic-ai/claude-agent-sdk"] !== compatibility.claudeAgentSdk) {
-  throw new Error("Pinned Claude Agent SDK differs from compatibility.json");
-}
-if (Object.keys(compatibility.relayPackages ?? {}).length !== packages.length) {
-  throw new Error("compatibility.json relay package matrix is incomplete");
-}
+if (main.dependencies["@openai/codex"]) throw new Error("Codex must not be a dependency: CCodex runs the installed one");
 
 for (const [directory, os, cpu, libc] of packages) {
   const manifest = JSON.parse(readFileSync(join(root, "packages", directory, "package.json"), "utf8"));
@@ -37,8 +26,6 @@ for (const [directory, os, cpu, libc] of packages) {
   if (main.optionalDependencies[manifest.name] !== main.version) {
     throw new Error(`${manifest.name} is not an exact-version optional dependency`);
   }
-  const key = os === "darwin" ? `${os}-${cpu}` : `${os}-${cpu}-gnu`;
-  if (compatibility.relayPackages[key] !== manifest.name) throw new Error(`${directory} is absent from compatibility.json`);
 }
 
 const targetIndex = process.argv.indexOf("--target");

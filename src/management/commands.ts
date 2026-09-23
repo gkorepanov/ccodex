@@ -139,9 +139,10 @@ export async function setup(args: readonly string[]): Promise<number> {
   if (!existsSync(target) || args.includes("--repair")) {
     const temporary = `${target}.installing-${process.pid}`;
     rmSync(temporary, { recursive: true, force: true });
-    const spec = process.env.CCODEX_PACKAGE_SPEC ?? `${PACKAGE}@${version}`;
-    process.stdout.write(`Installing ${spec} into ${target}\n`);
-    await execute("npm", ["install", "--prefix", temporary, "--include=optional", "--ignore-scripts", "--save=false", "--no-audit", "--no-fund", spec], {
+    // Dev builds (never published) come as tarballs: the package and its platform relay package.
+    const specs = [process.env.CCODEX_PACKAGE_SPEC ?? `${PACKAGE}@${version}`, ...(process.env.CCODEX_RELAY_PACKAGE_SPEC ? [process.env.CCODEX_RELAY_PACKAGE_SPEC] : [])];
+    process.stdout.write(`Installing ${specs.join(" ")} into ${target}\n`);
+    await execute("npm", ["install", "--prefix", temporary, "--include=optional", "--ignore-scripts", "--save=false", "--no-audit", "--no-fund", ...specs], {
       timeout: 20 * 60_000, maxBuffer: 8 * 1024 * 1024,
     });
     rmSync(target, { recursive: true, force: true });

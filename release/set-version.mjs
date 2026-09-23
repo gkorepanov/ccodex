@@ -22,9 +22,5 @@ for (const directory of platformDirectories) {
   manifest.version = version;
   writeJson(path, manifest);
 }
-const compatibilityPath = join(root, "config", "compatibility.json");
-const compatibility = JSON.parse(readFileSync(compatibilityPath, "utf8"));
-compatibility.productVersion = version;
-writeJson(compatibilityPath, compatibility);
 execFileSync("npm", ["install", "--package-lock-only", "--ignore-scripts"], { cwd: root, stdio: "inherit" });
 console.log(`CCodex release files now target ${version}.`);

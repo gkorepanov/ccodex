@@ -7,8 +7,8 @@ ENV PATH=/home/node/.ccodex/bin:/home/node/.npm-global/bin:/usr/local/bin:/usr/b
 ARG CODEX_VERSION=latest
 RUN npm install -g "@openai/codex@${CODEX_VERSION}" --no-audit --no-fund && codex --version
 ARG CCODEX_VERSION
-COPY --chown=node:node ccodex.tgz /tmp/ccodex.tgz
-RUN CCODEX_PACKAGE_SPEC=/tmp/ccodex.tgz npx --yes --package /tmp/ccodex.tgz ccodex setup --version "${CCODEX_VERSION}" \
+COPY --chown=node:node ccodex.tgz relay.tgz /tmp/
+RUN CCODEX_PACKAGE_SPEC=/tmp/ccodex.tgz CCODEX_RELAY_PACKAGE_SPEC=/tmp/relay.tgz npx --yes --package /tmp/ccodex.tgz ccodex setup --version "${CCODEX_VERSION}" \
  && mkdir -p /home/node/.claude /home/node/.codex /home/node/work \
  && printf '%s\n' 'idle_timeout_seconds = 3600' 'log_level = "debug"' >> /home/node/.ccodex/config.toml
 WORKDIR /home/node/work
