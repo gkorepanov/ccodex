@@ -42,7 +42,7 @@ const layout = () => {
   };
 };
 
-function packageVersion(): string {
+export function packageVersion(): string {
   return (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 }
 

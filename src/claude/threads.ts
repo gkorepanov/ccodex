@@ -10,7 +10,7 @@ import type { Logger } from "../log.js";
 import { invalidParams, invalidRequest, type JsonObject, type Thread, type Turn } from "../protocol/codex.js";
 import { historyCursors, paginateItems, paginateTurns, startedTurn } from "../protocol/turnPagination.js";
 import { normalizeUserInput } from "./inputMapper.js";
-import { claudeModelLabel, normalizeClaudeModelIdentifier } from "./modelSelection.js";
+import { claudeModelLabel, modelCatalogValue, normalizeClaudeModelIdentifier } from "./modelSelection.js";
 import { NativeSessionCatalog, type SessionSummary } from "./native/catalog.js";
 import { nativeThread, type TranscriptProjection } from "./native/projector.js";
 import { projectSubagents, type ProjectedSubagent } from "./native/subagents.js";
@@ -56,6 +56,8 @@ export class ClaudeThreads {
   }
 
   public async start(): Promise<void> {
+    // The model list maps transcripts' resolved model ids to picker values (see pickerModel).
+    void this.models().catch(() => undefined);
     await this.catalog.refresh();
     const known = new Map(this.catalog.sessions().map((summary) => [summary.sessionId, summary.customTitle ?? summary.aiTitle]));
     // Sessions and titles changed outside CCodex (the claude CLI, /rename) show up without a reload.
@@ -64,7 +66,7 @@ export class ClaudeThreads {
         const name = summary.customTitle ?? summary.aiTitle;
         const id = summary.sessionId;
         if (!known.has(id) && !this.sessions.has(id) && !this.gateway.meta.hidden(id)) {
-          this.gateway.broadcast("thread/started", { thread: this.decorate(nativeThread(id, summary, { status: this.status(id) })) });
+          this.gateway.broadcast("thread/started", { thread: this.decorate(nativeThread(id, this.headerOf(summary, undefined), { status: this.status(id) })) });
         } else if (known.has(id) && known.get(id) !== name && name) {
           this.gateway.emit(id, "thread/name/updated", { threadId: id, threadName: name });
         }
@@ -107,12 +109,17 @@ export class ClaudeThreads {
   }
 
   private headerOf(summary: TranscriptHeader, session: ClaudeSession | undefined): TranscriptHeader {
-    if (!session) return summary;
     return {
       ...summary,
-      model: session.settings.model ?? summary.model,
-      reasoningEffort: session.settings.effort ?? summary.reasoningEffort,
+      model: session?.settings.model ?? (summary.model && this.pickerModel(summary.model)),
+      reasoningEffort: session?.settings.effort ?? summary.reasoningEffort,
     };
+  }
+
+  /** Transcripts name the resolved model (`claude-haiku-4-5-…`); the picker (and a live session) its value (`haiku`). */
+  private pickerModel(model: string): string {
+    const id = normalizeClaudeModelIdentifier(model);
+    return this.pickerValues.get(id) ?? id;
   }
 
   /** Every native session as a list row (sub-agents excluded; they are listed through their parent). */
@@ -191,6 +198,7 @@ export class ClaudeThreads {
 
   /** Thread with its turns (history + the live turn). */
   public async read(threadId: string): Promise<{ thread: Thread; turns: Turn[] }> {
+    await this.models().catch(() => undefined);
     const side = this.sides.get(threadId);
     if (side) return { thread: this.sideThread(side), turns: side.turns };
     const session = this.sessions.get(threadId);
@@ -220,7 +228,7 @@ export class ClaudeThreads {
     const summary = this.catalog.get(threadId);
     return {
       cwd: summary?.cwd ?? process.cwd(),
-      model: summary?.model ? normalizeClaudeModelIdentifier(summary.model) : this.defaultModel,
+      model: summary?.model ? this.pickerModel(summary.model) : this.defaultModel,
       effort: summary?.reasoningEffort ?? null,
       fast: summary?.serviceTier === "fast",
       permissionMode: (summary?.permissionMode ?? "default") as PermissionMode,
@@ -369,6 +377,9 @@ export class ClaudeThreads {
     this.models_ ??= withProbeQuery(this.config, undefined, (probe) => probe.supportedModels()).then((models) => {
       const resolved = models.find((model) => model.value === "default")?.resolvedModel;
       this.defaultModel = resolved ? normalizeClaudeModelIdentifier(resolved) : null;
+      for (const model of models) {
+        if (model.value !== "default" && model.resolvedModel) this.pickerValues.set(normalizeClaudeModelIdentifier(model.resolvedModel), modelCatalogValue(model));
+      }
       return models.filter((model) => model.value !== "default").map((model) => mapClaudeModel(model, this.config.modelPrefix));
     }).catch((error: unknown) => {
       this.models_ = undefined;
@@ -382,6 +393,7 @@ export class ClaudeThreads {
   }
 
   private readonly pendingNames = new Map<string, string>();
+  private readonly pickerValues = new Map<string, string>();
   private readonly skillCache = new Map<string, { at: number; skills: Promise<JsonObject[]> }>();
 
   public async skills(cwds: readonly string[]): Promise<Map<string, JsonObject[]>> {

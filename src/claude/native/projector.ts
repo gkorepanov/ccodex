@@ -460,8 +460,11 @@ function projectTurnBoundaries(
     record.type === "user" && startsTurn(record, subagentPromptUuid) ? [index] : []);
   return starts.flatMap((start, turnIndex) => {
     const prompt = records[start] as UserRecord;
-    const boundary = records.slice(start + 1, starts[turnIndex + 1] ?? records.length).at(-1);
-    return boundary ? [{ turnId: prompt.uuid, messageUuid: boundary.uuid }] : [];
+    const range = records.slice(start + 1, starts[turnIndex + 1] ?? records.length);
+    // A compaction that ends the turn (the next turn is the `/compact`) is not part of it: forks stay uncompacted.
+    const compaction = range.findLastIndex((record) => isCompactBoundary(record));
+    const kept = compaction >= 0 && !range.slice(compaction).some((record) => record.type === "assistant") ? range.slice(0, compaction) : range;
+    return [{ turnId: prompt.uuid, messageUuid: (kept.at(-1) ?? prompt).uuid }];
   });
 }
 

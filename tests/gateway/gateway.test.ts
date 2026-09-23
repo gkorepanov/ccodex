@@ -162,6 +162,10 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(backend.id).toBe(threadId);
     expect(list.data.filter((row: any) => row.id === threadId)).toHaveLength(1);
     expect(list.data.find((row: any) => row.id === threadId)).toMatchObject({ modelProvider: "openai" });
+    // A fork at the last turn before the switch is a fork of the uncompacted Claude session.
+    const { thread: fork } = await client.request("thread/fork", { threadId, lastTurnId: thread.turns[0].id });
+    const forkRead = await client.request("thread/read", { threadId: fork.id, includeTurns: true });
+    expect(itemsOf(forkRead.thread.turns)).toEqual(["user:first", "agent:claude: first"]);
     // The next turn goes straight to the stock backend, answered under the public id.
     const next = await client.turn(threadId, "third", { model: "gpt-6-luna" });
     expect(next.threadId).toBe(threadId);

@@ -18,6 +18,7 @@ export type DaemonCommand =
 
 export type Invocation =
   | { readonly kind: "delegate" }
+  | { readonly kind: "mcpServer" }
   | { readonly kind: "daemon"; readonly command: DaemonCommand; readonly remoteControl: boolean }
   | { readonly kind: "proxy"; readonly socketPath: string; readonly proxyArgs: string[] }
   | {
@@ -104,6 +105,7 @@ function socketPathFromListen(listen: string | undefined, config: Config): strin
 }
 
 export function classifyInvocation(args: readonly string[], config: Config): Invocation {
+  if (args[0] === "mcp-server") return { kind: "mcpServer" };
   const appServerIndex = args.indexOf("app-server");
   if (appServerIndex < 0) return { kind: "delegate" };
 

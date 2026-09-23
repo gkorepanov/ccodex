@@ -20,6 +20,11 @@ async function main(): Promise<number> {
   const invocation = classifyInvocation(args, config);
 
   if (invocation.kind === "delegate") return delegate(config.delegateCodex, args);
+  if (invocation.kind === "mcpServer") {
+    const { runMcpServer } = await import("../mcp/server.js");
+    const { packageVersion } = await import("../management/commands.js");
+    return runMcpServer(config, packageVersion());
+  }
   if (invocation.kind === "daemon") {
     const output = await runDaemonCommand(config, invocation, process.argv[1]!);
     process.stdout.write(`${JSON.stringify(output)}\n`);

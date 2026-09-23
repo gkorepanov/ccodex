@@ -19,7 +19,8 @@ export interface Config {
   readonly rpcCaptureMaxBytes: number;
   /** Presence enables CCodex titles; absence keeps stock title behaviour. */
   readonly renamePrompt?: string;
-  readonly titleModel: string;
+  /** Model that writes titles; default: stock's fast one (…-luna / …-mini), else its default model. */
+  readonly titleModel?: string;
   /** What a plain `codex …` (TUI, exec, login) runs; defaults to the installed codex. */
   readonly delegateCodex: string;
 }
@@ -118,7 +119,7 @@ export function loadConfig(): Config {
     rpcCapture: process.env.CCODEX_RPC_CAPTURE ? process.env.CCODEX_RPC_CAPTURE === "1" : file.rpc_capture ?? true,
     rpcCaptureMaxBytes: file.rpc_capture_max_bytes ?? 1_073_741_824,
     ...(renamePrompt ? { renamePrompt } : {}),
-    titleModel: file.title_model ?? "gpt-6-luna",
+    ...(file.title_model ? { titleModel: file.title_model as string } : {}),
     delegateCodex: expandHome(process.env.CCODEX_DELEGATE_CODEX ?? file.delegate_codex ?? codex),
   };
 }

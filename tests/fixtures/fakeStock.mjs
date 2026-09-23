@@ -43,7 +43,7 @@ function broadcast(method, params) {
 
 function reply(thread, text) {
   if (text.includes("CONTEXT CHECKPOINT COMPACTION")) return `GPT-SUMMARY(${thread.forkedFromId})`;
-  if (text.includes("User prompt:")) return "🦊 Fox Title";
+  if (text.includes("<user_prompt>")) return "🦊 Fox Title";
   return `gpt: ${text}`;
 }
 

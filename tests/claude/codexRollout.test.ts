@@ -32,6 +32,18 @@ describe("parseRolloutChunk", () => {
     ]);
   });
 
+  it("maps codex ≥ 0.156 item journals", () => {
+    const chunk = line({ type: "event_msg", payload: { type: "item_completed", item: { type: "UserMessage", content: [{ type: "text", text: "prompt" }] } } })
+      + line({ type: "event_msg", payload: { type: "item_completed", item: { type: "Reasoning", summary_text: ["thinking"] } } })
+      + line({ type: "event_msg", payload: { type: "item_completed", item: { type: "AgentMessage", content: [{ type: "Text", text: "ROLL-OK" }], phase: "final_answer" } } })
+      + line({ type: "event_msg", payload: { type: "task_complete" } });
+    expect(parseRolloutChunk("", chunk).events).toEqual([
+      { kind: "reasoning", text: "thinking" },
+      { kind: "message", text: "ROLL-OK" },
+      { kind: "turnComplete" },
+    ]);
+  });
+
   it("buffers partial lines across chunks and survives malformed lines", () => {
     const full = line({ type: "event_msg", payload: { type: "agent_message", message: "split" } });
     const first = parseRolloutChunk("", `not json\n${full.slice(0, 25)}`);

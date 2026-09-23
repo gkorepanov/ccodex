@@ -2,6 +2,7 @@ import { closeSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { MCP_THREAD_SOURCE } from "../mcp/server.js";
 
 export const CODEX_MCP_TOOLS = new Set(["mcp__codex__codex", "mcp__codex__codex-reply"]);
 export const CODEX_MCP_PROMPT_LABEL = "◆ CCodex │ Codex MCP prompt";
@@ -42,7 +43,7 @@ function dayDirsNewestFirst(root: string, limit: number): string[] {
   return days;
 }
 
-function sessionMeta(path: string): { source?: string; timestampMs?: number } | undefined {
+function sessionMeta(path: string): { source?: string; threadSource?: string; timestampMs?: number } | undefined {
   // The session_meta line embeds the full codex base instructions, so it can be
   // tens of kilobytes long — read a bounded head and require a complete line.
   let head: string;
@@ -56,11 +57,12 @@ function sessionMeta(path: string): { source?: string; timestampMs?: number } | 
   if (end === -1) return undefined;
   const line = head.slice(0, end);
   try {
-    const parsed = JSON.parse(line) as { type?: string; payload?: { source?: string; timestamp?: string } };
+    const parsed = JSON.parse(line) as { type?: string; payload?: { source?: string; thread_source?: string; timestamp?: string } };
     if (parsed.type !== "session_meta") return undefined;
     const timestamp = parsed.payload?.timestamp ? Date.parse(parsed.payload.timestamp) : Number.NaN;
     return {
       ...(parsed.payload?.source === undefined ? {} : { source: parsed.payload.source }),
+      ...(parsed.payload?.thread_source === undefined ? {} : { threadSource: parsed.payload.thread_source }),
       ...(Number.isNaN(timestamp) ? {} : { timestampMs: timestamp }),
     };
   } catch { return undefined; }
@@ -117,7 +119,7 @@ export function defaultCodexRolloutLocator(sessionsDir = codexSessionsDir()): Co
             if (statSync(path).mtimeMs < notBeforeMs - 5_000) continue;
           } catch { continue; }
           const meta = sessionMeta(path);
-          if (meta?.source !== "mcp") continue;
+          if (meta?.source !== "mcp" && meta?.threadSource !== MCP_THREAD_SOURCE) continue;
           if (meta.timestampMs === undefined || meta.timestampMs < notBeforeMs - 5_000) continue;
           candidates.push({ path, timestampMs: meta.timestampMs });
         }
@@ -135,7 +137,7 @@ export function parseRolloutChunk(buffer: string, chunk: string): { rest: string
   const events: CodexRolloutEvent[] = [];
   for (const line of combined.slice(0, boundary).split("\n")) {
     if (!line.trim()) continue;
-    let parsed: { type?: string; payload?: { type?: string; message?: unknown; text?: unknown } };
+    let parsed: { type?: string; payload?: { type?: string; message?: unknown; text?: unknown; item?: { type?: string; content?: { text?: string }[]; summary_text?: string[] } } };
     try { parsed = JSON.parse(line) as typeof parsed; } catch { continue; }
     if (parsed.type !== "event_msg") continue;
     const payload = parsed.payload;
@@ -143,6 +145,12 @@ export function parseRolloutChunk(buffer: string, chunk: string): { rest: string
       events.push({ kind: "message", text: payload.message });
     } else if (payload?.type === "agent_reasoning" && typeof payload.text === "string" && payload.text) {
       events.push({ kind: "reasoning", text: payload.text });
+    } else if (payload?.type === "item_completed") {
+      // codex ≥ 0.156 journals items instead of agent_message / agent_reasoning events.
+      const item = payload.item;
+      const text = item?.type === "AgentMessage" ? (item.content ?? []).map((part) => part.text ?? "").join("")
+        : item?.type === "Reasoning" ? (item.summary_text ?? []).join("\n") : "";
+      if (text) events.push({ kind: item!.type === "AgentMessage" ? "message" : "reasoning", text });
     } else if (payload?.type === "task_complete") {
       events.push({ kind: "turnComplete" });
     }

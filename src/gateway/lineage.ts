@@ -185,10 +185,10 @@ export class Lineages {
       : (await this.gateway.stock.request("thread/read", { threadId: segment.threadId })).thread;
   }
 
-  /** The public row (name, preview, creation) with the current backend's live state. */
+  /** The public row (preview, creation) with the current backend's live state and name (✳️ while on Claude). */
   private merge(row: Thread, current: Thread, publicId: string): Thread {
     return {
-      ...row, id: publicId, status: current.status, model: current.model, modelProvider: current.modelProvider,
+      ...row, id: publicId, name: current.name ?? row.name, status: current.status, model: current.model, modelProvider: current.modelProvider,
       reasoningEffort: current.reasoningEffort, updatedAt: current.updatedAt, recencyAt: current.recencyAt, cwd: current.cwd,
     };
   }
@@ -348,6 +348,8 @@ export class Lineages {
       const summary = await this.gptSummary(source.threadId);
       const last: JsonObject = await this.gateway.stock.request("thread/turns/list", { threadId: source.threadId, limit: 1, sortDirection: "desc" });
       await session.inject(`${SUMMARY_PREFIX}\n${summary}`);
+      const name = (await this.thread(source)).name;
+      if (name) await this.gateway.claude.rename(session.threadId, `${name} ✳️`);
       this.gateway.meta.setLineage(publicId, [
         ...segments.slice(0, -1), { ...source, lastTurnId: last.data[0]?.id ?? null },
         { provider: "claude", threadId: session.threadId, lastTurnId: null },
