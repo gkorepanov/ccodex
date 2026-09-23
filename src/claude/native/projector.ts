@@ -503,7 +503,8 @@ export function nativeThread(
   const subagent = options.subagent;
   return {
     id,
-    environments: null,
+    // Like stock's: Desktop files a remote project's new thread under the project by it.
+    environments: header.cwd ? [{ environmentId: "local", cwd: header.cwd, runtimeWorkspaceRoots: [header.cwd] }] : null,
     extra: null,
     sessionId: id,
     forkedFromId: subagent ? subagent.parentThreadId : null,
