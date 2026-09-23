@@ -713,7 +713,9 @@ export class ClaudeSession {
       this.tools.delete(block.tool_use_id);
       const result = typeof m.tool_use_result === "object" && m.tool_use_result !== null ? m.tool_use_result : undefined;
       const item = completedToolItem(tool, { record: { toolUseResult: result }, block }, this.settings.cwd);
-      if (item.type === "collabAgentToolCall" && item.tool === "spawnAgent" && item.receiverThreadIds.length) this.host.subagentSpawned(this, item);
+      if (item.type === "collabAgentToolCall" && item.tool === "spawnAgent" && item.receiverThreadIds.length) {
+        this.host.subagentSpawned(this, item, result?.status === "async_launched");
+      }
       this.itemCompleted(item);
       if (tool.state.name === "TaskCreate" || tool.state.name === "TaskUpdate") this.updatePlan(tool.state.input, result);
     }

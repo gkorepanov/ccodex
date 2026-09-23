@@ -180,6 +180,7 @@ export class ClaudeThreads {
   }
 
   private async subagents(root: string): Promise<ProjectedSubagent[]> {
+    if (!this.catalog.get(root)) await this.catalog.refresh();
     const summary = this.catalog.get(root);
     if (!summary) return [];
     const children = await projectSubagents(summary.path.replace(/\.jsonl$/u, ""), root).catch(() => []);
@@ -190,7 +191,11 @@ export class ClaudeThreads {
   private async subagentProjection(threadId: string): Promise<TranscriptProjection | undefined> {
     const root = this.subagentRoot(threadId);
     const children = root ? await this.subagents(root) : [];
-    return children.find((child) => `agent-${child.agentId}` === threadId)?.projection;
+    const projection = children.find((child) => `agent-${child.agentId}` === threadId)?.projection;
+    if (!projection || this.spawnedSubagents.get(threadId)?.status.type !== "idle" || projection.thread.status.type !== "active") return projection;
+    // Settled, though Claude writes a sub-agent's last records a moment after that.
+    const turns = projection.turns.map((turn, index) => index < projection.turns.length - 1 ? turn : { ...turn, status: "completed" as const });
+    return { ...projection, turns, thread: { ...projection.thread, status: { type: "idle" } } };
   }
 
   /** Sub-agent threads spawned (directly or not) by a Claude session or sub-agent, parents first. */
@@ -209,8 +214,9 @@ export class ClaudeThreads {
   }
 
   /** Like stock, a spawned sub-agent is announced before its spawn completes (Desktop opens it right away), even
-   *  though Claude writes its transcript a moment later. */
-  public subagentSpawned(session: ClaudeSession, item: JsonObject): void {
+   *  though Claude writes its transcript a moment later. A foreground sub-agent's spawn completes only once it has
+   *  finished (`running` false): it is announced settled. */
+  public subagentSpawned(session: ClaudeSession, item: JsonObject, running: boolean): void {
     const childId: string = item.receiverThreadIds[0];
     const now = Math.floor(Date.now() / 1000);
     const header = { ...summarizeTranscript([]), cwd: session.settings.cwd, preview: item.prompt ?? "", model: item.model, createdAt: now, updatedAt: now };
@@ -221,6 +227,7 @@ export class ClaudeThreads {
     this.subagentRoots.set(childId, session.threadId);
     this.spawnedSubagents.set(childId, thread);
     this.gateway.broadcast("thread/started", { thread });
+    if (!running) return void this.subagentFinished(childId);
     const live = { shown: new Map<string, string>(), size: 0, poll: setInterval(() => {
       const summary = this.catalog.get(session.threadId);
       if (!summary) return void this.catalog.refresh();

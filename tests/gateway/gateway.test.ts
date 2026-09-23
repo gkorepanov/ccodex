@@ -435,6 +435,18 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(listed.data.map((row: any) => row.id)).toEqual([childId]);
   });
 
+  it("shows a foreground Claude sub-agent settled: its spawn completes only after it finished", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "run a foreground sub-agent");
+    const childId = "agent-f0f0f0";
+    expect(client.notifications("thread/status/changed", childId).map((message) => message.params.status.type)).toEqual(["idle"]);
+    const settled = await client.request("thread/read", { threadId: childId, includeTurns: true });
+    expect(settled.thread).toMatchObject({ parentThreadId: threadId, status: { type: "idle" }, turns: [{ status: "completed" }] });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const { thread } = await client.request("thread/read", { threadId: childId, includeTurns: true });
+    expect(itemsOf(thread.turns)).toEqual(["user:Reply SUB-OK", "agent:SUB-OK"]);
+  });
+
   it("shows what Codex says in a Claude thread's Codex MCP call, live and in history", async () => {
     const threadId = await claudeThread();
     const before = client.messages.length;

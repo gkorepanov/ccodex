@@ -227,6 +227,27 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     yield base(sessionId, { type: "user", message: { role: "user", content }, tool_use_result: launched });
     yield base(sessionId, { type: "system", subtype: "task_notification", task_id: "a1b2c3", tool_use_id: toolUseId, status: "completed", output_file: "", summary: "Helper" });
   }
+  if (text.includes("run a foreground sub-agent")) {
+    // A foreground sub-agent runs to its end inside the spawn: its result comes after its task settled.
+    const toolUseId = `toolu_${randomUUID().slice(0, 8)}`;
+    const agentId = "f0f0f0";
+    const input = { description: "Echo", prompt: "Reply SUB-OK", subagent_type: "general-purpose" };
+    const spawn = { type: "assistant", message: { id: `msg_${randomUUID().slice(0, 8)}`, role: "assistant", model: "claude-opus-5-5", content: [{ type: "tool_use", id: toolUseId, name: "Agent", input }], stop_reason: "tool_use", usage: { input_tokens: 5, output_tokens: 1 } } };
+    transcript.write({ ...spawn, apiBlockIndex: 0 });
+    yield base(sessionId, spawn);
+    const directory = transcript.path.replace(/\.jsonl$/u, "/subagents");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, `agent-${agentId}.meta.json`), JSON.stringify({ agentType: "general-purpose", description: "Echo", toolUseId, spawnDepth: 1 }));
+    const child = new Transcript(sessionId, options.cwd ?? process.cwd(), join(directory, `agent-${agentId}.jsonl`));
+    child.write({ type: "user", isSidechain: true, agentId, message: { role: "user", content: "Reply SUB-OK" } });
+    // Claude writes the sub-agent's last records a moment after its task settles.
+    setTimeout(() => child.write({ type: "assistant", isSidechain: true, agentId, apiBlockIndex: 0, message: { id: `msg_${randomUUID().slice(0, 8)}`, role: "assistant", model: "claude-opus-5-5", content: [{ type: "text", text: "SUB-OK" }], stop_reason: "end_turn", usage: { input_tokens: 5, output_tokens: 1 } } }), 300);
+    yield base(sessionId, { type: "system", subtype: "task_notification", task_id: agentId, tool_use_id: toolUseId, status: "completed", output_file: "", summary: "Echo" });
+    const finished = { status: "completed", agentId, agentType: "general-purpose", description: "Echo", resolvedModel: "claude-opus-5-5", prompt: "Reply SUB-OK", content: [{ type: "text", text: "SUB-OK" }] };
+    const content = [{ type: "tool_result", tool_use_id: toolUseId, content: [{ type: "text", text: "SUB-OK" }] }];
+    transcript.write({ type: "user", message: { role: "user", content }, toolUseResult: finished });
+    yield base(sessionId, { type: "user", message: { role: "user", content }, tool_use_result: finished });
+  }
   const messageId = `msg_${randomUUID().slice(0, 8)}`;
   yield base(sessionId, { type: "stream_event", event: { type: "message_start", message: { id: messageId } } });
   // Like the CLI: Claude 5 thinking comes back empty unless the session asks for summarized thinking.
