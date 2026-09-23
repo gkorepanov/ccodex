@@ -1,26 +1,6 @@
-# Packaged installs normally use their pinned Codex/Claude binaries and ~/.ccodex/state.
-# Override only when deliberately testing another executable or state location.
-# On macOS the local Codex App reaches ccodex via CODEX_CLI_PATH=~/.ccodex/bin/codex
-# (installed by `ccodex setup`); no config key is required for it.
-# app_server_codex = "/absolute/path/to/codex"
-# delegate_codex = "/absolute/path/to/stock/codex"
-# claude_binary = "/absolute/path/to/claude"
-# data_dir = "~/.ccodex/state"
+# ~/.ccodex/config.toml — every key is optional.
 
-idle_timeout_seconds = 900
-model_cache_seconds = 300
-log_level = "info"
-log_prompts = false
-debug_capture = false
-debug_log_max_bytes = 1048576
-
-# Always-on boundary recorder for Codex App RPC requests, responses and notifications.
-# Two rolling segments share this total budget; secret-valued keys remain redacted.
-rpc_capture = true
-rpc_capture_include_content = true
-rpc_capture_max_bytes = 1073741824
-
-# Remove or comment out this key to restore stock Codex title generation.
+# Remove or comment out rename_prompt to restore stock Codex title generation.
 rename_prompt = """
 Create a concise, vivid, memorable title for the task.
 Start with exactly one rare, expressive, context-relevant emoji followed by one space.
@@ -28,14 +8,16 @@ Avoid generic decorative emoji when a more specific symbol fits.
 Keep the complete title, including emoji, within 36 characters.
 Return only the title.
 """
+# title_model = "gpt-6-luna"        # default: the first visible luna/mini Codex model
 
-# Optional status command interception. This does not affect provider routing or lifecycle.
-[features]
-status_command = true # intercept `/ccstatus`, `/ccstate`, and legacy status aliases without a model turn
-side_chat_promotion = true # allow Fork to promote a temporary `/side` chat into a durable sidebar thread
-optimistic_side_startup = true # open `/side` immediately while its provider context is prepared in the background
-interactive_questions = true # render Claude's structured questions as native Codex App controls
-claude_skills = true # expose Claude skills in Codex App's `$` autocomplete
+# codex_binary = "/path/to/codex"   # default: the first `codex` on PATH that is not CCodex
+# delegate_codex = "/path/to/codex" # what plain `codex …` (TUI, exec, login) runs; default: codex_binary
+# claude_binary = "/path/to/claude" # default: the Claude Code bundled with the Agent SDK
+# data_dir = "~/.ccodex/state"
+# model_prefix = "claude:"
 
-# No aliases are configured by default. Every `gpt-*` model id stays stock.
-# Current Codex Mobile selects Claude through namespaced `claude:*` catalog ids.
+idle_timeout_seconds = 900
+log_level = "info"
+# Codex App RPC capture under data_dir (rpc.jsonl, mode 0600, rolling).
+rpc_capture = true
+rpc_capture_max_bytes = 1073741824

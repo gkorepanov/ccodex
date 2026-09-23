@@ -74,9 +74,11 @@ lives on your machine, and the entire codebase is MIT-licensed and open.
 
 ## Install
 
-The one-liner above is all you need. Prefer npm?
+The one-liner above is all you need (it installs the Codex CLI too if it is missing).
+Prefer npm?
 
 ```sh
+npm install -g @openai/codex     # CCodex runs the Codex you have installed, any version
 npm install -g @gkorepanov/ccodex
 ccodex setup
 ```
@@ -93,7 +95,7 @@ Keeping it healthy, updated, or removing it:
 
 ```sh
 ccodex doctor            # (or --json)
-ccodex update            # npm latest; --check / --channel next / rollback available
+ccodex update            # npm latest; --check / --next available
 ccodex uninstall         # preserves config and state; add --purge --yes to wipe
 ```
 
@@ -102,25 +104,41 @@ The release asset also ships a matching `uninstall.sh` that works even if your s
 
 ## How it works
 
-CCodex owns the SSH-side `codex app-server` command and preserves the Codex App's
-full thread / turn / tool / approval lifecycle, while delegating ordinary Codex CLI
-commands to your global Codex installation:
+CCodex is a thin layer in front of the `codex app-server` you already have installed:
 
-- `codex app-server`, `proxy`, and `daemon ...` always run on CCodex's **pinned**
-  runtime; everything else goes to your external Codex CLI.
-- Native `gpt-*` models remain completely stock; `claude:*` entries run on Claude Code.
-  Claude effort and fast mode map from Codex reasoning / priority settings.
-- Switching providers on the next message creates a compact context handoff behind
-  the scenes; same-provider model changes stay in-place.
-- Codex approval modes map cleanly onto Claude permissions: *Full Access* →
+- **gpt threads are stock, byte for byte.** Every App connection gets its own stock
+  `codex app-server`; CCodex forwards its traffic unchanged. No pinned Codex: update
+  Codex whenever you like.
+- **Claude threads are Claude Code sessions.** `claude:*` models run on the official
+  Claude Agent SDK, and `~/.claude/projects` is the only source of truth: every session
+  (including ones made in the `claude` CLI) is listed at once. Claude's own `/goal`,
+  compaction, sub-agents, skills, and background tasks show up as native Codex items.
+- **Provider switch = compaction.** Switching model provider mid-thread compacts the
+  conversation with the Codex prompt, then continues in a new native thread of the other
+  provider seeded with the summary; the App keeps showing one thread with one history.
+  Forks and rollbacks across the switch land in the right segment.
+- Codex approval modes map onto Claude permissions: *Full Access* →
   `bypassPermissions`, *Ask for approval* → `default`, *Approve for me* → `auto`.
-- In Claude tasks, `/compact <prompt>` performs real prompted Claude compaction while
-  projecting the native Codex `contextCompaction` lifecycle. Stock tasks are untouched.
+  Claude effort and fast mode map from Codex reasoning / priority settings.
+- The only state CCodex keeps is a tiny optional `~/.ccodex/state/meta.json`
+  (provider-switch lineages, archive flags and sections of Claude threads).
+- Plain `codex …` commands (TUI, `exec`, login) go straight to your installed Codex.
+  `codex mcp-server` (removed from Codex in 0.154) is served by CCodex on top of
+  `codex exec`, and Claude threads stream what those Codex sessions do.
 
-Setup is deliberately **fail-closed and transactional**: it validates the platform,
-exact runtimes, and provider availability before atomically activating a new version.
-A failed install or update leaves your previous version running. Setup never interrupts
-an active App session; the new version takes over on the next reconnect.
+Setup activates a new version atomically and never restarts a running gateway: the new
+version takes over after `codex app-server daemon restart` (or the next idle restart).
+
+### Upgrading from 0.4
+
+0.5 drops the 0.4 databases. Once, after installing 0.5 and before restarting the
+gateway, carry thread ids, provider-switch history, archive flags, sections and names over:
+
+```sh
+node ~/.ccodex/current/node_modules/@gkorepanov/ccodex/scripts/migrate-0.4-to-0.5.mjs --dry-run
+node ~/.ccodex/current/node_modules/@gkorepanov/ccodex/scripts/migrate-0.4-to-0.5.mjs
+codex app-server daemon restart
+```
 
 ### Local Codex App (same-Mac)
 
@@ -147,16 +165,14 @@ keep working):
   live gateway underneath a task.
 - `ccodex uninstall` removes the login hook, restores any previous `CODEX_CLI_PATH`,
   strips the managed shell export, and stops only CCodex's own PID-managed gateway.
-  Modified files are preserved. `ccodex doctor --deep` reports the entrypoint and login
-  hook separately from gateway health.
 
 ## Technical details
 
 | | |
 |---|---|
-| **CCodex** | `0.4.8` |
-| **Embedded Codex CLI** | `0.153.3` (pinned; a newer global Codex never replaces it) |
-| **Claude Agent SDK / Claude Code** | `0.3.261` / `2.1.261` |
+| **CCodex** | `0.5.0` |
+| **Codex CLI** | whatever is installed (`npm i -g @openai/codex`); tested with `0.156` |
+| **Claude Agent SDK / Claude Code** | `0.3.280` / `2.1.280` |
 | **Runtime** | Node.js `>=22.13 <27`, npm `>=10` |
 | **Platforms** | macOS 11+ (arm64) · Linux arm64 & x64, glibc ≥2.31 (Ubuntu 22.04+, Debian 11+, Fedora/RHEL equivalents). Alpine/musl not supported |
 | **Shells** | Bash, Zsh, Fish |
@@ -173,20 +189,16 @@ Keep the complete title, including emoji, within 36 characters.
 Return only the title.
 """
 
-[features]
-status_command = false # forward /ccstatus and /ccstate to the provider as plain messages
-optimistic_side_startup = true # open `/side` immediately while provider context is prepared
-claude_skills = true # expose Claude skills in the Codex App `$` autocomplete
+# title_model = "gpt-6-luna"   # default: a small visible Codex model
 ```
 
-Remove or comment out `rename_prompt` for byte-compatible stock Codex title generation.
-With it enabled, CCodex saves generated names for unnamed Claude threads even if
-the App omits its rename request; manual names take priority.
-Setup never restores a prompt removed from an existing config. These settings never
-disable provider routing, lifecycle/protocol fidelity, permission mapping, or visible errors.
+Remove or comment out `rename_prompt` for stock Codex title generation. With it, new
+threads are titled by the title model (Claude threads get a ` ✳️` suffix); manual names
+take priority. Setup never restores a prompt removed from an existing config. Other
+optional keys are listed in [`examples/config.toml`](examples/config.toml).
 
 RPC capture is on by default under `~/.ccodex/state` (mode `0600`, rolls at a combined
-1 GiB) and includes prompts/outputs unless you configure otherwise — and it never
+1 GiB) and includes prompts/outputs (`rpc_capture = false` turns it off) — and it never
 leaves your disk.
 
 Client quirk worth knowing: the built-in `/status` differs by client (Mobile consumes
@@ -198,9 +210,8 @@ provider-labelled quota events; Desktop may render its own OpenAI-account view).
 ```sh
 npm ci --ignore-scripts
 npm run check
-npm test
-npm run test:contracts
-npm run test:public-package
+npm test                  # black-box gateway tests + schema check against the installed codex
+scripts/e2e/run.sh        # podman, real models, copies of your credentials (never your live state)
 ```
 
 Release workflows build and execute all three native relay packages, publish platform
