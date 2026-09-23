@@ -300,21 +300,27 @@ export class Lineages {
 
   /**
    * `turn/start` with the other provider's model: summarize the current segment, start a native thread on the
-   * other provider with the summary injected, then run the user's turn there. A turn showing the compaction is
-   * streamed meanwhile; the answer is the user's turn itself, so the client's optimistic message lands in the
-   * turn that carries it (live view = history). On failure the answer is the compaction turn, with an error.
+   * other provider with the summary injected, then run the user's turn there. Desktop gives its optimistic message
+   * to the first turn that starts, so live the compaction shows only inside the user's turn: under its preallocated
+   * id towards Claude, after stock started it towards codex. On failure the user's turn fails.
    */
   private async switchProvider(connection: Connection, publicId: string, segments: Segment[], params: JsonObject): Promise<unknown> {
     const source = segments.at(-1)!;
-    const fail = (turnId: string, error: unknown) => {
+    const now = Math.floor(Date.now() / 1000);
+    const failed = (turn: Turn, error: unknown) => {
       const message = `Switching provider failed: ${error instanceof Error ? error.message : String(error)}`;
       this.gateway.logger.warn("lineage.switch.failed", { publicId, error: message });
-      connection.notify("error", { threadId: publicId, turnId, willRetry: false, error: { message, codexErrorInfo: null, additionalDetails: null } });
-      return message;
+      const turnError = { message, codexErrorInfo: null, additionalDetails: null };
+      connection.notify("error", { threadId: publicId, turnId: turn.id, willRetry: false, error: turnError });
+      connection.notify("turn/completed", {
+        threadId: publicId,
+        turn: { ...turn, items: [], status: "failed", completedAt: Math.floor(Date.now() / 1000), durationMs: Date.now() - now * 1000, error: turnError },
+      });
+      return { turn: startedTurn(turn) };
     };
     if (source.provider === "claude") {
       const session = this.gateway.claude.session(source.threadId);
-      this.gateway.subscribe(source.threadId, connection);
+      this.gateway.unsubscribe(source.threadId, connection);
       let summary = "";
       session.compactSummary = (text) => { summary = text; };
       const turn = await session.command(`/compact ${COMPACT_PROMPT}`);
@@ -324,30 +330,17 @@ export class Lineages {
         if (status !== "completed" || !summary) throw new Error(`compaction ${status}`);
         return await this.toCodex(connection, publicId, segments, { ...source, lastTurnId: turn.id }, summary, params);
       } catch (error) {
-        fail(turn.id, error);
-        return { turn };
+        return failed(turn, error);
       }
     }
     // codex → claude: stock compaction is encrypted, so an ephemeral fork writes a summary with the same model.
     const cwd = (await this.thread(source)).cwd;
     const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd, model: null, effort: null, fast: false, permissionMode: "default" }));
-    const now = Math.floor(Date.now() / 1000);
-    const marker = switchTurn(session.threadId, now);
-    const turnId = marker.id;
-    const turn: Turn = { ...marker, items: [], itemsView: "notLoaded", status: "inProgress", completedAt: null, durationMs: null };
-    const item = marker.items[0]!;
+    const turnId = randomUUID();
+    const turn: Turn = { id: turnId, items: [], itemsView: "notLoaded", status: "inProgress", error: null, startedAt: now, completedAt: null, durationMs: null };
+    const item = { type: "contextCompaction", id: `${turnId}:compaction` };
     connection.notify("turn/started", { threadId: publicId, turn });
     connection.notify("item/started", { item, threadId: publicId, turnId, startedAtMs: Date.now() });
-    const finish = (status: "completed" | "failed", message?: string) => {
-      if (status === "completed") connection.notify("item/completed", { item, threadId: publicId, turnId, completedAtMs: Date.now() });
-      connection.notify("turn/completed", {
-        threadId: publicId,
-        turn: {
-          ...turn, status, completedAt: Math.floor(Date.now() / 1000), durationMs: Date.now() - now * 1000,
-          error: message ? { message, codexErrorInfo: null, additionalDetails: null } : null,
-        },
-      });
-    };
     try {
       const summary = await this.gptSummary(source.threadId);
       const last: JsonObject = await this.gateway.stock.request("thread/turns/list", { threadId: source.threadId, limit: 1, sortDirection: "desc" });
@@ -358,12 +351,11 @@ export class Lineages {
         ...segments.slice(0, -1), { ...source, lastTurnId: last.data[0]?.id ?? null },
         { provider: "claude", threadId: session.threadId, lastTurnId: null },
       ]);
-      finish("completed");
+      connection.notify("item/completed", { item, threadId: publicId, turnId, completedAtMs: Date.now() });
       connection.provider = "claude";
-      return await this.gateway.claude.handle(connection, "turn/start", { ...params, threadId: session.threadId });
+      return await this.gateway.claude.handle(connection, "turn/start", { ...params, threadId: session.threadId, turnId });
     } catch (error) {
-      finish("failed", fail(turnId, error));
-      return { turn: startedTurn(turn) };
+      return failed(turn, error);
     }
   }
 
@@ -399,6 +391,11 @@ export class Lineages {
     connection.provider = "codex";
     const name = (await this.thread(this.gateway.meta.row(publicId))).name;
     if (name) await connection.upstream.request("thread/name/set", { threadId, name: name.replace(/\s*✳️$/u, "") }).catch(() => undefined);
-    return connection.upstream.request("turn/start", { ...params, threadId });
+    const answer: JsonObject = await connection.upstream.request("turn/start", { ...params, threadId });
+    const turnId: string = answer.turn.id;
+    const item = { type: "contextCompaction", id: `${turnId}:compaction` };
+    connection.notify("item/started", { item, threadId: publicId, turnId, startedAtMs: Date.now() });
+    connection.notify("item/completed", { item, threadId: publicId, turnId, completedAtMs: Date.now() });
+    return answer;
   }
 }

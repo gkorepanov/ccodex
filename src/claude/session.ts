@@ -249,7 +249,7 @@ export class ClaudeSession {
 
   public async startTurn(params: JsonObject): Promise<Turn> {
     const input = normalizeUserInput(params.input ?? []);
-    const uuid = randomUUID();
+    const uuid: string = params.turnId ?? randomUUID();
     await this.applyTurnSettings(params);
     const content = await claudeContent(input, this.settings.cwd);
     const hidden = typeof content === "string" && /^\/compact(?:\s|$)/u.test(content);

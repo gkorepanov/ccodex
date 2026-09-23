@@ -156,13 +156,20 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect((await client.request("config/read", {})).config).toEqual({ model: "gpt-6-sol", model_reasoning_effort: "high" });
   });
 
+  /** Desktop gives its optimistic message to the first turn that starts: live, only the user's turn may start. */
+  const expectLiveSwitch = (threadId: string, before: number, turnId: string) => {
+    expect(new Set(client.notifications("turn/started", threadId).slice(before).map((message) => message.params.turn.id))).toEqual(new Set([turnId]));
+    expect(client.notifications("item/completed", threadId).some((message) => message.params.item.type === "contextCompaction" && message.params.turnId === turnId)).toBe(true);
+  };
+
   it("switches claude → gpt: native /compact, new stock thread with the summary, stitched history", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "first");
-    // The answer is the user's turn itself (the client's optimistic message belongs there), not the compaction.
+    const before = client.notifications("turn/started", threadId).length;
     const { turn: answered } = await client.request("turn/start", { threadId, model: "gpt-6-luna", input: text("second") });
     await client.waitFor("turn/completed", (params) => params.threadId === threadId && client.notifications("item/completed", threadId)
       .some((message) => message.params.item.text === "gpt: second"));
+    expectLiveSwitch(threadId, before, answered.id);
     const { threads } = await client.request("test/threads");
     const backend = threads.find((thread: any) => thread.injected.length);
     expect(backend.injected[0].content[0].text).toContain("SUMMARY(You are performing a CONTEXT CHECKPOINT COMPACTION");
@@ -188,8 +195,10 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
   it("switches gpt → claude: summary from an ephemeral fork, injected without a reply", async () => {
     const threadId = await stockThread();
     await client.turn(threadId, "first");
+    const before = client.notifications("turn/started", threadId).length;
     const { turn: answered } = await client.request("turn/start", { threadId, model: CLAUDE, input: text("second") });
     await client.waitFor("item/completed", (params) => params.threadId === threadId && params.item.text === "claude: second");
+    expectLiveSwitch(threadId, before, answered.id);
     const injected = fakeClaude.prompts.find((prompt) => !prompt.shouldQuery);
     expect(injected?.text).toContain(`GPT-SUMMARY(${threadId})`);
     await new Promise((resolve) => setTimeout(resolve, 200));
