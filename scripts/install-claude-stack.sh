@@ -18,12 +18,9 @@ for skill in "$ROOT"/skills/*/; do
   echo "installed skill: $name -> $CLAUDE_DIR/skills/$name"
 done
 
-if ! command -v claude >/dev/null 2>&1; then
-  echo "codex MCP server: skipped (claude CLI not found)" >&2
-else
-  # Inherited tools take precedence over the agent's inline server declaration.
-  node --input-type=module <<'NODE'
-import { execFileSync } from "node:child_process";
+# User-scope MCP server, as `claude mcp add-json --scope user` writes it (no claude CLI needed: CCodex runs Claude through
+# its SDK). Inherited tools take precedence over the agent's inline server declaration.
+node --input-type=module <<'NODE'
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -34,18 +31,11 @@ const configPath = existsSync(legacyPath) ? legacyPath : join(configDir || homed
 const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf8")) : {};
 const server = config.mcpServers?.codex;
 const timeout = Math.max(server?.timeout ?? 0, 86_400_000);
-if (server) {
-  if (server.timeout !== timeout) {
-    server.timeout = timeout;
-    const temporaryPath = `${configPath}.${process.pid}.tmp`;
-    writeFileSync(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { mode: statSync(configPath).mode & 0o777 });
-    renameSync(temporaryPath, configPath);
-  }
-} else {
-  execFileSync("claude", ["mcp", "add-json", "--scope", "user", "codex", JSON.stringify({
-    type: "stdio", command: "codex", args: ["mcp-server"], timeout,
-  })], { stdio: "inherit" });
+if (server?.timeout !== timeout) {
+  config.mcpServers = { ...config.mcpServers, codex: server ? { ...server, timeout } : { type: "stdio", command: "codex", args: ["mcp-server"], env: {}, timeout } };
+  const temporaryPath = `${configPath}.${process.pid}.tmp`;
+  writeFileSync(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { mode: existsSync(configPath) ? statSync(configPath).mode & 0o777 : 0o600 });
+  renameSync(temporaryPath, configPath);
 }
 console.log("codex MCP server: configured (user scope, timeout at least 24 hours)");
 NODE
-fi

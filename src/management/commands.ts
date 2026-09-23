@@ -131,6 +131,17 @@ function installRemoteShim(home: string, bin: string): Manifest["remoteCodexShim
   return { path, target, ...(existsSync(backupPath) ? { backupPath } : {}) };
 }
 
+/** Claude's side of delegation to Codex: the codex-wrapper agent, CCodex's skills (workforce) and the codex MCP server. */
+async function installClaudeStack(packageRoot: string): Promise<void> {
+  try {
+    const env = { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ""}` };
+    const { stdout } = await execute("sh", [join(packageRoot, "scripts", "install-claude-stack.sh")], { env, timeout: 60_000, maxBuffer: 512 * 1024 });
+    process.stdout.write(stdout);
+  } catch (error) {
+    process.stderr.write(`CCodex setup warning: Claude delegation stack install failed: ${String(error)}\n`);
+  }
+}
+
 export async function setup(args: readonly string[]): Promise<number> {
   if (process.getuid?.() === 0) throw new Error("Do not run CCodex setup as root or with sudo.");
   const versionIndex = args.indexOf("--version");
@@ -193,6 +204,7 @@ export async function setup(args: readonly string[]): Promise<number> {
     if (name !== version && name !== previous?.activeVersion) rmSync(join(paths.versions, name), { recursive: true, force: true });
   }
   for (const stale of ["staging", "previous"]) rmSync(join(paths.home, stale), { recursive: true, force: true });
+  await installClaudeStack(join(target, "node_modules", PACKAGE));
   process.stdout.write(`CCodex ${version} activated. Restart the gateway: codex app-server daemon restart\n`
     + `Open a new shell or run: export PATH="${paths.bin}:$PATH"\n`);
   return 0;

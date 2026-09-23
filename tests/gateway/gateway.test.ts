@@ -56,6 +56,9 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(models.data.map((model: any) => model.id)).toEqual(expect.arrayContaining(["gpt-6-luna", CLAUDE]));
     const skills = await client.request("skills/list", { cwds: ["/work"] });
     expect(skills.data[0].skills.map((skill: any) => skill.name)).toEqual(["stock-skill", "claude:review-pr"]);
+    // What Desktop mostly sends: no cwds, stock's own cwd.
+    const defaults = await client.request("skills/list", { forceReload: true });
+    expect(defaults.data.map((entry: any) => [entry.cwd, entry.skills.map((skill: any) => skill.name)])).toEqual([["/home/fake", ["stock-skill", "claude:review-pr"]]]);
   });
 
   it("runs a Claude thread: stream, persist, read back, list", async () => {
@@ -696,6 +699,14 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     const next = await client.turn(threadId, "third", { model: "gpt-6-luna" });
     expect(next.threadId).toBe(threadId);
     expect(client.notifications("item/completed", threadId).some((message) => message.params.item.text === "gpt: third")).toBe(true);
+  });
+
+  it("tells a client a thread stock has nothing of is deleted (Desktop's catalog keeps a remote row until told)", async () => {
+    const other = await gateway.connect();
+    const gone = "01a0ceaa-ef3d-7019-80b2-19d560371ee6";
+    await expect(client.request("thread/resume", { threadId: gone })).rejects.toThrow(`no rollout found for thread id ${gone}`);
+    expect(client.notifications("thread/deleted").map((message) => message.params)).toEqual([{ threadId: gone }]);
+    expect(other.notifications("thread/deleted")).toEqual([]);
   });
 
   it("never lists a switch's new Claude backend, even while the switch is still writing it", async () => {

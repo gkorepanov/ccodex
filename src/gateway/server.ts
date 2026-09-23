@@ -30,6 +30,8 @@ interface PendingServerRequest {
 /** Codex config keys the App writes with the picked model; kept out of config.toml while that model is Claude's. */
 const CLAUDE_DEFAULT_KEYS = new Set(["model", "model_reasoning_effort", "service_tier"]);
 
+const NO_ROLLOUT = /"message":"no rollout found for thread id ([0-9a-f-]{36})"/u;
+
 /** Thread notifications stock broadcasts to every initialized connection. */
 const GLOBAL_NOTIFICATIONS = new Set([
   "thread/started", "thread/status/changed", "thread/name/updated", "thread/archived", "thread/unarchived",
@@ -225,6 +227,10 @@ export class Gateway {
       if (thread.ephemeral === true) return connection.ephemeralRequests.size ? text : undefined;
       if (this.lineages.holdAnnouncement(connection, thread.id, text)) return undefined;
     }
+    // Stock has nothing of a thread a client asked about: its row goes too (Desktop's catalog keeps a remote host's
+    // rows until told they are deleted; the error alone drops a row only until the next restart).
+    const missing = text.startsWith("{\"error\"") ? NO_ROLLOUT.exec(text) : null;
+    if (missing) connection.send(JSON.stringify({ method: "thread/deleted", params: { threadId: missing[1] } }), true);
     if (text.startsWith("{\"method\":\"remoteControl/status/changed\"")) {
       this.remote.intercept(connection, (JSON.parse(text) as JsonObject).params);
       return undefined;
@@ -295,11 +301,11 @@ export class Gateway {
       ]);
       return { ...stock, data: [...stock.data, ...claude] };
     });
+    // Both providers' skills in every chat: Desktop asks per cwd, never per thread. Without cwds (what Desktop mostly
+    // sends) stock answers for its own cwd, and so do Claude's.
     on("skills/list", async (connection, params) => {
-      const [stock, claude] = await Promise.all([
-        connection.upstream.request("skills/list", params),
-        this.claude.skills(params?.cwds ?? []).catch(() => new Map<string, unknown[]>()),
-      ]);
+      const stock = await connection.upstream.request("skills/list", params);
+      const claude = await this.claude.skills(stock.data.map((entry: JsonObject) => entry.cwd)).catch(() => new Map<string, unknown[]>());
       return {
         ...stock,
         data: stock.data.map((entry: JsonObject) => ({ ...entry, skills: [...entry.skills, ...claude.get(entry.cwd) ?? []] })),

@@ -236,20 +236,38 @@ const scenarios = {
 
   async subagents() {
     const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
-    const done = await client.turn(thread.id, "Use the Agent tool (subagent_type general-purpose) with the prompt 'Reply with the word SUBAGENT-OK'. Then tell me exactly what the subagent replied.", {}, 300_000);
-    const children = await client.request("thread/list", { limit: 20, parentThreadId: thread.id, sourceKinds: ["subAgentThreadSpawn"] });
+    const done = await client.turn(thread.id, "In ONE message, launch TWO Agent tool calls in parallel (subagent_type general-purpose): one described 'Alpha echo' with the prompt 'Reply with the word ALPHA-OK', one described 'Beta echo' with the prompt 'Reply with the word BETA-OK'. Then tell me exactly what each replied.", {}, 300_000);
+    const children = (await client.request("thread/list", { limit: 20, parentThreadId: thread.id, sourceKinds: ["subAgentThreadSpawn"] })).data;
     const { thread: read } = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
-    const items = itemsOf(read.turns);
-    check(children.data.length > 0, "sub-agent thread listed", { items, answers: done.answers });
-    const child = await client.request("thread/read", { threadId: children.data[0].id, includeTurns: true });
-    return { children: children.data.map((row) => row.id), items, childItems: itemsOf(child.thread.turns), answers: done.answers };
+    const spawns = read.turns.flatMap((turn) => turn.items).filter((item) => item.type === "collabAgentToolCall");
+    const names = children.map((child) => child.agentNickname);
+    check(children.length === 2 && names.some((name) => /Alpha/u.test(name)) && names.some((name) => /Beta/u.test(name)), "both parallel sub-agents listed by name", { names, answers: done.answers });
+    check(spawns.length >= 2 && spawns.every((item) => item.status === "completed"), "both spawns settled in the parent", spawns.map((item) => item.status));
+    const childItems = [];
+    for (const child of children) childItems.push(itemsOf((await client.request("thread/read", { threadId: child.id, includeTurns: true })).thread.turns));
+    check(childItems.some((items) => items.some((item) => item.includes("ALPHA-OK"))) && childItems.some((items) => items.some((item) => item.includes("BETA-OK"))), "each sub-agent's chat has its answer", childItems);
+    return { names, childItems, answers: done.answers };
+  },
+
+  /** What `ccodex setup` installs on a clean machine lets Claude delegate to Codex: codex-wrapper → codex MCP → Codex's messages in the sub-agent's chat. */
+  async codexSubagent() {
+    const agent = join(HOME, ".claude", "agents", "codex-wrapper.md");
+    const skill = join(HOME, ".claude", "skills", "workforce", "SKILL.md");
+    const server = JSON.parse(readFileSync(join(HOME, ".claude.json"), "utf8")).mcpServers?.codex;
+    check(existsSync(agent) && existsSync(skill) && server?.command === "codex" && server.args?.[0] === "mcp-server", "setup installed the Claude stack", { agent: existsSync(agent), skill: existsSync(skill), server });
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    // Only Codex can answer (the wrapper has no tool but Codex's), or the wrapper just replies itself.
+    const done = await client.turn(thread.id, `Use the Agent tool with subagent_type codex-wrapper: have Codex (model ${GPT}) run \`cat /proc/sys/kernel/random/uuid\` and report the exact output. Then tell me that output.`, {}, 600_000);
+    const children = (await client.request("thread/list", { limit: 20, parentThreadId: thread.id, sourceKinds: ["subAgentThreadSpawn"] })).data;
+    check(children.length === 1, "codex-wrapper sub-agent listed", { children, answers: done.answers });
+    const childItems = itemsOf((await client.request("thread/read", { threadId: children[0].id, includeTurns: true })).thread.turns);
+    const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/u;
+    check(childItems.includes("mcpToolCall") && childItems.some((item) => item.startsWith("agent:◆") && uuid.test(item)), "Codex's call and messages in the sub-agent's chat", childItems);
+    return { name: children[0].agentNickname, childItems, answers: done.answers };
   },
 
   async codexMcpStreaming() {
-    // codex ≥ 0.154 has no `mcp-server`: CCodex serves the same tools on `codex exec`.
-    const config = join(HOME, ".claude.json");
-    const current = existsSync(config) ? JSON.parse(readFileSync(config, "utf8")) : {};
-    writeFileSync(config, JSON.stringify({ ...current, mcpServers: { codex: { type: "stdio", command: "codex", args: ["mcp-server"] } } }));
+    // codex ≥ 0.154 has no `mcp-server`: CCodex serves the same tools on `codex exec` (registered by `ccodex setup`).
     const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
     const since = client.messages.length;
     const done = await client.turn(thread.id, `Call the mcp__codex__codex tool with prompt "Reply with the word MCP-OK" and model "${GPT}". Then tell me what it returned.`, {}, 400_000);

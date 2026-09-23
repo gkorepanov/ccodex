@@ -91,6 +91,7 @@ const handlers = {
   },
   "thread/resume": (connection, params) => {
     const thread = threads.get(params.threadId);
+    if (!thread) throw Object.assign(new Error(`no rollout found for thread id ${params.threadId}`), { code: -32600 });
     if (params.path && params.path !== thread.path) throw new Error(`cannot resume running thread ${thread.id} with stale path`);
     thread.subscribers.add(connection);
     return { thread: params.excludeTurns ? summary(thread) : full(thread), ...settings(thread), initialTurnsPage: null };
@@ -152,7 +153,8 @@ const handlers = {
     return {};
   },
   "model/list": () => ({ data: [{ id: "gpt-6-luna", model: "gpt-6-luna", displayName: "GPT-6 Luna", isDefault: true }], nextCursor: null }),
-  "skills/list": (_connection, params) => ({ data: (params.cwds ?? []).map((cwd) => ({ cwd, skills: [{ name: "stock-skill" }], errors: [] })) }),
+  // Like stock: without cwds, the skills of its own cwd.
+  "skills/list": (_connection, params) => ({ data: (params.cwds?.length ? params.cwds : ["/home/fake"]).map((cwd) => ({ cwd, skills: [{ name: "stock-skill" }], errors: [] })) }),
   "account/rateLimits/read": () => ({ rateLimits: { limitId: "codex", primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: null }, secondary: null }, rateLimitsByLimitId: null }),
   "config/batchWrite": (_connection, params) => {
     for (const edit of params.edits) config[edit.keyPath] = edit.value;
@@ -197,7 +199,8 @@ sockets.on("connection", (socket) => {
       const result = handler ? await handler(connection, message.params ?? {}) : { echo: message.method, raw: text };
       socket.send(JSON.stringify({ id: message.id, result }));
     } catch (error) {
-      socket.send(JSON.stringify({ id: message.id, error: { code: error.code ?? -32603, message: error.message } }));
+      // Stock's order: error first.
+      socket.send(JSON.stringify({ error: { code: error.code ?? -32603, message: error.message }, id: message.id }));
     }
   });
 });
