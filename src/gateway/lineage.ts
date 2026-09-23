@@ -346,16 +346,18 @@ export class Lineages {
       const summary = await this.gptSummary(source.threadId);
       const last: JsonObject = await this.gateway.stock.request("thread/turns/list", { threadId: source.threadId, limit: 1, sortDirection: "desc" });
       await session.inject(`${SUMMARY_PREFIX}\n${summary}`);
-      const name = (await this.thread(source)).name;
-      if (name) await this.gateway.claude.rename(session.threadId, `${name} ✳️`);
       this.gateway.meta.setLineage(publicId, [
         ...segments.slice(0, -1), { ...source, lastTurnId: last.data[0]?.id ?? null },
         { provider: "claude", threadId: session.threadId, lastTurnId: null },
       ]);
+      // Renamed as the lineage's backend: the name reaches clients under the public id.
+      const name = (await this.thread(source)).name;
+      if (name) await this.gateway.claude.rename(session.threadId, `${name} ✳️`);
       connection.notify("item/completed", { item, threadId: publicId, turnId, completedAtMs: Date.now() });
       connection.provider = "claude";
       return await this.gateway.claude.handle(connection, "turn/start", { ...params, threadId: session.threadId, turnId });
     } catch (error) {
+      await this.gateway.claude.discard(session.threadId);
       return failed(turn, error);
     }
   }

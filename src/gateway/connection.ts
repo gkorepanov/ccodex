@@ -22,6 +22,8 @@ export class Connection {
   public clientName?: string;
   /** Provider of the thread this client last worked in (rate limits follow it). */
   public provider: Provider = "codex";
+  /** Ephemeral threads this client is creating: only their creator hears of them (stock tells every client). */
+  public readonly ephemeralRequests = new Set<RequestId>();
   private closed = false;
 
   public constructor(
@@ -50,6 +52,7 @@ export class Connection {
   }
 
   public respond(id: RequestId, result: unknown): void {
+    this.ephemeralRequests.delete(id);
     this.send(JSON.stringify({ id, result }));
   }
 
@@ -79,6 +82,9 @@ export class Connection {
     } catch {
       this.forward(text);
       return;
+    }
+    if ((message.method === "thread/start" || message.method === "thread/fork") && message.params?.ephemeral === true) {
+      this.ephemeralRequests.add(message.id);
     }
     if (message.method === undefined) {
       if (typeof message.id === "string" && message.id.startsWith("ccodex:")) this.gateway.resolveServerRequest(message);
@@ -116,6 +122,7 @@ export class Connection {
   }
 
   private onStockText(text: string): void {
+    if (this.ephemeralRequests.size && text.startsWith("{\"id\"")) this.ephemeralRequests.delete((JSON.parse(text) as JsonObject).id);
     const rewritten = this.gateway.fromBackendFrame(this, text);
     if (rewritten !== undefined) this.send(rewritten);
   }

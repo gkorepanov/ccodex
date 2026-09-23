@@ -115,7 +115,8 @@ const handlers = {
     if (params.beforeTurnId) turns = turns.slice(0, turns.findIndex((turn) => turn.id === params.beforeTurnId));
     const thread = newThread({ ...source, ephemeral: params.ephemeral }, { forkedFromId: source.id, turns: structuredClone(turns), preview: source.preview });
     thread.subscribers = new Set([connection]);
-    if (!thread.ephemeral) broadcast("thread/started", { thread: summary(thread) });
+    // Like stock: every new thread is announced to every connection, ephemeral ones included.
+    broadcast("thread/started", { thread: summary(thread) });
     return { thread: params.excludeTurns ? summary(thread) : full(thread), ...settings(thread) };
   },
   "thread/revert": (connection, params) => {

@@ -209,7 +209,11 @@ export class Gateway {
   public fromBackendFrame(connection: Connection, text: string): string | undefined {
     if (connection.provider === "claude" && text.startsWith("{\"method\":\"account/rateLimits/updated\"")) return undefined;
     // A new backend of a switched thread is announced by stock like any new thread; the public row stays.
-    if (text.startsWith("{\"method\":\"thread/started\"") && this.lineages.isBackendAnnouncement(text)) return undefined;
+    if (text.startsWith("{\"method\":\"thread/started\"")) {
+      if (this.lineages.isBackendAnnouncement(text)) return undefined;
+      // CCodex's own (titles, switch summaries) or another client's ephemeral thread would show as a sidebar row.
+      if (!connection.ephemeralRequests.size && (JSON.parse(text) as JsonObject).params.thread.ephemeral === true) return undefined;
+    }
     if (text.startsWith("{\"method\":\"remoteControl/status/changed\"")) {
       this.remote.intercept(connection, (JSON.parse(text) as JsonObject).params);
       return undefined;

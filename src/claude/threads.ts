@@ -781,14 +781,18 @@ export class ClaudeThreads {
     return {};
   }
 
-  private async delete(threadId: string): Promise<JsonObject> {
-    const session = this.sessions.get(threadId);
-    session?.unload();
+  /** Removes a session with its transcript (also what a failed switch to Claude leaves behind). */
+  public async discard(threadId: string): Promise<void> {
+    this.sessions.get(threadId)?.unload();
     this.sessions.delete(threadId);
     await this.catalog.refresh();
     if (this.catalog.get(threadId)) await deleteSession(threadId);
     this.gateway.meta.forget(threadId);
     await this.catalog.refresh();
+  }
+
+  private async delete(threadId: string): Promise<JsonObject> {
+    await this.discard(threadId);
     this.gateway.emit(threadId, "thread/deleted", { threadId });
     return {};
   }

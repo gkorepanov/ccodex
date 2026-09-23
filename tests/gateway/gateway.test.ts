@@ -531,6 +531,31 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
       "contextCompaction", "user:third", "agent:gpt: third"]);
   });
 
+  it("keeps CCodex's internal threads out of the clients' view (switch summaries, the new Claude backend)", async () => {
+    const threadId = await stockThread();
+    await client.request("thread/name/set", { threadId, name: "Greeting" });
+    await client.turn(threadId, "first");
+    await client.request("turn/start", { threadId, model: CLAUDE, input: text("second") });
+    await client.waitFor("item/completed", (params) => params.threadId === threadId && params.item.text === "claude: second");
+    expect(client.notifications("thread/started").map((message) => message.params.thread.id)).toEqual([threadId]);
+    expect(client.notifications("thread/name/updated").map((message) => message.params)).toEqual([
+      { threadId, threadName: "Greeting" }, { threadId, threadName: "Greeting ✳️" },
+    ]);
+    // A client's own ephemeral thread (Desktop's side chat) is still announced to it.
+    const { thread: side } = await client.request("thread/fork", { threadId: (await stockThread()), ephemeral: true });
+    expect(client.notifications("thread/started").map((message) => message.params.thread.id)).toContain(side.id);
+  });
+
+  it("leaves no empty Claude thread behind when a switch to Claude fails", async () => {
+    const threadId = await stockThread();
+    await client.turn(threadId, "first");
+    fakeClaude.spawnError = "spawn claude EAGAIN";
+    await client.request("turn/start", { threadId, model: CLAUDE, input: text("second") });
+    await client.waitFor("turn/completed", (params) => params.threadId === threadId && params.turn.status === "failed");
+    const list = await client.request("thread/list", { limit: 50 });
+    expect(list.data.filter((row: any) => row.modelProvider === "claude" && row.preview === "")).toEqual([]);
+  });
+
   it("fails a switch to Claude with Claude's error when Claude can't start, instead of compacting forever", async () => {
     const threadId = await stockThread();
     await client.turn(threadId, "first");
