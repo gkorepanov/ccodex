@@ -14,7 +14,7 @@ import { claudeModelLabel, modelCatalogValue, normalizeClaudeModelIdentifier } f
 import { NativeSessionCatalog, type SessionSummary } from "./native/catalog.js";
 import { nativeThread, type TranscriptProjection } from "./native/projector.js";
 import { projectSubagents, type ProjectedSubagent } from "./native/subagents.js";
-import type { TranscriptHeader } from "./native/summary.js";
+import { summarizeTranscript, type TranscriptHeader } from "./native/summary.js";
 import { codexPermissions, mapClaudeModel, mapSkill, permissionModeFrom, withProbeQuery } from "./sdk.js";
 import { ClaudeSession, type SessionSettings } from "./session.js";
 
@@ -41,6 +41,8 @@ export class ClaudeThreads {
   private readonly sides = new Map<string, SideThread>();
   /** `agent-<id>` sub-agent thread → the native session whose transcript directory holds it. */
   private readonly subagentRoots = new Map<string, string>();
+  /** Sub-agents spawned live, shown until Claude has written their transcript. */
+  private readonly spawnedSubagents = new Map<string, Thread>();
   private models_?: Promise<JsonObject[]>;
   private defaultModel: string | null = null;
   private readonly rateLimitWindows = new Map<string, RateLimitWindow & { status: string }>();
@@ -190,11 +192,29 @@ export class ClaudeThreads {
     const root = ancestorId.startsWith("agent-") ? this.subagentRoot(ancestorId) : ancestorId;
     if (!root) return [];
     const descendants = new Set([ancestorId]);
-    return (await this.subagents(root)).flatMap(({ projection }) => {
+    const threads = (await this.subagents(root)).flatMap(({ projection }) => {
       if (!descendants.has(projection.thread.parentThreadId ?? "")) return [];
       descendants.add(projection.thread.id);
       return [{ ...projection.thread, turns: [] }];
     });
+    const spawned = [...this.spawnedSubagents.values()].filter((thread) =>
+      descendants.has(thread.parentThreadId ?? "") && !threads.some((listed) => listed.id === thread.id));
+    return [...threads, ...spawned];
+  }
+
+  /** Like stock, a spawned sub-agent is announced before its spawn completes (Desktop opens it right away), even
+   *  though Claude writes its transcript a moment later. */
+  public subagentSpawned(session: ClaudeSession, item: JsonObject): void {
+    const childId: string = item.receiverThreadIds[0];
+    const now = Math.floor(Date.now() / 1000);
+    const header = { ...summarizeTranscript([]), cwd: session.settings.cwd, preview: item.prompt ?? "", model: item.model, createdAt: now, updatedAt: now };
+    const thread = nativeThread(childId, header, {
+      status: { type: "active", activeFlags: [] },
+      subagent: { parentThreadId: session.threadId, depth: 1, nickname: `${item.agentsStates[childId].message} [${claudeModelLabel(item.model ?? "Claude")}]` },
+    });
+    this.subagentRoots.set(childId, session.threadId);
+    this.spawnedSubagents.set(childId, thread);
+    this.gateway.broadcast("thread/started", { thread });
   }
 
   /** Thread with its turns (history + the live turn). */
@@ -205,6 +225,8 @@ export class ClaudeThreads {
     const session = this.sessions.get(threadId);
     const projection = threadId.startsWith("agent-") ? await this.subagentProjection(threadId) : await this.projection(threadId);
     if (!projection) {
+      const spawned = this.spawnedSubagents.get(threadId);
+      if (spawned) return { thread: spawned, turns: [] };
       if (!session) throw invalidParams(`thread not found: ${threadId}`);
       return { thread: this.decorate(this.freshThread(session)), turns: session.liveTurn() ? [session.liveTurn()!] : [] };
     }

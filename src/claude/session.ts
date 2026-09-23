@@ -692,7 +692,9 @@ export class ClaudeSession {
       if (!tool) continue;
       this.tools.delete(block.tool_use_id);
       const result = typeof m.tool_use_result === "object" && m.tool_use_result !== null ? m.tool_use_result : undefined;
-      this.itemCompleted(completedToolItem(tool, { record: { toolUseResult: result }, block }, this.settings.cwd));
+      const item = completedToolItem(tool, { record: { toolUseResult: result }, block }, this.settings.cwd);
+      if (item.type === "collabAgentToolCall" && item.tool === "spawnAgent" && item.receiverThreadIds.length) this.host.subagentSpawned(this, item);
+      this.itemCompleted(item);
     }
   }
 

@@ -116,6 +116,18 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     yield base(sessionId, { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: result }] }, tool_use_result: { stdout: result, stderr: "" } });
     reply = `approval ${decision.behavior}`;
   }
+  if (text.includes("spawn a sub-agent")) {
+    // Claude writes the child's transcript only after the spawn's result: here it never does.
+    const toolUseId = `toolu_${randomUUID().slice(0, 8)}`;
+    const input = { description: "Helper", prompt: "Reply SUB-OK", subagent_type: "general-purpose" };
+    const spawn = { type: "assistant", message: { id: `msg_${randomUUID().slice(0, 8)}`, role: "assistant", model: "claude-opus-5-5", content: [{ type: "tool_use", id: toolUseId, name: "Agent", input }], stop_reason: "tool_use", usage: { input_tokens: 5, output_tokens: 1 } } };
+    transcript.write({ ...spawn, apiBlockIndex: 0 });
+    yield base(sessionId, spawn);
+    const launched = { isAsync: true, status: "async_launched", agentId: "a1b2c3", description: "Helper", resolvedModel: "claude-haiku-4-5-20251001", prompt: "Reply SUB-OK" };
+    const content = [{ type: "tool_result", tool_use_id: toolUseId, content: "Async agent launched" }];
+    transcript.write({ type: "user", message: { role: "user", content }, toolUseResult: launched });
+    yield base(sessionId, { type: "user", message: { role: "user", content }, tool_use_result: launched });
+  }
   const messageId = `msg_${randomUUID().slice(0, 8)}`;
   yield base(sessionId, { type: "stream_event", event: { type: "message_start", message: { id: messageId } } });
   yield base(sessionId, { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });

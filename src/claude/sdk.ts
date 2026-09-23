@@ -83,12 +83,8 @@ export function claudeModelDisplayName(model: ModelInfo): string {
 
 export function mapClaudeModel(model: ModelInfo, prefix: string): JsonObject {
   const efforts = model.supportsEffort ? (model.supportedEffortLevels ?? []) : [];
-  const serviceTiers = model.supportsFastMode
-    ? [
-        { id: "default", name: "Default", description: "Standard Claude execution." },
-        { id: "fast", name: "Fast", description: "Claude fast mode." },
-      ]
-    : [];
+  // Like stock models: Desktop adds the standard speed itself.
+  const serviceTiers = model.supportsFastMode ? [{ id: "fast", name: "Fast", description: "Claude fast mode." }] : [];
   const id = `${prefix}${modelCatalogValue(model)}`;
   return {
     id,
@@ -108,9 +104,9 @@ export function mapClaudeModel(model: ModelInfo, prefix: string): JsonObject {
     defaultReasoningEffort: efforts.includes("high") ? "high" : efforts.includes("medium") ? "medium" : efforts[0] ?? "medium",
     inputModalities: ["text", "image"],
     supportsPersonality: true,
-    additionalSpeedTiers: [],
+    additionalSpeedTiers: serviceTiers.map((tier) => tier.id),
     serviceTiers,
-    defaultServiceTier: serviceTiers.length > 0 ? "default" : null,
+    defaultServiceTier: null,
     availableAccessPrograms: null,
     isDefault: false,
   };

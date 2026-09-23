@@ -27,6 +27,9 @@ interface PendingServerRequest {
   readonly reject: (error: Error) => void;
 }
 
+/** Codex config keys the App writes with the picked model; kept out of config.toml while that model is Claude's. */
+const CLAUDE_DEFAULT_KEYS = new Set(["model", "model_reasoning_effort", "service_tier"]);
+
 /** Thread notifications stock broadcasts to every initialized connection. */
 const GLOBAL_NOTIFICATIONS = new Set([
   "thread/started", "thread/status/changed", "thread/name/updated", "thread/archived", "thread/unarchived",
@@ -298,26 +301,26 @@ export class Gateway {
       on(method, (connection, params) => this.remote.pairing(method, params, connection.clientName));
     }
     on("thread/section/move", (connection, params) => this.catalog.moveInSection(connection, params));
-    // The App saves the picked model as Codex's default. A Claude one must not reach config.toml (plain `codex`
-    // and every stock thread without an explicit model would use it): it stays in meta and shows in config/read.
+    // The App saves the picked model, effort and speed as Codex's defaults. With a Claude model they must not reach
+    // config.toml (plain `codex` and every stock thread without explicit settings would use them): they stay in meta
+    // and show in config/read.
     for (const method of ["config/batchWrite", "config/value/write"]) {
       on(method, (connection, params) => {
         const edits: JsonObject[] = method === "config/batchWrite" ? params.edits : [params];
         const model = edits.find((edit) => edit.keyPath === "model");
-        const effort = edits.find((edit) => edit.keyPath === "model_reasoning_effort");
-        const current = this.meta.defaultModel;
-        if (model && !this.claude.isClaudeModel(model.value) && current) this.meta.setDefaultModel(null);
-        if (model ? !this.claude.isClaudeModel(model.value) : !(current && effort)) return connection.upstream.request(method, params);
-        this.meta.setDefaultModel({ model: model?.value ?? current!.model, effort: effort?.value ?? (model ? null : current!.effort) });
+        const current = this.meta.claudeDefaults;
+        const claude = model ? this.claude.isClaudeModel(model.value) : Boolean(current);
+        const kept = claude ? edits.filter((edit) => CLAUDE_DEFAULT_KEYS.has(edit.keyPath)) : [];
+        if (model && !claude && current) this.meta.setClaudeDefaults(null);
+        if (!kept.length) return connection.upstream.request(method, params);
+        this.meta.setClaudeDefaults({ ...(model ? {} : current), ...Object.fromEntries(kept.map((edit) => [edit.keyPath, edit.value])) });
         const { keyPath: _keyPath, mergeStrategy: _mergeStrategy, value: _value, ...rest } = params;
-        return connection.upstream.request("config/batchWrite", { ...rest, edits: edits.filter((edit) => edit !== model && edit !== effort) });
+        return connection.upstream.request("config/batchWrite", { ...rest, edits: edits.filter((edit) => !kept.includes(edit)) });
       });
     }
     on("config/read", async (connection, params) => {
       const result = await connection.upstream.request("config/read", params);
-      const preferred = this.meta.defaultModel;
-      if (!preferred) return result;
-      return { ...result, config: { ...result.config, model: preferred.model, ...(preferred.effort ? { model_reasoning_effort: preferred.effort } : {}) } };
+      return { ...result, config: { ...result.config, ...this.meta.claudeDefaults } };
     });
   }
 }

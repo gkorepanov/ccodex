@@ -191,14 +191,30 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(texts).toEqual(["start", "/goal ship it", "this meets the goal: ship it", "/goal again"]);
   });
 
-  it("keeps a Claude default model out of Codex's config.toml, showing it through config/read", async () => {
+  it("announces a Claude sub-agent before its spawn completes, before Claude has written its transcript", async () => {
+    const threadId = await claudeThread();
+    const before = client.messages.length;
+    await client.turn(threadId, "spawn a sub-agent");
+    const childId = "agent-a1b2c3";
+    const events = client.messages.slice(before).map((message) => message.method === "thread/started" ? `started ${message.params.thread.id}`
+      : message.method === "item/completed" && message.params.item.type === "collabAgentToolCall" ? `spawned ${message.params.item.receiverThreadIds}` : null).filter(Boolean);
+    expect(events).toEqual([`started ${childId}`, `spawned ${childId}`]);
+    const { thread } = await client.request("thread/read", { threadId: childId });
+    expect(thread).toMatchObject({ parentThreadId: threadId, agentNickname: "Helper [Haiku 4.5]", preview: "Reply SUB-OK" });
+    const listed = await client.request("thread/list", { ancestorThreadId: threadId, sourceKinds: ["subAgentThreadSpawn"] });
+    expect(listed.data.map((row: any) => row.id)).toEqual([childId]);
+  });
+
+  it("keeps a Claude default model, effort and speed out of Codex's config.toml, showing them through config/read", async () => {
     const edits = (model: string, effort: string) => [
       { keyPath: "model", value: model, mergeStrategy: "upsert" }, { keyPath: "model_reasoning_effort", value: effort, mergeStrategy: "upsert" }];
     await client.request("config/batchWrite", { edits: edits(CLAUDE, "max"), filePath: null, expectedVersion: null });
     expect((await client.request("test/config")).config).toEqual({ model: "gpt-6-luna" });
     expect((await client.request("config/read", {})).config).toMatchObject({ model: CLAUDE, model_reasoning_effort: "max" });
     await client.request("config/value/write", { keyPath: "model_reasoning_effort", value: "ultra", mergeStrategy: "upsert" });
-    expect((await client.request("config/read", {})).config).toMatchObject({ model: CLAUDE, model_reasoning_effort: "ultra" });
+    await client.request("config/batchWrite", { edits: [{ keyPath: "service_tier", value: "fast", mergeStrategy: "upsert" }] });
+    expect((await client.request("test/config")).config).toEqual({ model: "gpt-6-luna" });
+    expect((await client.request("config/read", {})).config).toMatchObject({ model: CLAUDE, model_reasoning_effort: "ultra", service_tier: "fast" });
     await client.request("config/batchWrite", { edits: edits("gpt-6-sol", "high") });
     expect((await client.request("config/read", {})).config).toEqual({ model: "gpt-6-sol", model_reasoning_effort: "high" });
   });
