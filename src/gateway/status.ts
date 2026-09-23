@@ -84,6 +84,7 @@ export async function synthesizeTurn(gateway: Gateway, connection: Connection, p
   const user: ThreadItem = { type: "userMessage", id: `${id}:user`, clientId: params.clientUserMessageId ?? null, content: params.input };
   setImmediate(() => void (async () => {
     connection.notify("turn/started", { threadId, turn });
+    connection.notify("thread/status/changed", { threadId, status: { type: "active", activeFlags: [] } });
     connection.notify("item/started", { item: user, threadId, turnId: id, startedAtMs: Date.now() });
     connection.notify("item/completed", { item: user, threadId, turnId: id, completedAtMs: Date.now() });
     const text = await (command === "status" ? statusText(gateway, connection) : stateText(gateway, connection, threadId))
@@ -93,6 +94,8 @@ export async function synthesizeTurn(gateway: Gateway, connection: Connection, p
     connection.notify("item/agentMessage/delta", { threadId, turnId: id, itemId: answer.id, delta: text });
     connection.notify("item/completed", { item: answer, threadId, turnId: id, completedAtMs: Date.now() });
     connection.notify("turn/completed", { threadId, turn: { ...turn, status: "completed", completedAt: Math.floor(Date.now() / 1000), durationMs: Date.now() - now * 1000 } });
+    // Desktop keeps the thread spinning in the sidebar until the thread is idle again.
+    connection.notify("thread/status/changed", { threadId, status: { type: "idle" } });
   })());
   return { turn: startedTurn(turn) };
 }

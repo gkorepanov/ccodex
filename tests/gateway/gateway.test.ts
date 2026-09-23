@@ -117,6 +117,8 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     await client.turn(claude, "/ccstate");
     const state = client.notifications("item/completed", claude).map((message) => message.params.item).find((item) => item.type === "agentMessage");
     expect(state.text).toContain("permissions ▸ default");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(client.notifications("thread/status/changed", claude).at(-1)!.params.status).toEqual({ type: "idle" });
     const { thread } = await client.request("thread/read", { threadId: claude, includeTurns: true });
     expect(thread.turns).toHaveLength(0);
   });
