@@ -394,14 +394,42 @@ function errorMessage(records: readonly TranscriptChainRecord[]): string {
   return text || request?.error?.formatted || "Claude turn failed.";
 }
 
+/**
+ * Prompts Claude took while a turn was running (Desktop's steer): live they fold into that turn, so here too. A prompt
+ * sent to an idle session is dequeued right after its `enqueue`; a steer waits in the queue while the turn goes on.
+ */
+function steeredPrompts(records: readonly TranscriptRecord[]): ReadonlySet<string> {
+  const steered = new Set<string>();
+  const queue: Array<{ content: string; waited: boolean }> = [];
+  const taken: string[] = [];
+  for (const record of records) {
+    if (record.type === "queue-operation") {
+      if (record.operation === "enqueue") queue.push({ content: (record.content ?? "").trim(), waited: false });
+      else {
+        const entry = queue.shift();
+        if (entry?.waited) taken.push(entry.content);
+      }
+    } else if (record.type === "user" && taken.length && userText(record).trim() === taken[0]) {
+      steered.add(record.uuid);
+      taken.shift();
+    } else if (record.type === "assistant" || record.type === "user") for (const entry of queue) entry.waited = true;
+  }
+  return steered;
+}
+
+function turnStarts(records: readonly TranscriptChainRecord[], subagentPromptUuid: string | undefined, steered: ReadonlySet<string>): number[] {
+  return records.flatMap((record, index) =>
+    record.type === "user" && !steered.has(record.uuid) && startsTurn(record, subagentPromptUuid) ? [index] : []);
+}
+
 function projectTurns(
   records: readonly TranscriptChainRecord[],
   cwd: string,
   threadId: string,
   subagentPromptUuid: string | undefined,
+  steered: ReadonlySet<string>,
 ): Turn[] {
-  const starts = records.flatMap((record, index) =>
-    record.type === "user" && startsTurn(record, subagentPromptUuid) ? [index] : []);
+  const starts = turnStarts(records, subagentPromptUuid, steered);
   const completions = toolCompletions(records);
   const toolResponses = responseHasTools(records);
   const codexCalls = new Map<string, number>();
@@ -431,7 +459,9 @@ function projectTurns(
         projectedResponses.add(messageId);
         items.push(...assistantItems(responses.get(messageId)!, cwd, threadId, completions, toolResponses, codexCalls));
       }
-      else if (record.type === "system" && record.subtype === "local_command" && typeof record.content === "string") {
+      else if (record.type === "user" && steered.has(record.uuid)) {
+        items.push({ type: "userMessage", id: record.uuid, clientId: null, content: userInputs(record) });
+      } else if (record.type === "system" && record.subtype === "local_command" && typeof record.content === "string") {
         const text = record.content.replace(/<\/?local-command-std(?:out|err)>/gu, "").trim();
         if (text) items.push({ type: "agentMessage", id: record.uuid, text, phase: "commentary", memoryCitation: null });
       } else if (isCompactBoundary(record)) items.push({ type: "contextCompaction", id: record.uuid });
@@ -477,9 +507,9 @@ function projectTurns(
 function projectTurnBoundaries(
   records: readonly TranscriptChainRecord[],
   subagentPromptUuid: string | undefined,
+  steered: ReadonlySet<string>,
 ): TurnProviderBoundary[] {
-  const starts = records.flatMap((record, index) =>
-    record.type === "user" && startsTurn(record, subagentPromptUuid) ? [index] : []);
+  const starts = turnStarts(records, subagentPromptUuid, steered);
   return starts.flatMap((start, turnIndex) => {
     const prompt = records[start] as UserRecord;
     const range = records.slice(start + 1, starts[turnIndex + 1] ?? records.length);
@@ -556,7 +586,8 @@ export async function projectTranscript(input: ProjectTranscriptInput): Promise<
   const history = input.history ?? selectHistory(rawRecords, input.leafUuid);
   const selected = history.records;
   const header = input.header ?? summarizeTranscript(rawRecords, input.subagent?.promptRecordUuid);
-  const turns = projectTurns(selected, header.cwd, input.sessionId, input.subagent?.promptRecordUuid);
+  const steered = steeredPrompts(rawRecords);
+  const turns = projectTurns(selected, header.cwd, input.sessionId, input.subagent?.promptRecordUuid, steered);
   const nickname = input.subagent?.nickname ?? null;
   const parentThreadId = input.parentThreadId ?? null;
   const status: Thread["status"] = turns.at(-1)?.status === "inProgress"
@@ -575,7 +606,7 @@ export async function projectTranscript(input: ProjectTranscriptInput): Promise<
     tokenUsage: projectedUsage(selected),
     skippedLines,
     compactionBoundaries: history.compactionBoundaries,
-    turnBoundaries: projectTurnBoundaries(selected, input.subagent?.promptRecordUuid),
+    turnBoundaries: projectTurnBoundaries(selected, input.subagent?.promptRecordUuid, steered),
     selectedLeafUuid: history.leafUuid,
     selectedRecordUuids: new Set(selected.map((record) => record.uuid)),
   };

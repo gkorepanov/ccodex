@@ -62,6 +62,29 @@ function conversation(): TranscriptRecord[] {
 }
 
 describe("native Claude transcript projector", () => {
+  it("keeps a message sent mid-turn (Desktop's steer) in the running turn, like live; a message sent after it starts a turn", async () => {
+    const queued = (operation: "enqueue" | "dequeue", content?: string): QueueOperationRecord =>
+      ({ type: "queue-operation", operation, sessionId: "session", ...(content ? { content } : {}) });
+    const story = prompt("story", null, "Write a story about a cat.\n", 1);
+    const partial = assistant("story-text", story.uuid, "message-1", [{ type: "text", text: "The Night Watch…" }], 2, "end_turn");
+    const steer = prompt("steer", partial.uuid, "After that, reply QUEUED-OK\n", 4);
+    const answer = assistant("queued-text", steer.uuid, "message-2", [{ type: "text", text: "QUEUED-OK" }], 5, "end_turn");
+    const next = prompt("next", answer.uuid, "Thanks\n", 7);
+    const reply = assistant("next-text", next.uuid, "message-3", [{ type: "text", text: "You're welcome" }], 8, "end_turn");
+    const records: TranscriptRecord[] = [
+      queued("enqueue", story.message.content as string), queued("dequeue"), story,
+      queued("enqueue", steer.message.content as string), partial, queued("dequeue"), steer, answer,
+      queued("enqueue", next.message.content as string), queued("dequeue"), next, reply,
+    ];
+    const projection = await projectTranscript({ sessionId: "session", path: "/tmp/session.jsonl", records });
+    expect(projection.turns.map((turn) => [turn.id, turn.items.map((item) => item.type === "userMessage" ? `user:${item.id}` : item.type)])).toEqual([
+      ["story", ["user:story", "agentMessage", "user:steer", "agentMessage"]],
+      ["next", ["user:next", "agentMessage"]],
+    ]);
+    // A fork at the steered turn keeps all of it.
+    expect(projection.turnBoundaries[0]).toEqual({ turnId: "story", messageUuid: "queued-text" });
+  });
+
   it("projects deterministic protocol ids and current tool shapes", async () => {
     const records = conversation();
     const first = await projectTranscript({ sessionId: "session", path: "/tmp/session.jsonl", records });
