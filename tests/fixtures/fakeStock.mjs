@@ -9,6 +9,8 @@ const listen = process.argv[process.argv.indexOf("--listen") + 1];
 const socketPath = listen.slice("unix://".length);
 const threads = new Map();
 const connections = new Set();
+/** Stock's server-owned order of the Pinned section. */
+const pinned = [];
 let clock = 1_790_000_000;
 
 const now = () => ++clock;
@@ -94,9 +96,10 @@ const handlers = {
   },
   "thread/read": (_connection, params) => ({ thread: params.includeTurns ? full(threads.get(params.threadId)) : summary(threads.get(params.threadId)) }),
   "thread/list": (_connection, params) => {
-    const list = [...threads.values()].filter((thread) => !thread.ephemeral && thread.archived === (params.archived ?? false))
-      .sort((left, right) => right.createdAt - left.createdAt).map(summary);
-    return paginate(list, params);
+    const list = [...threads.values()].filter((thread) => !thread.ephemeral && thread.archived === (params.archived ?? false)
+      && (params.sectionId === undefined || (params.sectionId === null ? !pinned.includes(thread.id) : pinned.includes(thread.id))))
+      .sort((left, right) => params.sortKey === "section_position" ? pinned.indexOf(left.id) - pinned.indexOf(right.id) : right.createdAt - left.createdAt);
+    return paginate(list.map(summary), params);
   },
   "thread/loaded/list": () => ({ data: [...threads.values()].filter((thread) => thread.subscribers.size).map((thread) => thread.id), nextCursor: null }),
   "thread/search": () => ({ data: [], nextCursor: null, backwardsCursor: null }),
@@ -137,7 +140,14 @@ const handlers = {
     return runTurn(connection, thread, params);
   },
   "threadSection/list": () => ({ data: [{ id: "section-pinned", name: "Pinned", appearance: null }], nextCursor: null }),
-  "thread/section/move": () => ({}),
+  "thread/section/move": (_connection, params) => {
+    if (params.beforeThreadId && !pinned.includes(params.beforeThreadId)) {
+      throw Object.assign(new Error(`before thread ${params.beforeThreadId} is not in section ${params.sectionId}`), { code: -32600 });
+    }
+    if (pinned.includes(params.threadId)) pinned.splice(pinned.indexOf(params.threadId), 1);
+    if (params.sectionId) pinned.splice(params.beforeThreadId ? pinned.indexOf(params.beforeThreadId) : pinned.length, 0, params.threadId);
+    return {};
+  },
   "model/list": () => ({ data: [{ id: "gpt-6-luna", model: "gpt-6-luna", displayName: "GPT-6 Luna", isDefault: true }], nextCursor: null }),
   "skills/list": (_connection, params) => ({ data: (params.cwds ?? []).map((cwd) => ({ cwd, skills: [{ name: "stock-skill" }], errors: [] })) }),
   "account/rateLimits/read": () => ({ rateLimits: { limitId: "codex", primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: null }, secondary: null }, rateLimitsByLimitId: null }),

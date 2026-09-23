@@ -95,6 +95,21 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect((await client.request("thread/list", { limit: 50, sectionId: "section-pinned" })).data).toEqual([]);
   });
 
+  it("keeps the manual order of a section across stock and Claude threads", async () => {
+    const [a, c, b] = [await stockThread(), await claudeThread(), await stockThread()];
+    await client.turn(c, "pin me");
+    const pinned = async () => (await client.request("thread/list", { limit: 50, sectionId: "section-pinned", sortKey: "section_position" }))
+      .data.map((row: any) => row.id);
+    for (const threadId of [a, c, b]) await client.request("thread/section/move", { threadId, sectionId: "section-pinned", beforeThreadId: null });
+    expect(await pinned()).toEqual([a, c, b]);
+    await client.request("thread/section/move", { threadId: b, sectionId: "section-pinned", beforeThreadId: c });
+    expect(await pinned()).toEqual([a, b, c]);
+    await client.request("thread/section/move", { threadId: c, sectionId: "section-pinned", beforeThreadId: a });
+    expect(await pinned()).toEqual([c, a, b]);
+    await client.request("thread/section/move", { threadId: a, sectionId: null });
+    expect(await pinned()).toEqual([c, b]);
+  });
+
   it("shows a Claude file change's patch before asking to approve it (Desktop needs it to render the approval)", async () => {
     const threadId = await claudeThread();
     const asked: any[] = [];

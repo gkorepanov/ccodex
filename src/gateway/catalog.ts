@@ -115,8 +115,8 @@ export class Catalog {
     const key = sortKey(params);
     const direction = params.sortDirection === "asc" ? 1 : -1;
     const value = (thread: Thread) => Number(thread[key] ?? thread.updatedAt ?? 0);
+    if (params.sortKey === "section_position") return this.sectionOrdered(params.sectionId, stock, claude);
     const claudeSorted = [...claude].sort((left, right) => direction * (value(left) - value(right)) || left.id.localeCompare(right.id));
-    if (params.sortKey === "section_position") return [...stock, ...this.sectionOrdered(params.sectionId, claudeSorted)];
     const merged: Thread[] = [];
     let s = 0;
     let c = 0;
@@ -128,13 +128,18 @@ export class Catalog {
     return merged;
   }
 
-  private sectionOrdered(sectionId: string | null | undefined, threads: Thread[]): Thread[] {
+  /**
+   * A section's manual order over stock and Claude threads (recorded once a Claude thread is in it); threads that
+   * entered later keep stock's order, then Claude's by entry time, at the end.
+   */
+  private sectionOrdered(sectionId: string | null | undefined, stock: Thread[], claude: Thread[]): Thread[] {
     const order = sectionId ? this.gateway.meta.sectionOrder(sectionId) : [];
     const rank = (thread: Thread) => {
       const index = order.indexOf(thread.id);
-      return index >= 0 ? index : order.length + (this.gateway.meta.section(thread.id)?.enteredAt ?? 0);
+      return index >= 0 ? index : order.length;
     };
-    return [...threads].sort((left, right) => rank(left) - rank(right));
+    const entered = [...claude].sort((left, right) => Number(left.sectionEnteredAt ?? 0) - Number(right.sectionEnteredAt ?? 0));
+    return [...stock, ...entered].sort((left, right) => rank(left) - rank(right));
   }
 
   public async list(connection: Connection, params: JsonObject): Promise<JsonObject> {
@@ -220,25 +225,25 @@ export class Catalog {
   }
 
   /**
-   * `thread/section/move`: stock moves its own threads; Claude threads live in meta. The merged manual order
-   * is recorded so Claude threads keep their place among stock ones.
+   * `thread/section/move`: stock orders its own threads, Claude threads live in meta. Once a section holds a
+   * Claude thread its merged manual order is recorded, and a stock thread is placed before the next stock one.
    */
   public async moveInSection(connection: Connection, params: JsonObject): Promise<JsonObject> {
-    const { sectionId } = params as { sectionId: string | null };
-    // Claude rows are keyed by their session: a lineage's row backend decides.
-    const threadId = this.gateway.meta.rowId(params.threadId);
-    const claude = this.gateway.claude.owns(threadId);
-    if (!claude) return connection.upstream.request("thread/section/move", params);
-    if (sectionId === null) {
-      this.gateway.meta.setSection(threadId, null);
-      return {};
-    }
-    const members = (await this.list(connection, { sectionId, sortKey: "section_position", limit: 200, archived: false })).data as Thread[];
+    const { threadId, sectionId, beforeThreadId } = params as { threadId: string; sectionId: string | null; beforeThreadId?: string | null };
+    const meta = this.gateway.meta;
+    const isClaude = (id: string) => this.gateway.claude.owns(meta.rowId(id));
+    const members = sectionId === null ? [] : (await this.list(connection, { sectionId, sortKey: "section_position", limit: 200, archived: false })).data as Thread[];
     const order = members.map((thread) => thread.id).filter((id) => id !== threadId);
-    const at = params.beforeThreadId ? order.indexOf(this.gateway.meta.rowId(params.beforeThreadId)) : order.length;
+    if (!isClaude(threadId) && !order.some(isClaude)) return connection.upstream.request("thread/section/move", { ...params, threadId: meta.rowId(threadId) });
+    const at = beforeThreadId ? order.indexOf(beforeThreadId) : -1;
     order.splice(at < 0 ? order.length : at, 0, threadId);
-    this.gateway.meta.setSection(threadId, sectionId);
-    this.gateway.meta.setSectionOrder(sectionId, order);
+    if (isClaude(threadId)) {
+      meta.setSection(meta.rowId(threadId), sectionId);
+    } else {
+      const next = order.slice(order.indexOf(threadId) + 1).find((id) => !isClaude(id));
+      await connection.upstream.request("thread/section/move", { threadId: meta.rowId(threadId), sectionId, beforeThreadId: next ? meta.rowId(next) : null });
+    }
+    if (sectionId) meta.setSectionOrder(sectionId, order);
     return {};
   }
 
