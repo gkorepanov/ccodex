@@ -168,9 +168,9 @@ const scenarios = {
     const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
     state.switched = thread.id;
     await client.turn(thread.id, "Remember this secret word: PINEAPPLE. Reply only with OK.");
-    const toGpt = await client.turn(thread.id, "What is the secret word I told you? Reply with just the word.", { model: GPT }, 400_000, 2);
+    const toGpt = await client.turn(thread.id, "What is the secret word I told you? Reply with just the word.", { model: GPT }, 400_000);
     check(toGpt.answers.join(" ").toUpperCase().includes("PINEAPPLE"), "gpt knows the word", toGpt.answers);
-    const toClaude = await client.turn(thread.id, "Repeat the secret word once more, just the word.", { model: state.haiku }, 400_000, 2);
+    const toClaude = await client.turn(thread.id, "Repeat the secret word once more, just the word.", { model: state.haiku }, 400_000);
     check(toClaude.answers.join(" ").toUpperCase().includes("PINEAPPLE"), "claude knows the word", toClaude.answers);
     const { thread: read } = await client.request("thread/read", { threadId: thread.id, includeTurns: true });
     state.switchedTurns = read.turns;
