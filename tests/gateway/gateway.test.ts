@@ -220,13 +220,26 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(await turn(approveForMe, CLAUDE)).toBe(0);
   });
 
+  it("shows a finished Claude turn in a read right after it, however recently the thread was read", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "one");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await client.request("thread/read", { threadId, includeTurns: true });
+    await client.turn(threadId, "two");
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(itemsOf(thread.turns)).toEqual(["user:one", "agent:claude: one", "user:two", "agent:claude: two"]);
+  });
+
   it("keeps a Claude model switch out of the thread's history", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "on opus");
+    const before = (await client.request("thread/read", { threadId, includeTurns: true })).thread.turns[0];
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
     await client.request("thread/settings/update", { threadId, model: "claude:claude-haiku-4-5-20251001" });
     await client.turn(threadId, "on haiku");
     const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
     expect(itemsOf(thread.turns)).toEqual(["user:on opus", "agent:claude: on opus", "user:on haiku", "agent:claude: on haiku"]);
+    expect(thread.turns[0].completedAt).toBe(before.completedAt);
   });
 
   it("answers /ccstatus and /ccstate with a synthetic turn", async () => {

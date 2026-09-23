@@ -448,7 +448,10 @@ function projectTurns(
     }
     const status = turnStatus(turnRecords, turnIndex + 1 < starts.length);
     const startedAt = timestampSeconds(prompt.timestamp);
-    const completedAt = status === "inProgress" ? null : timestampSeconds(turnRecords.at(-1)?.timestamp);
+    // A later local command (a model switch) trails the turn in the transcript without extending it.
+    const last = turnRecords.findLast((record) => record.type !== "user" || record === prompt
+      || record.isMeta !== true && !/^<(?:command-name|local-command-)/u.test(userText(record)));
+    const completedAt = status === "inProgress" ? null : timestampSeconds(last?.timestamp);
     return {
       id: prompt.uuid,
       items,

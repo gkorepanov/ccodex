@@ -102,11 +102,13 @@ export class NativeSessionCatalog {
     return this.bySessionId.get(sessionId);
   }
 
-  public projection(sessionId: string, leafUuid?: string): Promise<TranscriptProjection> {
+  public async projection(sessionId: string, leafUuid?: string): Promise<TranscriptProjection> {
     const entry = this.entriesBySessionId.get(sessionId);
-    if (!entry) return Promise.reject(new Error(`Unknown native Claude session: ${sessionId}`));
+    if (!entry) throw new Error(`Unknown native Claude session: ${sessionId}`);
     const summary = entry.summary;
-    const key = `${summary.path}\0${entry.mtimeMs}\0${summary.sizeBytes}\0${leafUuid ?? ""}`;
+    // The file itself, not the catalog's (debounced) view of it: a read right after a turn sees that turn.
+    const { mtimeMs, size } = await stat(summary.path);
+    const key = `${summary.path}\0${mtimeMs}\0${size}\0${leafUuid ?? ""}`;
     const cached = this.projections.get(key);
     if (cached) {
       this.projections.delete(key);
