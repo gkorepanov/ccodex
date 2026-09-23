@@ -705,8 +705,10 @@ export class ClaudeThreads {
     if (!this.catalog.get(threadId)) await this.catalog.refresh();
     const summary = this.catalog.get(threadId);
     // A brand-new session has no transcript until its first message is written; its name waits for that turn.
-    if (summary) await renameSession(threadId, name, { dir: summary.cwd });
-    else this.pendingNames.set(threadId, name);
+    if (summary) {
+      await renameSession(threadId, name, { dir: summary.cwd });
+      this.pendingNames.delete(threadId);
+    } else this.pendingNames.set(threadId, name);
     await this.catalog.refresh();
     this.gateway.emit(threadId, "thread/name/updated", { threadId, threadName: name });
     return {};

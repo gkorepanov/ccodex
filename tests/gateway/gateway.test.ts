@@ -191,6 +191,20 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(texts).toEqual(["start", "/goal ship it", "this meets the goal: ship it", "/goal again"]);
   });
 
+  it("keeps the latest name of a new Claude thread (a name set before its first message waits for it)", async () => {
+    const threadId = await claudeThread();
+    await client.request("thread/name/set", { threadId, name: "provisional" });
+    // The title arrives while the first turn still runs (here: waits for approval).
+    client.onRequest = async () => {
+      await client.request("thread/name/set", { threadId, name: "Final title" });
+      return { decision: "accept" };
+    };
+    await client.turn(threadId, "this needs approval");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect((await client.request("thread/read", { threadId })).thread.name).toBe("Final title");
+    expect(client.notifications("thread/name/updated", threadId).at(-1)!.params.threadName).toBe("Final title");
+  });
+
   it("continues Claude from before a reverted turn (Desktop's message edit)", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "apple");
