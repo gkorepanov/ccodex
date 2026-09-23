@@ -167,4 +167,19 @@ describe("native Claude transcript projector", () => {
     expect(thread.turns.map((turn) => turn.status)).toEqual(["completed"]);
     expect(thread.status).toEqual({ type: "idle" });
   });
+  it("reports a failed turn's error as Claude's text (Desktop trims it)", async () => {
+    const user = prompt("prompt-1", null, "hello", 1);
+    const retry = {
+      type: "system", subtype: "api_error", ...envelope("retry-1", user.uuid, 2), level: "error",
+      error: { message: "401 {\"type\":\"error\"}", status: 401, formatted: "401 OAuth access token has been revoked." },
+    } as unknown as TranscriptRecord;
+    const reply = {
+      ...assistant("reply-1", "retry-1", "message-1", [{ type: "text", text: "Failed to authenticate. API Error: 401" }], 3, "stop_sequence"),
+      error: "authentication_failed", isApiErrorMessage: true,
+    } as AssistantRecord;
+    const failed = async (records: TranscriptRecord[]) =>
+      (await projectTranscript({ sessionId: "session", path: "/tmp/session.jsonl", records })).thread.turns[0]!.error;
+    expect(await failed([user, retry, reply])).toMatchObject({ message: "Failed to authenticate. API Error: 401" });
+    expect(await failed([user, retry])).toMatchObject({ message: "401 OAuth access token has been revoked." });
+  });
 });

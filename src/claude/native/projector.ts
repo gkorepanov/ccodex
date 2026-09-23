@@ -373,11 +373,14 @@ function turnStatus(records: readonly TranscriptChainRecord[], hasFollowingTurn:
   return terminal || hasFollowingTurn ? "completed" : "inProgress";
 }
 
+/** What Claude showed for the failure: its synthetic error reply, else the last request error. */
 function errorMessage(records: readonly TranscriptChainRecord[]): string {
-  const error = records.find((record): record is AssistantRecord | SystemRecord =>
-    record.type === "assistant" && (record.isApiErrorMessage === true || Boolean(record.error))
-      || record.type === "system" && record.subtype === "api_error");
-  return error?.error ?? "Claude turn failed.";
+  const reply = records.findLast((record): record is AssistantRecord =>
+    record.type === "assistant" && (record.isApiErrorMessage === true || Boolean(record.error)));
+  const content = reply?.message.content ?? [];
+  const text = typeof content === "string" ? content : content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
+  const request = records.findLast((record): record is SystemRecord => record.type === "system" && record.subtype === "api_error");
+  return text || request?.error?.formatted || "Claude turn failed.";
 }
 
 function projectTurns(

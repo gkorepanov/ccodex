@@ -97,7 +97,8 @@ export interface SystemRecord extends ChainRecord {
     readonly [key: string]: unknown;
   };
   readonly content?: string;
-  readonly error?: string;
+  /** `api_error`: the request error, e.g. `{ status: 401, formatted: "401 OAuth access token has been revoked." }`. */
+  readonly error?: { readonly formatted?: string };
 }
 
 export interface AttachmentRecord extends ChainRecord {
