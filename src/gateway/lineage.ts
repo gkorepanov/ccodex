@@ -211,7 +211,8 @@ export class Lineages {
       const { thread } = await this.forward(connection, current, method, { ...params, includeTurns: false });
       return { thread: { ...this.merge(row, thread, publicId), turns: params.includeTurns ? turns : [] } };
     }
-    const response = await this.forward(connection, current, method, { ...params, excludeTurns: true, initialTurnsPage: null });
+    // A client resumes with the row's rollout path; the current backend has its own.
+    const response = await this.forward(connection, current, method, { ...params, path: null, excludeTurns: true, initialTurnsPage: null });
     return {
       ...response,
       thread: { ...this.merge(row, response.thread, publicId), turns: params.excludeTurns ? [] : turns },

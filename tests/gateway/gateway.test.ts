@@ -192,6 +192,19 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(next.threadId).toBe(threadId);
   });
 
+  it("resumes gpt → claude → gpt with the row's rollout path (Desktop after a restart)", async () => {
+    const threadId = await stockThread();
+    await client.turn(threadId, "first");
+    await client.turn(threadId, "second", { model: CLAUDE });
+    await client.turn(threadId, "third", { model: "gpt-6-luna" });
+    const { data } = await client.request("thread/list", { limit: 200 });
+    const row = data.find((entry: any) => entry.id === threadId);
+    const fresh = await gateway.connect();
+    const resumed = await fresh.request("thread/resume", { threadId, path: row.path, history: null });
+    expect(itemsOf(resumed.thread.turns)).toEqual(["user:first", "agent:gpt: first", "contextCompaction", "user:second", "agent:claude: second",
+      "contextCompaction", "user:third", "agent:gpt: third"]);
+  });
+
   it("switches gpt → claude: summary from an ephemeral fork, injected without a reply", async () => {
     const threadId = await stockThread();
     await client.turn(threadId, "first");

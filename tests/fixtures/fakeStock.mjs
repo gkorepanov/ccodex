@@ -25,6 +25,7 @@ function newThread(params, extra = {}) {
     injected: [], ...extra,
   };
   thread.sessionId = thread.id;
+  thread.path = `/sessions/rollout-${thread.id}.jsonl`;
   threads.set(thread.id, thread);
   return thread;
 }
@@ -87,6 +88,7 @@ const handlers = {
   },
   "thread/resume": (connection, params) => {
     const thread = threads.get(params.threadId);
+    if (params.path && params.path !== thread.path) throw new Error(`cannot resume running thread ${thread.id} with stale path`);
     thread.subscribers.add(connection);
     return { thread: params.excludeTurns ? summary(thread) : full(thread), ...settings(thread), initialTurnsPage: null };
   },

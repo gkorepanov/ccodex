@@ -260,7 +260,7 @@ export class ClaudeSession {
       this.inbox!.push(userMessage(content, uuid));
       return startedTurn(this.liveTurn()!);
     }
-    const turn = this.openTurn(uuid, input, params.clientUserMessageId ?? null, hidden);
+    const turn = this.openTurn(uuid, input, params.clientUserMessageId ?? null, hidden, params.turnId !== undefined);
     this.ensureQuery();
     this.inbox!.push(userMessage(content, uuid));
     return startedTurn(turn);
@@ -357,11 +357,12 @@ export class ClaudeSession {
     };
   }
 
-  private openTurn(id: string, input: UserInput[], clientId: string | null, hidden: boolean): Turn {
+  /** `announced`: the provider switch already started the turn under this preallocated id. */
+  private openTurn(id: string, input: UserInput[], clientId: string | null, hidden: boolean, announced = false): Turn {
     clearTimeout(this.idleTimer);
     const turn = this.newTurnObject(id);
     this.turn = { id, startedAt: Date.now(), items: turn.items, resultSeen: false, interrupted: false, error: null };
-    this.emit("turn/started", { threadId: this.threadId, turn: startedTurn(turn) });
+    if (!announced) this.emit("turn/started", { threadId: this.threadId, turn: startedTurn(turn) });
     this.emit("thread/status/changed", { threadId: this.threadId, status: { type: "active", activeFlags: [] } });
     if (!hidden) {
       const item: ThreadItem = { type: "userMessage", id, clientId, content: input };
