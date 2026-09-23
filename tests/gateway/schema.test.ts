@@ -51,6 +51,7 @@ describe("wire objects of Claude threads validate against the installed codex sc
     await client.waitFor("turn/completed", (params) => params.threadId === threadId);
     client.onRequest = () => ({ decision: "accept" });
     await client.turn(threadId, "this needs approval");
+    await client.turn(threadId, "this needs file approval");
     await call("thread/read", { threadId, includeTurns: true }, "ThreadReadResponse");
     await call("thread/resume", { threadId }, "ThreadResumeResponse");
     await call("thread/turns/list", { threadId, limit: 10 }, "ThreadTurnsListResponse");

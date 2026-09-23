@@ -95,6 +95,18 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect((await client.request("thread/list", { limit: 50, sectionId: "section-pinned" })).data).toEqual([]);
   });
 
+  it("shows a Claude file change's patch before asking to approve it (Desktop needs it to render the approval)", async () => {
+    const threadId = await claudeThread();
+    const asked: any[] = [];
+    client.onRequest = (message) => { asked.push({ message, patches: client.notifications("item/fileChange/patchUpdated", threadId).length }); return { decision: "accept" }; };
+    await client.turn(threadId, "this needs file approval");
+    expect(asked[0].message).toMatchObject({ method: "item/fileChange/requestApproval", params: { threadId } });
+    expect(asked[0].patches).toBe(1);
+    expect(client.notifications("item/fileChange/patchUpdated", threadId)[0]!.params).toMatchObject({
+      itemId: asked[0].message.params.itemId, changes: [{ path: "/work/notes.txt", kind: { type: "add" }, diff: "fruit=kiwi\n" }],
+    });
+  });
+
   it("asks the client to approve Claude tool use", async () => {
     const threadId = await claudeThread();
     const asked: any[] = [];

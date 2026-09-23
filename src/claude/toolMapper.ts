@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { basename, extname, isAbsolute, resolve } from "node:path";
 import type { JsonValue, ThreadItem } from "../protocol/codex.js";
 import { bashCommandActions } from "./commandActions.js";
@@ -196,6 +197,33 @@ export function updateToolInput(
   }
   else if (item.type === "plan") item.text = planText(input);
   return item;
+}
+
+/** Unified hunk replacing `before` (starting at line `start`) with `after`. */
+function hunk(before: string, after: string, start: number): string {
+  const lines = (value: string) => value === "" ? [] : value.replace(/\n$/u, "").split("\n");
+  const removed = lines(before);
+  const added = lines(after);
+  return [`@@ -${start},${removed.length} +${start},${added.length} @@`, ...removed.map((line) => `-${line}`), ...added.map((line) => `+${line}`)].join("\n");
+}
+
+/** What a Write/Edit/MultiEdit is about to change, from its input: stock shows the patch before it is applied. */
+export function proposedChanges(name: string, input: Record<string, unknown>, cwd: string): Array<{ path: string; kind: { type: "add" } | { type: "update"; move_path: null }; diff: string }> {
+  const file = text(input.file_path);
+  if (!file || name === "NotebookEdit") return [];
+  const path = isAbsolute(file) ? file : resolve(cwd, file);
+  const current = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+  if (name === "Write") {
+    const content = text(input.content);
+    return [current === undefined ? { path, kind: { type: "add" }, diff: content } : { path, kind: { type: "update", move_path: null }, diff: hunk(current, content, 1) }];
+  }
+  const edits = name === "MultiEdit" && Array.isArray(input.edits) ? input.edits as Array<Record<string, unknown>> : [input];
+  const diff = edits.map((change) => {
+    const before = text(change.old_string);
+    const at = current?.indexOf(before) ?? -1;
+    return hunk(before, text(change.new_string), at < 0 ? 1 : current!.slice(0, at).split("\n").length);
+  }).join("\n");
+  return [{ path, kind: { type: "update", move_path: null }, diff }];
 }
 
 export function isImageRead(state: ActiveTool, cwd: string): boolean {

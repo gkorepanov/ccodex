@@ -12,7 +12,7 @@ import { claudeContent, normalizeUserInput, userMessage } from "./inputMapper.js
 import { completedToolItem } from "./native/projector.js";
 import { assistantBlockItemId } from "./native/ids.js";
 import { baseOptions } from "./sdk.js";
-import { startTool, updateToolInput, type ActiveTool } from "./toolMapper.js";
+import { proposedChanges, startTool, updateToolInput, type ActiveTool } from "./toolMapper.js";
 import type { ClaudeThreads } from "./threads.js";
 
 export interface SessionSettings {
@@ -654,6 +654,7 @@ export class ClaudeSession {
     const existing = this.tools.get(block.id);
     if (existing) {
       existing.item = updateToolInput(existing.item, existing.state, block.input ?? {}, this.settings.cwd);
+      this.proposeChanges(block.id, block.name, block.input ?? {});
       return;
     }
     const started = FILE_TOOLS.has(block.name) && block.name === "MultiEdit"
@@ -730,6 +731,7 @@ export class ClaudeSession {
       if (toolName === "AskUserQuestion") return await this.askUser(input, base);
       let decision: unknown;
       if (FILE_TOOLS.has(toolName)) {
+        this.proposeChanges(itemId, toolName, input);
         ({ decision } = await this.host.gateway.serverRequest(this.threadId, "item/fileChange/requestApproval", {
           ...base, reason, grantRoot: null,
         }));
@@ -749,6 +751,16 @@ export class ClaudeSession {
       return { behavior: "deny", message: "The request was cancelled.", interrupt: true };
     }
   };
+
+  /** Desktop shows a file change (and its approval) only with the patch: send it as soon as the input is known. */
+  private proposeChanges(itemId: string, name: string, input: Record<string, unknown>): void {
+    const item = this.tools.get(itemId)?.item;
+    if (item?.type !== "fileChange" || item.changes.length) return;
+    const changes = proposedChanges(name, input, this.settings.cwd);
+    if (!changes.length) return;
+    item.changes = changes;
+    this.emit("item/fileChange/patchUpdated", { threadId: this.threadId, turnId: this.turn?.id ?? "", itemId, changes });
+  }
 
   private decisionResult(decision: unknown, input: Record<string, unknown>, suggestions: unknown): PermissionResult {
     if (decision === "accept") return { behavior: "allow", updatedInput: input };

@@ -102,14 +102,15 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   }
   transcript.write({ type: "user", uuid, origin: { kind: "human" }, message: { role: "user", content: prompt.message.content } });
   let reply = fakeClaude.reply(text);
-  if (text.includes("needs approval")) {
+  const fileTool = text.includes("needs file approval");
+  if (text.includes("needs approval") || fileTool) {
     const toolUseId = `toolu_${randomUUID().slice(0, 8)}`;
-    const input = { command: "touch /tmp/approved" };
+    const [name, input] = fileTool ? ["Write", { file_path: "notes.txt", content: "fruit=kiwi\n" }] : ["Bash", { command: "touch /tmp/approved" }];
     const messageId = `msg_${randomUUID().slice(0, 8)}`;
-    const tool = { type: "assistant", message: { id: messageId, role: "assistant", model: "claude-opus-5-5", content: [{ type: "tool_use", id: toolUseId, name: "Bash", input }], stop_reason: "tool_use", usage: { input_tokens: 5, output_tokens: 1 } } };
+    const tool = { type: "assistant", message: { id: messageId, role: "assistant", model: "claude-opus-5-5", content: [{ type: "tool_use", id: toolUseId, name, input }], stop_reason: "tool_use", usage: { input_tokens: 5, output_tokens: 1 } } };
     transcript.write({ ...tool, apiBlockIndex: 0 });
     yield base(sessionId, tool);
-    const decision = await options.canUseTool("Bash", input, { toolUseID: toolUseId, signal: new AbortController().signal, suggestions: [] });
+    const decision = await options.canUseTool(name, input, { toolUseID: toolUseId, signal: new AbortController().signal, suggestions: [] });
     const result = decision.behavior === "allow" ? "done" : `denied: ${decision.message}`;
     transcript.write({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: result }] }, toolUseResult: { stdout: result, stderr: "" } });
     yield base(sessionId, { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: result }] }, tool_use_result: { stdout: result, stderr: "" } });
