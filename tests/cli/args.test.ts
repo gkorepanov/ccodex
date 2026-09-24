@@ -82,6 +82,10 @@ describe("classifyInvocation", () => {
       .toEqual({ kind: "stdioFrontend", socketPath: "/tmp/hybrid.sock", configOverrides: [] });
     expect(classifyInvocation(["app-server", "--stdio"], config))
       .toEqual({ kind: "stdioFrontend", socketPath: "/tmp/hybrid.sock", configOverrides: [] });
+    expect(classifyInvocation(["app-server", "--listen", "stdio://"], config))
+      .toEqual({ kind: "stdioFrontend", socketPath: "/tmp/hybrid.sock", configOverrides: [] });
+    expect(classifyInvocation(["app-server", "--listen=stdio://"], config))
+      .toEqual({ kind: "stdioFrontend", socketPath: "/tmp/hybrid.sock", configOverrides: [] });
     expect(classifyInvocation(["app-server", "--listen", "unix://"], config))
       .toMatchObject({ kind: "gateway", socketPath: "/tmp/hybrid.sock" });
   });
