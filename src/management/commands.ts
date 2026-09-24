@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { delegate } from "../cli/delegate.js";
-import { defaultConfigToml, displacedCodexPath, isCcodex, productHome, remoteCodexPath, type Config } from "../config.js";
+import { claudeHome, defaultConfigToml, displacedCodexPath, isCcodex, productHome, remoteCodexPath, type Config } from "../config.js";
 import { probeAppServer } from "../daemon/probe.js";
 import { reconcileManagedProcess, stopManagedProcess } from "../daemon/supervisor.js";
 import { reconcileOwnedGateway, stopSocketOwner } from "../daemon/ownership.js";
@@ -142,6 +142,16 @@ async function installClaudeStack(packageRoot: string): Promise<void> {
   }
 }
 
+/** CCodex's Claude chats are Claude's transcripts, which Claude deletes after `cleanupPeriodDays` (30 by default). */
+function keepClaudeTranscripts(): void {
+  const path = join(claudeHome(), "settings.json");
+  const settings = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown> : {};
+  if (settings.cleanupPeriodDays !== undefined) return;
+  mkdirSync(dirname(path), { recursive: true });
+  atomicWrite(path, `${JSON.stringify({ ...settings, cleanupPeriodDays: 36_500 }, null, 2)}\n`, existsSync(path) ? statSync(path).mode & 0o777 : 0o600);
+  process.stdout.write(`Set cleanupPeriodDays: 36500 in ${path}: Claude deletes older transcripts, and with them CCodex's Claude chats.\n`);
+}
+
 export async function setup(args: readonly string[]): Promise<number> {
   if (process.getuid?.() === 0) throw new Error("Do not run CCodex setup as root or with sudo.");
   const versionIndex = args.indexOf("--version");
@@ -170,6 +180,16 @@ export async function setup(args: readonly string[]): Promise<number> {
       child.once("error", fail);
       child.once("exit", (code) => done(code ?? 1));
     });
+  }
+  keepClaudeTranscripts();
+  // 0.4 kept its threads in state.sqlite, 0.5 reads Claude's transcripts plus meta.json: migrate once, before activating.
+  if (existsSync(join(paths.state, "state.sqlite")) && !existsSync(join(paths.state, "meta.json"))) {
+    const migration = spawn(process.execPath, [join(target, "node_modules", PACKAGE, "scripts", "migrate-0.4-to-0.5.mjs")], { stdio: "inherit" });
+    const code = await new Promise<number>((done, fail) => {
+      migration.once("error", fail);
+      migration.once("exit", (exit) => done(exit ?? 1));
+    });
+    if (code !== 0) throw new Error(`Migrating CCodex 0.4 threads failed (exit ${code}); nothing was activated.`);
   }
   const previous = readManifest();
   atomicSymlink(join("versions", version), paths.current);

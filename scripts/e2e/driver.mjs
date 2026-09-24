@@ -271,9 +271,11 @@ const scenarios = {
     const skill = join(HOME, ".claude", "skills", "workforce", "SKILL.md");
     const server = JSON.parse(readFileSync(join(HOME, ".claude.json"), "utf8")).mcpServers?.codex;
     check(existsSync(agent) && existsSync(skill) && server?.command === "codex" && server.args?.[0] === "mcp-server", "setup installed the Claude stack", { agent: existsSync(agent), skill: existsSync(skill), server });
+    const settings = JSON.parse(readFileSync(join(HOME, ".claude", "settings.json"), "utf8"));
+    check(settings.cleanupPeriodDays === 36_500, "setup keeps Claude's transcripts", settings);
     const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
     // Only Codex can answer (the wrapper has no tool but Codex's), or the wrapper just replies itself.
-    const done = await client.turn(thread.id, `Use the Agent tool with subagent_type codex-wrapper: have Codex (model ${GPT}) run \`cat /proc/sys/kernel/random/uuid\` and report the exact output. Then tell me that output.`, {}, 600_000);
+    const done = await client.turn(thread.id, `Use the Agent tool with subagent_type codex-wrapper and no model parameter. Its prompt: "Have Codex (model ${GPT}) run \`cat /proc/sys/kernel/random/uuid\` and report the exact output." Then tell me that output.`, {}, 600_000);
     const children = (await client.request("thread/list", { limit: 20, parentThreadId: thread.id, sourceKinds: ["subAgentThreadSpawn"] })).data;
     check(children.length === 1, "codex-wrapper sub-agent listed", { children, answers: done.answers });
     const childItems = itemsOf((await client.request("thread/read", { threadId: children[0].id, includeTurns: true })).thread.turns);
@@ -467,7 +469,8 @@ const scenarios = {
     if (!existsSync("/mig")) return { skipped: "no /mig data" };
     client.close();
     await daemon("stop");
-    execFileSync("sh", ["-c", "cp -r /mig/claude/projects ~/.claude/ && cp -r /mig/codex/. ~/.codex/ && mkdir -p ~/.ccodex/state && cp /mig/state04/*.sqlite ~/.ccodex/state/"]);
+    // Earlier scenarios' stock databases go first: their WAL files would apply to the copied ones.
+    execFileSync("sh", ["-c", "rm -f ~/.codex/*.sqlite* && cp -r /mig/claude/projects ~/.claude/ && cp -r /mig/codex/. ~/.codex/ && mkdir -p ~/.ccodex/state && cp /mig/state04/*.sqlite ~/.ccodex/state/"]);
     const migrated = execFileSync("node", [join(PACKAGE, "scripts", "migrate-0.4-to-0.5.mjs")], { encoding: "utf8" });
     await daemon("start");
     client = await Client.connect();
@@ -539,13 +542,25 @@ const scenarios = {
     const { thread: after } = await client.request("thread/read", { threadId: alias.publicId, includeTurns: true });
     check(after.turns.length === alias.turns + 1, "the turn is in its history", { before: alias.turns, after: after.turns.length });
 
+    // A thread whose transcript Claude had deleted is back as text, and Claude continues it knowing what was said.
+    const copied = new Set(readdirSync("/mig/claude/projects").flatMap((directory) => readdirSync(join("/mig/claude/projects", directory))).map((file) => file.replace(/\.jsonl$/, "")));
+    const restoredThreads = readable.filter((entry) => entry.segments === 1 && !copied.has(meta.lineages[entry.publicId][0].threadId));
+    check(restoredThreads.length > 0, "restored threads list and read", migrated.split("\n").filter((line) => line.startsWith("restored")));
+    const small = restoredThreads.sort((a, b) => a.size - b.size)[0];
+    await client.request("thread/resume", { threadId: small.publicId });
+    const { thread: old } = await client.request("thread/read", { threadId: small.publicId, includeTurns: true });
+    const first = old.turns.flatMap((turn) => turn.items).find((item) => item.type === "userMessage").content[0].text.trim().slice(0, 40);
+    execFileSync("mkdir", ["-p", old.cwd]);
+    const recall = await client.turn(small.publicId, "Quote verbatim the very first message I sent in this chat, nothing else.", { model: state.haiku });
+    check(recall.answers.some((answer) => answer.includes(first.slice(0, 20))), "a restored thread continues with its history", { first, answers: recall.answers });
+
     client.close();
     await daemon("restart");
     client = await Client.connect();
     const again = await list();
     const key = (map) => [...map.values()].map((thread) => `${thread.id}:${thread.archived}:${thread.name}`).sort().join("\n");
     check(key(again) === key(rows), "same list after restart", { before: rows.size, after: again.size });
-    return { migrated: migrated.split("\n").filter((line) => !line.startsWith("fork ")), listed: rows.size, readable: readable.length, alias: alias.publicId, names: readable.filter((entry) => entry.name).length };
+    return { restored: small.publicId, migrated: migrated.split("\n").filter((line) => !line.startsWith("fork ")), listed: rows.size, readable: readable.length, alias: alias.publicId, names: readable.filter((entry) => entry.name).length };
   },
 
   /**

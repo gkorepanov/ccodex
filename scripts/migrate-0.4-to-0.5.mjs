@@ -5,13 +5,16 @@
 // - Every 0.4 Claude thread keeps its id: meta.lineages[<0.4 id>] = [{ claude, <session id> }].
 // - Provider-switch lineages become segment lists; forks whose 0.4 id was no backend move to their current backend.
 // - Archive flags, sections and section order of Claude threads carry over; names go into the transcripts.
+// - Claude threads whose transcript Claude's cleanup deleted (cleanupPeriodDays, 30 by default) get one back from the
+//   0.4 turns: prompts and answers as text, without tool calls, reasoning or compactions. Claude resumes it as such.
 // - A lineage is archived when its current backend was (0.4 archived sealed stock backends to hide them); 0.5 reads
 //   the flag from the row's backend, so that one is set to match, stock ones through `codex app-server`.
 // SQLite files are only read. meta.json is backed up before it is replaced.
 import { spawn } from "node:child_process";
-import { appendFileSync, copyFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { startsTurn } from "../dist/claude/native/summary.js";
@@ -37,7 +40,9 @@ for (const directory of existsSync(claudeProjects) ? readdirSync(claudeProjects)
     if (file.endsWith(".jsonl")) transcripts.set(file.slice(0, -6), join(claudeProjects, directory, file));
   }
 }
-const records = (sessionId) => readFileSync(transcripts.get(sessionId), "utf8").split("\n").flatMap((line) => {
+/** Restored transcripts (session id → content), written after the dry-run exit. */
+const restored = new Map();
+const records = (sessionId) => (restored.get(sessionId)?.content ?? readFileSync(transcripts.get(sessionId), "utf8")).split("\n").flatMap((line) => {
   try { return line ? [JSON.parse(line)] : []; } catch { return []; }
 });
 
@@ -45,6 +50,42 @@ const claudeThreads = new Map(state.prepare(`select id, claude_session_id, archi
   json_extract(thread_json, '$.parentThreadId') parent, json_extract(thread_json, '$.name') name,
   json_extract(thread_json, '$.section') section, json_extract(thread_json, '$.sectionEnteredAt') section_entered_at
   from threads`).all().map((row) => [row.id, row]));
+
+// A turn's last record takes the uuid 0.4 kept for it, so provider-switch segments still end at that turn.
+for (const thread of state.prepare(`select id, claude_session_id, cwd, claude_code_version, coalesce(resolved_model, claude_model_value) model
+  from threads where claude_session_id is not null and ephemeral = 0 and deletion_pending = 0
+  and json_extract(thread_json, '$.parentThreadId') is null`).all()) {
+  const sessionId = thread.claude_session_id;
+  if (transcripts.has(sessionId)) continue;
+  const lines = [];
+  let parentUuid = null;
+  let at = 0;
+  const add = (record, seconds) => {
+    const uuid = randomUUID();
+    at = seconds;
+    lines.push({ parentUuid, isSidechain: false, userType: "external", cwd: thread.cwd, sessionId, version: thread.claude_code_version ?? "2.1.209",
+      ...record, uuid, timestamp: new Date(seconds * 1_000).toISOString() });
+    parentUuid = uuid;
+  };
+  for (const row of state.prepare("select turn_json, last_claude_message_uuid last from turns where thread_id = ? order by ordinal").all(thread.id)) {
+    const turn = JSON.parse(row.turn_json);
+    const messageId = `msg_${randomUUID().replaceAll("-", "")}`;
+    const start = lines.length;
+    for (const item of turn.items) {
+      if (item.type === "userMessage") {
+        add({ type: "user", message: { role: "user", content: item.content.map((part) => part.text).join("\n") } }, turn.startedAt);
+      } else if (item.type === "agentMessage" && item.text) {
+        add({ type: "assistant", message: { id: messageId, type: "message", role: "assistant", model: thread.model,
+          content: [{ type: "text", text: item.text }], stop_reason: "end_turn", usage: { input_tokens: 0, output_tokens: 0 } } }, turn.completedAt ?? turn.startedAt);
+      }
+    }
+    if (row.last && lines.length > start && !lines.some((line) => line.uuid === row.last)) parentUuid = lines.at(-1).uuid = row.last;
+  }
+  if (!lines.length) continue;
+  const path = join(claudeProjects, thread.cwd.replace(/[^a-zA-Z0-9]/g, "-"), `${sessionId}.jsonl`);
+  restored.set(sessionId, { content: lines.map((line) => `${JSON.stringify(line)}\n`).join(""), at });
+  transcripts.set(sessionId, path);
+}
 
 /** 0.4 Claude turn id → 0.5 turn id (the uuid of the prompt that starts the turn in the transcript). */
 function claudeTurnId(threadId, turnId) {
@@ -171,10 +212,15 @@ const meta = {
 
 const aliases = Object.values(lineages).filter((segments) => segments.length === 1).length;
 log(`lineages: ${Object.keys(lineages).length} (${aliases} kept 0.4 Claude ids, ${Object.keys(lineages).length - aliases} provider switches), skipped ${skipped}`);
+log(`restored transcripts: ${restored.size}`);
 log(`archived: ${archived.size}, stock archive changes: ${stockArchives.length}, in sections: ${Object.keys(sections).length}, section orders: ${Object.keys(sectionOrder).length}, names to write: ${named.length}`);
 if (dryRun) {
   log("dry run: nothing written");
   process.exit(0);
+}
+for (const [sessionId, { content }] of restored) {
+  mkdirSync(dirname(transcripts.get(sessionId)), { recursive: true });
+  writeFileSync(transcripts.get(sessionId), content, { mode: 0o600 });
 }
 if (existsSync(metaPath)) copyFileSync(metaPath, `${metaPath}.pre-migration-${Date.now()}`);
 writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`, { mode: 0o600 });
@@ -182,4 +228,6 @@ await stockRequests(stockArchives);
 for (const { sessionId, name } of named) {
   appendFileSync(transcripts.get(sessionId), `${JSON.stringify({ type: "custom-title", customTitle: name, sessionId })}\n`);
 }
+// Claude lists sessions by their file's time: a restored one keeps its place.
+for (const [sessionId, { at }] of restored) utimesSync(transcripts.get(sessionId), at, at);
 log(`wrote ${metaPath}. Restart the gateway: codex app-server daemon restart`);
