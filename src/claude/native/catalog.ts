@@ -1,6 +1,6 @@
 /** Owns discovery, incremental summaries, projection caching, and filesystem watches for native sessions. */
 import { createHash } from "node:crypto";
-import { watch as watchFileSystem, type FSWatcher } from "node:fs";
+import { mkdirSync, watch as watchFileSystem, type FSWatcher } from "node:fs";
 import { open, readdir, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { projectTranscript, type TranscriptProjection } from "./projector.js";
@@ -130,6 +130,8 @@ export class NativeSessionCatalog {
   }
 
   public watch(onChange: () => void): () => void {
+    // Claude creates it with its first session; a missing directory can't be watched for that session.
+    mkdirSync(this.projectsDir, { recursive: true });
     const watchers = new Map<string, FSWatcher>();
     let timer: NodeJS.Timeout | undefined;
     let closed = false;

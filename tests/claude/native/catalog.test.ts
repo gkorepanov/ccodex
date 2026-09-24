@@ -201,4 +201,28 @@ describe("native Claude session catalog", () => {
       await rm(root, { recursive: true });
     }
   });
+
+  it("sees the first session of a machine where Claude has no projects directory yet", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ccodex-native-catalog-fresh-"));
+    const project = join(root, "projects", "-synthetic-project");
+    const catalog = new NativeSessionCatalog(join(root, "projects"));
+    await catalog.refresh();
+    let unsubscribe = () => {};
+    try {
+      const changed = new Promise<void>((resolveChange, reject) => {
+        const timeout = setTimeout(() => reject(new Error("native catalog watch timed out")), 1_500);
+        unsubscribe = catalog.watch(() => {
+          clearTimeout(timeout);
+          resolveChange();
+        });
+      });
+      await mkdir(project, { recursive: true });
+      await writeFile(join(project, "first-session.jsonl"), line(prompt("first-session")));
+      await changed;
+      expect(catalog.get("first-session")).toBeDefined();
+    } finally {
+      unsubscribe();
+      await rm(root, { recursive: true });
+    }
+  });
 });

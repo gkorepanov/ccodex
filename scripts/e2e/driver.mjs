@@ -169,12 +169,14 @@ const scenarios = {
     const since = client.messages.length;
     const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
     await client.turn(thread.id, "In one sentence: what is a mutex?");
-    const claude = await client.waitFor("thread/name/updated", (p) => p.threadId === thread.id, 120_000, since);
+    // Claude's own title of the session may show first (seen by the transcript watch); CCodex's replaces it.
+    const claude = await client.waitFor("thread/name/updated", (p) => p.threadId === thread.id && p.threadName.endsWith("✳️"), 120_000, since);
     const { thread: gpt } = await client.request("thread/start", { model: GPT, cwd: WORK });
     await client.turn(gpt.id, "In one sentence: what is a semaphore?", { model: GPT });
     const stock = await client.waitFor("thread/name/updated", (p) => p.threadId === gpt.id, 120_000, since);
     check(claude.threadName.endsWith("✳️") && !stock.threadName.endsWith("✳️"), "✳️ only on Claude", { claude, stock });
-    return { claude: claude.threadName, stock: stock.threadName };
+    const shown = client.messages.slice(since).filter((m) => m.method === "thread/name/updated" && m.params.threadId === thread.id).map((m) => m.params.threadName);
+    return { claude: shown, stock: stock.threadName };
   },
 
   async switchBothWays() {
@@ -299,7 +301,7 @@ const scenarios = {
     const listed = (await client.request("skills/list", { cwds: [WORK] })).data[0].skills.find((entry) => entry.name === "claude:workforce");
     check(listed?.path === skill, "Claude skill listed with its file", listed);
     const { thread } = await client.request("thread/start", { model: GPT, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
-    const done = await client.turn(thread.id, `[$claude:workforce](${skill}) Reply with only the first markdown heading of this skill's file.`, { model: GPT });
+    const done = await client.turn(thread.id, `[$claude:workforce](${skill}) Open this skill's file and reply with only its first line that starts with "# ".`, { model: GPT });
     check(done.answers.join(" ").includes("Subagents and token usage"), "GPT read the Claude skill", done.answers);
     return { answers: done.answers };
   },
@@ -381,15 +383,26 @@ const scenarios = {
     return { question: asked[0].params.questions[0], answers: done.answers };
   },
 
+  /** A session started with the claude CLI shows up by itself (the image has no ~/.claude/projects yet), continues
+   *  through CCodex, and the CLI sees what was said there. */
   async cliSession() {
     const claude = join(dirname(require.resolve("@anthropic-ai/claude-agent-sdk-linux-x64/package.json")), "claude");
-    const run = spawnSync(claude, ["-p", "Reply with the word CLI-OK", "--model", "haiku"], { cwd: WORK, encoding: "utf8", timeout: 120_000 });
-    check(run.status === 0, "claude -p ran", run.stderr);
-    await sleep(1500);
-    const list = await client.request("thread/list", { limit: 100 });
-    const row = list.data.find((thread) => thread.modelProvider === "claude" && thread.preview.includes("CLI-OK"));
-    check(row && row.archived === false, "CLI session listed", list.data.map((thread) => thread.preview.slice(0, 40)));
-    return { id: row.id, preview: row.preview };
+    const cli = (...args) => {
+      const run = spawnSync(claude, ["-p", ...args, "--model", "haiku", "--output-format", "json"], { cwd: WORK, encoding: "utf8", timeout: 120_000 });
+      check(run.status === 0, "claude -p ran", run.stderr);
+      return JSON.parse(run.stdout);
+    };
+    const since = client.messages.length;
+    const sessionId = cli("Remember the code word KIWI-42. Reply with just OK.").session_id;
+    await client.waitFor("thread/started", (params) => params.thread.id === sessionId, 30_000, since);
+    await client.request("thread/resume", { threadId: sessionId });
+    const done = await client.turn(sessionId, "What code word did I ask you to remember? Reply with just the word.");
+    check(done.answers.join(" ").includes("KIWI-42"), "CCodex continued the CLI session", done.answers);
+    const back = cli("--resume", sessionId, "Quote my previous question to you verbatim.");
+    check(back.session_id === sessionId && /code word/iu.test(back.result), "the CLI sees the CCodex turn", back);
+    const users = itemsOf((await client.request("thread/read", { threadId: sessionId, includeTurns: true })).thread.turns).filter((item) => item.startsWith("user:"));
+    check(users.length === 3, "all three turns in the thread", users);
+    return { sessionId, answers: done.answers, cli: back.result };
   },
 
   /** Smoke: the plain `codex` TUI (delegated to the installed codex) runs a gpt turn. */
