@@ -16,6 +16,8 @@ const collapse = (text: string) => text.replace(/\s+/gu, " ").trim();
 export class Titles {
   /** New threads waiting for their first turn. */
   private readonly fresh = new Map<string, number>();
+  /** Threads whose title is being written. */
+  private readonly generating = new Set<string>();
   /** First prompt of recently titled threads (collapsed), to recognize Desktop's prompt-prefix names. */
   private readonly prompts = new Map<string, string>();
 
@@ -25,6 +27,11 @@ export class Titles {
     const now = Date.now();
     for (const [id, at] of this.fresh) if (now - at > TRACK_MS) this.fresh.delete(id);
     this.fresh.set(threadId, now);
+  }
+
+  /** Threads CCodex names itself, until their title is written. */
+  public naming(threadId: string): boolean {
+    return this.fresh.has(threadId) || this.generating.has(threadId);
   }
 
   /** Stock `thread/started` as seen by the internal connection. */
@@ -39,8 +46,9 @@ export class Titles {
     const text = inputText(params.input ?? []).trim();
     if (!text) return;
     this.prompts.set(threadId, collapse(text));
+    this.generating.add(threadId);
     void this.generate(threadId, text).catch((error: unknown) =>
-      this.gateway.logger.warn("titles.failed", { threadId, error: String(error) }));
+      this.gateway.logger.warn("titles.failed", { threadId, error: String(error) })).finally(() => this.generating.delete(threadId));
   }
 
   private async generate(threadId: string, text: string): Promise<void> {

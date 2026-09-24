@@ -169,13 +169,14 @@ const scenarios = {
     const since = client.messages.length;
     const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK });
     await client.turn(thread.id, "In one sentence: what is a mutex?");
-    // Claude's own title of the session may show first (seen by the transcript watch); CCodex's replaces it.
     const claude = await client.waitFor("thread/name/updated", (p) => p.threadId === thread.id && p.threadName.endsWith("✳️"), 120_000, since);
     const { thread: gpt } = await client.request("thread/start", { model: GPT, cwd: WORK });
     await client.turn(gpt.id, "In one sentence: what is a semaphore?", { model: GPT });
     const stock = await client.waitFor("thread/name/updated", (p) => p.threadId === gpt.id, 120_000, since);
     check(claude.threadName.endsWith("✳️") && !stock.threadName.endsWith("✳️"), "✳️ only on Claude", { claude, stock });
+    // Claude's own title of the session (in its transcript) never shows: CCodex names it.
     const shown = client.messages.slice(since).filter((m) => m.method === "thread/name/updated" && m.params.threadId === thread.id).map((m) => m.params.threadName);
+    check(shown.every((name) => name.endsWith("✳️")), "only CCodex's title shown", shown);
     return { claude: shown, stock: stock.threadName };
   },
 

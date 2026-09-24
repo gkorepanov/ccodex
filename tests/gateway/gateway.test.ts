@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -872,5 +872,17 @@ describe("titles (rename_prompt)", () => {
     const done = await client.turn(titleThread.id, "User prompt:\nhello", { turnTrigger: "thread_title" });
     expect(done.turn.status).toBe("completed");
     expect(client.notifications("item/completed", titleThread.id)).toHaveLength(0);
+  });
+
+  it("keeps Claude's own title of a session unseen while CCodex names it", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "a slow title");
+    const projects = join(process.env.CLAUDE_CONFIG_DIR!, "projects");
+    const transcript = join(projects, readdirSync(projects).find((key) => existsSync(join(projects, key, `${threadId}.jsonl`)))!, `${threadId}.jsonl`);
+    appendFileSync(transcript, `${JSON.stringify({ type: "ai-title", aiTitle: "Claude's own title", sessionId: threadId })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect((await client.request("thread/list", { limit: 50 })).data.find((row: any) => row.id === threadId).name).toBeNull();
+    await client.waitFor("thread/name/updated", (params) => params.threadId === threadId && params.threadName === "🦊 Fox Title ✳️");
+    expect(client.notifications("thread/name/updated", threadId).map((message) => message.params.threadName)).not.toContain("Claude's own title");
   });
 });

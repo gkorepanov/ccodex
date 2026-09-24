@@ -73,10 +73,11 @@ export class ClaudeThreads {
     // Sessions and titles changed outside CCodex (the claude CLI, /rename) show up without a reload.
     this.stopWatching = this.catalog.watch(() => {
       for (const summary of this.catalog.sessions()) {
-        const name = summary.customTitle ?? summary.aiTitle;
+        const header = this.headerOf(summary, undefined);
+        const name = header.customTitle ?? header.aiTitle;
         const id = summary.sessionId;
         if (!known.has(id) && !this.sessions.has(id) && !this.gateway.meta.hidden(id)) {
-          this.gateway.broadcast("thread/started", { thread: this.decorate(nativeThread(id, this.headerOf(summary, undefined), { status: this.status(id) })) });
+          this.gateway.broadcast("thread/started", { thread: this.decorate(nativeThread(id, header, { status: this.status(id) })) });
         } else if (known.has(id) && known.get(id) !== name && name) {
           this.gateway.emit(id, "thread/name/updated", { threadId: id, threadName: name });
         }
@@ -118,9 +119,11 @@ export class ClaudeThreads {
     return session ? { type: "idle" } : { type: "notLoaded" };
   }
 
-  private headerOf(summary: TranscriptHeader, session: ClaudeSession | undefined): TranscriptHeader {
+  /** Claude's own title of a session stays unseen while CCodex names it (it would show until CCodex's replaces it). */
+  private headerOf(summary: SessionSummary, session: ClaudeSession | undefined): TranscriptHeader {
     return {
       ...summary,
+      aiTitle: this.gateway.titles.naming(summary.sessionId) ? null : summary.aiTitle,
       model: session?.settings.model ?? (summary.model && this.pickerModel(summary.model)),
       reasoningEffort: session?.settings.effort ?? summary.reasoningEffort,
     };

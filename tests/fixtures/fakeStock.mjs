@@ -58,7 +58,9 @@ function runTurn(connection, thread, params) {
   const agent = { type: "agentMessage", id: randomUUID(), text: reply(thread, text), phase: "final_answer", memoryCitation: null };
   thread.turns.push(turn);
   if (!thread.preview) thread.preview = text;
-  setImmediate(() => {
+  // A title model that takes its time.
+  const later = /<user_prompt>[\s\S]*slow/u.test(text) ? (run) => setTimeout(run, 2_000) : setImmediate;
+  later(() => {
     const send = (method, payload) => { for (const c of thread.subscribers) c.notify(method, payload); };
     send("turn/started", { threadId: thread.id, turn: { ...turn, items: [], itemsView: "notLoaded" } });
     for (const item of [user, agent]) {
