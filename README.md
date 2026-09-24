@@ -137,7 +137,8 @@ keep working):
   blocks for terminal-launched instances. The same managed `codex` entrypoint is used
   locally and over SSH. **Fully quit the Codex App (`Cmd+Q`) and relaunch it**
   (or log out and back in) so it picks up the variable.
-- A bare `app-server` launch runs a thin **stdio frontend**: it forwards the App's
+- A bare `app-server` launch or explicit stdio launch (`--stdio` or
+  `--listen stdio://`) runs a thin **stdio frontend**: it forwards the App's
   newline-delimited JSON to the existing app-server-control socket, lazily starts the
   gateway when cold, and reconnects after gateway restarts. Provider state and lifecycle
   remain exclusively inside the existing gateway.

@@ -127,7 +127,8 @@ export function classifyInvocation(args: readonly string[], config: HybridConfig
   }
 
   const listen = optionValue(appArgs, "--listen");
-  if (!listen || appArgs.includes("--stdio")) {
+  // Computer-use helpers request stdio explicitly through --listen.
+  if (!listen || listen === "stdio://" || appArgs.includes("--stdio")) {
     return {
       kind: "stdioFrontend",
       socketPath: config.publicSocket,
