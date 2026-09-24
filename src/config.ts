@@ -13,7 +13,6 @@ export interface Config {
   readonly dataDir: string;
   readonly publicSocket: string;
   readonly modelPrefix: string;
-  readonly idleTimeoutSeconds: number;
   readonly logLevel: "debug" | "info" | "warn" | "error";
   readonly rpcCapture: boolean;
   readonly rpcCaptureMaxBytes: number;
@@ -135,7 +134,6 @@ export function loadConfig(): Config {
     publicSocket: expandHome(process.env.CCODEX_SOCKET ?? file.public_socket
       ?? join(codexHome(), "app-server-control", "app-server-control.sock")),
     modelPrefix: file.model_prefix ?? "claude:",
-    idleTimeoutSeconds: file.idle_timeout_seconds ?? 900,
     logLevel: process.env.CCODEX_LOG_LEVEL as Config["logLevel"] ?? file.log_level ?? "info",
     rpcCapture: process.env.CCODEX_RPC_CAPTURE ? process.env.CCODEX_RPC_CAPTURE === "1" : file.rpc_capture ?? true,
     rpcCaptureMaxBytes: file.rpc_capture_max_bytes ?? 1_073_741_824,

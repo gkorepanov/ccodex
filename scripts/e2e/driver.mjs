@@ -32,6 +32,26 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const text = (value) => [{ type: "text", text: value, text_elements: [] }];
 const itemsOf = (turns) => turns.flatMap((turn) => turn.items.map((item) => item.type === "userMessage"
   ? `user:${item.content?.[0]?.text ?? ""}` : item.type === "agentMessage" ? `agent:${item.text}` : item.type));
+const sessionName = (threadId) => {
+  const sessions = join(HOME, ".claude", "sessions");
+  return readdirSync(sessions).map((file) => JSON.parse(readFileSync(join(sessions, file), "utf8"))).find((session) => session.sessionId === threadId)?.name;
+};
+/** The turns a thread showed live since a message index: ids and completed items (id + type), in order. */
+const liveTurns = (threadId, since) => {
+  const turns = new Map();
+  for (const m of client.messages.slice(since)) {
+    if (m.params?.threadId !== threadId) continue;
+    if (m.method === "turn/started") turns.set(m.params.turn.id, []);
+    if (m.method === "item/completed" && turns.has(m.params.turnId)) turns.get(m.params.turnId).push(m.params.item);
+  }
+  return [...turns].map(([id, items]) => ({ id, items }));
+};
+/** Same turns with the same user messages and tools (reasoning and message split may differ between live and history). */
+const sameTurns = (live, history) => {
+  const shape = (turns) => JSON.stringify(turns.map((turn) => [turn.id, turn.items.filter((item) => !["reasoning", "agentMessage"].includes(item.type)).map((item) => `${item.type}:${item.id}`)]));
+  return shape(live) === shape(history);
+};
+const items = async (threadId) => (await client.request("thread/read", { threadId, includeTurns: true })).thread.turns.flatMap((turn) => turn.items);
 const answers = (client, threadId, since = 0) => client.messages.slice(since)
   .filter((m) => m.method === "item/completed" && m.params.threadId === threadId && m.params.item.type === "agentMessage")
   .map((m) => m.params.item.text);
@@ -287,38 +307,94 @@ const scenarios = {
   /**
    * Claude chats message each other (SendMessage): the sender shows "Sent message to chat" linking to the receiver, the
    * receiver a turn of its own opened by Desktop's "sent from another task" message linking back, live and in history.
-   * A message to a sub-agent of the chat shows as stock's "Messaged <agent>".
+   * A message that arrives while the receiver works joins its running turn; a reply links back; a claude CLI session can
+   * send one too.
    */
   async peerMessages() {
-    const start = () => client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
-    const { thread: receiver } = await start();
-    await client.turn(receiver.id, "Remember the code word MANGO. Reply only: READY.");
-    const sessions = join(HOME, ".claude", "sessions");
-    const name = readdirSync(sessions).map((file) => JSON.parse(readFileSync(join(sessions, file), "utf8"))).find((session) => session.sessionId === receiver.id)?.name;
-    check(name, "the receiver's session is registered by name", readdirSync(sessions));
-    const { thread: sender } = await start();
-    const since = client.messages.length;
-    const sent = await client.turn(sender.id, `Use the SendMessage tool (load it with ToolSearch first) to send the Claude session named "${name}" exactly: What is your code word? Then stop; do not wait for an answer.`);
-    const received = await client.waitFor("turn/completed", (params) => params.threadId === receiver.id, 240_000, since);
-    const sentItems = (await client.request("thread/read", { threadId: sender.id, includeTurns: true })).thread.turns.flatMap((turn) => turn.items);
-    const toChat = sentItems.find((item) => item.type === "dynamicToolCall" && item.tool === "send_message_to_thread");
-    check(toChat?.namespace === "codex_app" && toChat.arguments.threadId === receiver.id && toChat.status === "completed", "the sender shows Sent message to chat, linking to the receiver", { sentItems, answers: sent.answers });
-    const delegation = (item) => item?.type === "userMessage" && item.content[0].text.startsWith("<codex_delegation>") && item.content[0].text.includes(`<source_thread_id>${sender.id}</source_thread_id>`);
-    const live = client.messages.slice(since).find((m) => m.method === "item/completed" && m.params.threadId === receiver.id && m.params.item.type === "userMessage")?.params;
-    check(delegation(live?.item), "live, the receiver's turn opens with the message, from the sender's chat", live);
-    const { thread: read } = await client.request("thread/read", { threadId: receiver.id, includeTurns: true });
-    const turn = read.turns.at(-1);
-    check(read.turns.length === 2 && delegation(turn.items[0]), "in history, the message opens a turn of its own", itemsOf(read.turns));
-    check(turn.id === live.turnId, "live and history agree on the turn", { live: live.turnId, history: turn.id });
+    const start = async () => (await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
+    const receiver = await start();
+    await client.turn(receiver, "Remember the code word MANGO. Reply only: READY.");
+    const name = sessionName(receiver);
+    check(name, "the receiver's session is registered by name", readdirSync(join(HOME, ".claude", "sessions")));
+    const sender = await start();
+    const send = (text) => `Use the SendMessage tool (load it with ToolSearch first) to send the Claude session named "${name}" exactly: ${text}. Then stop; do not wait for an answer.`;
+    let since = client.messages.length;
+    const sent = await client.turn(sender, send("What is your code word?"));
+    await client.waitFor("turn/completed", (params) => params.threadId === receiver, 240_000, since);
+    const toChat = (await items(sender)).find((item) => item.type === "dynamicToolCall" && item.tool === "send_message_to_thread");
+    check(toChat?.namespace === "codex_app" && toChat.arguments.threadId === receiver && toChat.status === "completed", "the sender shows Sent message to chat, linking to the receiver", { toChat, answers: sent.answers });
+    const delegation = (item, source) => item?.type === "userMessage" && item.content[0].text.startsWith("<codex_delegation>") && item.content[0].text.includes(`<source_thread_id>${source}</source_thread_id>`);
+    let history = (await client.request("thread/read", { threadId: receiver, includeTurns: true })).thread.turns;
+    check(history.length === 2 && delegation(history[1].items[0], sender), "in history, the message opens a turn of its own", itemsOf(history));
+    check(sameTurns(liveTurns(receiver, since), history.slice(1)), "live, the same turn with the same message", { live: liveTurns(receiver, since), history: history.slice(1) });
 
-    const agent = await client.turn(sender.id, "Use the Agent tool with run_in_background: true, subagent_type general-purpose, no model parameter, description 'Kiwi keeper' and prompt 'Reply with the word READY.'. Right after, use SendMessage to send that agent (to: its agent id) the message 'The code word is KIWI.'. Then stop.", {}, 300_000);
+    // While the receiver works, the message joins its running turn (Claude's queued command), after what came before it.
+    since = client.messages.length;
+    await client.request("turn/start", { threadId: receiver, input: text("Run this exact bash command: python3 -c 'import time; time.sleep(25)' — then reply with the single word SLEPT.") });
+    await client.waitFor("item/started", (params) => params.threadId === receiver && params.item.type === "commandExecution", 120_000, since);
+    await client.turn(sender, send("PING-MID"));
+    await client.waitFor("turn/completed", (params) => params.threadId === receiver, 240_000, since);
+    history = (await client.request("thread/read", { threadId: receiver, includeTurns: true })).thread.turns;
+    const running = history.at(-1).items;
+    const mid = running.findIndex((item) => delegation(item, sender) && item.content[0].text.includes("PING-MID"));
+    check(history.length === 3 && mid > running.findIndex((item) => item.type === "commandExecution"), "a message sent while the receiver works joins its running turn", itemsOf(history.slice(2)));
+    check(sameTurns(liveTurns(receiver, since), history.slice(2)), "live too", { live: liveTurns(receiver, since), history: history.slice(2) });
+
+    // A reply goes to the address the message came from (uds:<socket>), not a name.
+    since = client.messages.length;
+    await client.turn(receiver, "Use SendMessage to reply PONG to the agent that sent you PING-MID (to: the address it came from). Then stop; do not wait for an answer.");
+    const reply = (item) => item.type === "dynamicToolCall" && item.tool === "send_message_to_thread" && item.arguments.threadId === sender;
+    const liveReply = client.messages.slice(since).find((m) => m.method === "item/completed" && m.params.threadId === receiver && (m.params.item.type === "dynamicToolCall" || m.params.item.tool === "sendInput"))?.params.item;
+    check(liveReply && reply(liveReply), "a reply shows Sent message to chat, linking to the sender", liveReply);
+    history = (await client.request("thread/read", { threadId: receiver, includeTurns: true })).thread.turns;
+    check(history.at(-1).items.some(reply), "in history too", itemsOf(history.slice(3)));
+    await client.waitFor("turn/completed", (params) => params.threadId === sender, 240_000, since).catch(() => undefined);
+
+    // A claude CLI session (listed as a chat of its own) sends one.
+    since = client.messages.length;
+    const claude = join(dirname(require.resolve("@anthropic-ai/claude-agent-sdk-linux-x64/package.json")), "claude");
+    const cli = spawnSync(claude, ["-p", send("FROM-CLI"), "--model", "haiku", "--dangerously-skip-permissions", "--output-format", "json"], { cwd: WORK, encoding: "utf8", timeout: 180_000 });
+    check(cli.status === 0, "claude -p ran", cli.stderr);
+    const cliSession = JSON.parse(cli.stdout).session_id;
+    await client.waitFor("turn/completed", (params) => params.threadId === receiver, 240_000, since);
+    history = (await client.request("thread/read", { threadId: receiver, includeTurns: true })).thread.turns;
+    check(delegation(history.at(-1).items[0], cliSession), "a CLI session's message links to its chat", itemsOf(history.slice(4)));
+    check(sameTurns(liveTurns(receiver, since), history.slice(4)), "live too", { live: liveTurns(receiver, since), history: history.slice(4) });
+    return { name, toChat: toChat.arguments, midTurn: itemsOf(history.slice(2, 3)), cli: cliSession };
+  },
+
+  /**
+   * A chat's sub-agents: a message to one shows as "Messaged <agent>" (also in a chat's first turn, and after the daemon
+   * restarted), a message from one to the chat opens a turn of its own linking to the sub-agent, live and in history.
+   */
+  async peerSubagents() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    let since = client.messages.length;
+    await client.turn(thread.id, "Use the Agent tool with run_in_background: true, subagent_type general-purpose, no model parameter, description 'Reporter' and prompt: 'Use the SendMessage tool (load it with ToolSearch first) to send the main agent that started you (your parent / team lead) the message REPORT-OK. Then reply with the word DONE.'. Right after, use SendMessage to send that agent (to: its agent id) the message 'Thanks.'. Then stop without waiting.", {}, 300_000);
+    const child = client.messages.slice(since).find((m) => m.method === "item/completed" && m.params.threadId === thread.id && m.params.item.tool === "spawnAgent")?.params.item.receiverThreadIds[0];
     const message = (item) => item.type === "collabAgentToolCall" && item.tool === "sendInput";
-    const liveActivity = client.messages.find((m) => m.method === "item/completed" && m.params.threadId === sender.id && message(m.params.item))?.params.item;
-    const spawned = client.messages.find((m) => m.method === "item/completed" && m.params.threadId === sender.id && m.params.item.tool === "spawnAgent")?.params.item.receiverThreadIds[0];
-    const historyActivity = (await client.request("thread/read", { threadId: sender.id, includeTurns: true })).thread.turns.flatMap((turn) => turn.items).find(message);
-    check(spawned && liveActivity?.receiverThreadIds[0] === spawned, "live, a message to a sub-agent goes to its thread (Messaged <agent>)", { liveActivity, spawned, answers: agent.answers });
-    check(historyActivity?.receiverThreadIds[0] === spawned, "in history too", historyActivity);
-    return { name, toChat: toChat.arguments, received: received.turn.id, message: live.item.content[0].text, activity: historyActivity };
+    const liveMessage = client.messages.slice(since).find((m) => m.method === "item/completed" && m.params.threadId === thread.id && message(m.params.item))?.params.item;
+    check(child && liveMessage?.receiverThreadIds[0] === child, "in a chat's first turn, a message to its sub-agent goes to its thread (Messaged <agent>)", { child, liveMessage });
+    // The sub-agent's message (no command of its own): a turn of its own when it came after the turn's result (Claude
+    // answers it right away), else part of the running turn.
+    const delegated = (turn) => turn.items.some((item) => item.type === "userMessage" && item.content[0].text.includes(`<source_thread_id>${child}</source_thread_id>`) && item.content[0].text.includes("REPORT-OK"));
+    for (let attempt = 0; attempt < 600 && !liveTurns(thread.id, since).some(delegated); attempt += 1) await sleep(200);
+    await client.waitFor("thread/status/changed", (params) => params.threadId === thread.id && params.status.type === "idle", 240_000, client.messages.length - 1).catch(() => undefined);
+    await sleep(3000);
+    const history = (await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread.turns;
+    check(history.some(delegated), "the sub-agent's message links to its thread", itemsOf(history));
+    check(sameTurns(liveTurns(thread.id, since), history), "live, the same turns", { live: liveTurns(thread.id, since), history });
+
+    // After a restart the chat's process is new; its earlier sub-agent is still known.
+    client.close();
+    await daemon("restart");
+    client = await Client.connect();
+    await client.request("thread/resume", { threadId: thread.id });
+    since = client.messages.length;
+    await client.turn(thread.id, `Use SendMessage to send the agent ${child.slice("agent-".length)} (to: that id) the message 'Again.'. Then stop without waiting.`, {}, 300_000);
+    const again = client.messages.slice(since).find((m) => m.method === "item/completed" && m.params.threadId === thread.id && message(m.params.item))?.params.item;
+    check(again?.receiverThreadIds[0] === child, "after a restart, a message to an earlier sub-agent goes to its thread", again);
+    return { child, turns: history.map((turn) => turn.items[0]?.content?.[0]?.text?.slice(0, 80)) };
   },
 
   /** An image attached in Desktop (a local file) reaches Claude and stays on the user message. */

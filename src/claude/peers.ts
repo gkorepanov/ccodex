@@ -19,7 +19,7 @@ export interface PeerDirectory {
 export interface Peers {
   readonly directory: PeerDirectory;
   /** Agent ids of the session's sub-agents. */
-  readonly children: ReadonlySet<string>;
+  readonly children: { has(agentId: string): boolean };
   readonly home?: string;
 }
 
@@ -76,6 +76,11 @@ export function peerSource(origin: Fields, peers: Peers): string | undefined {
       : name !== undefined && session.name === name));
 }
 
+/** One message, whether read from its record or from the result of the turn it started. */
+export function peerKey(origin: Fields, recordText: string): string {
+  return text(origin.msg_id) ?? `${text(origin.from) ?? ""}\0${peerBody(origin, recordText)}`;
+}
+
 /** What the peer wrote: Claude's `origin.body`, else its record without Claude's envelope. */
 function peerBody(origin: Fields, recordText: string): string {
   const body = text(origin.body);
@@ -111,10 +116,11 @@ export function sentMessageItem(item: ThreadItem, input: Fields, result: Fields 
   const agent = [to, text(fields(result?.pin)?.id)].find((id) => id !== undefined && peers.children.has(id));
   if (agent) return { ...item, receiverThreadIds: [`agent-${agent}`] };
   const msgId = text(result?.msg_id);
-  // `to` names a session as ListAgents lists it: "work-8c", or "work-8c [5bc12a]".
+  // `to` names a session as ListAgents lists it ("work-8c", "work-8c [5bc12a]"), or (a reply) the address it wrote from.
   const name = to?.replace(/\s*\[[^\]]*\]$/u, "");
   const target = thread(peers, msgId && peers.directory.receiver(msgId))
-    ?? thread(peers, name && runningSession(peers.home ?? claudeHome(), (session) => session.name === name || session.sessionId === name));
+    ?? thread(peers, name && runningSession(peers.home ?? claudeHome(), (session) =>
+      session.name === name || session.sessionId === name || `uds:${text(session.messagingSocketPath)}` === name));
   if (!target) return item;
   return {
     type: "dynamicToolCall", id: item.id, namespace: "codex_app", tool: "send_message_to_thread",

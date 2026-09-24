@@ -10,7 +10,6 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     dataDir: "/tmp/ccodex-test-home/state",
     publicSocket: "/tmp/ccodex-test.sock",
     modelPrefix: "claude:",
-    idleTimeoutSeconds: 900,
     logLevel: "warn",
     rpcCapture: false,
     rpcCaptureMaxBytes: 1_048_576,

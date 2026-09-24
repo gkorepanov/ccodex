@@ -10,5 +10,5 @@ ARG CCODEX_VERSION
 COPY --chown=node:node ccodex.tgz relay.tgz /tmp/
 RUN CCODEX_PACKAGE_SPEC=/tmp/ccodex.tgz CCODEX_RELAY_PACKAGE_SPEC=/tmp/relay.tgz npx --yes --package /tmp/ccodex.tgz ccodex setup --version "${CCODEX_VERSION}" \
  && mkdir -p /home/node/.claude /home/node/.codex /home/node/work \
- && printf '%s\n' 'idle_timeout_seconds = 3600' 'log_level = "debug"' >> /home/node/.ccodex/config.toml
+ && printf '%s\n' 'log_level = "debug"' >> /home/node/.ccodex/config.toml
 WORKDIR /home/node/work

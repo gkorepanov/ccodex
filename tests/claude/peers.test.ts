@@ -67,14 +67,39 @@ describe("messages between Claude agents", () => {
     expect(text(projection.turns[1]!.items[0]!)).toBe("Message from another Claude agent (CCodex does not know its chat):\n\na <b> & c");
   });
 
-  it("keeps a message that arrived while Claude was working in the running turn", async () => {
+  it("keeps a message that arrived while Claude was working in the running turn (Claude's queued command)", async () => {
+    const queued: TranscriptRecord = {
+      type: "attachment", ...envelope("queued", "result", 4),
+      attachment: { type: "queued_command", prompt: crossSession("PING-MID").split("\n").slice(1, 4).join("\n"), source_uuid: "command", commandMode: "prompt", origin: { kind: "peer", ...ORIGIN, body: "PING-MID" }, isMeta: true },
+    };
     const records: TranscriptRecord[] = [
       human("prompt", null, "Work", 1, "p1"), reply("tool", "prompt", "", 2, [{ type: "tool_use", id: "toolu-1", name: "Bash", input: { command: "true" } }]),
-      peer("peer", "tool", 3, ORIGIN, "p1"), reply("done", "peer", "Done", 4),
+      { type: "user", ...envelope("result", "tool", 3, "p1"), message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu-1", content: "" }] } },
+      queued, reply("done", "queued", "Done", 5),
+    ];
+    const projection = await projectTranscript({ sessionId: "receiver", path: "/tmp/r.jsonl", records, peers: directory({ senders: { "msg-1": SENDER } }) });
+    expect(projection.turns.map((turn) => turn.items.map((item) => item.type))).toEqual([["userMessage", "commandExecution", "userMessage", "agentMessage"]]);
+    expect(projection.turns[0]!.items[2]).toMatchObject({ id: "command" });
+    expect(text(projection.turns[0]!.items[2]!)).toBe(delegation(SENDER, "PING-MID"));
+  });
+
+  it("gives a message that waited in Claude's queue a turn of its own, and no queued task notification is a user message", async () => {
+    const queue = (operation: string, content?: string): TranscriptRecord => ({ type: "queue-operation", operation, sessionId: "receiver", ...(content ? { content } : {}) });
+    const envelopeOnly = crossSession("REPORT-OK").split("\n").slice(1, 4).join("\n");
+    const notification = "<task-notification>\n<task-id>a0eb</task-id>\n</task-notification>";
+    const records: TranscriptRecord[] = [
+      queue("enqueue", "Start bob"), queue("dequeue"), human("prompt", null, "Start bob", 1, "p1"),
+      queue("enqueue", envelopeOnly), reply("launched", "prompt", "Launched", 2), queue("dequeue"),
+      peer("peer", "launched", 3, { senderTaskId: "a0eb", body: "REPORT-OK" }, "p2", "REPORT-OK"),
+      queue("enqueue", notification), reply("ack", "peer", "Acknowledged", 4), queue("dequeue"),
+      { type: "user", ...envelope("note", "ack", 5, "p3"), origin: { kind: "task-notification" }, message: { role: "user", content: notification } },
+      reply("noted", "note", "Noted", 6),
     ];
     const projection = await projectTranscript({ sessionId: "receiver", path: "/tmp/r.jsonl", records });
-    expect(projection.turns.map((turn) => turn.items.map((item) => item.type))).toEqual([["userMessage", "commandExecution", "userMessage", "agentMessage"]]);
-    expect(text(projection.turns[0]!.items[2]!)).toMatch(/^Message from Claude agent work-7f \(CCodex does not know its chat\)/u);
+    expect(projection.turns.map((turn) => [turn.id, turn.items.map((item) => item.type)])).toEqual([
+      ["prompt", ["userMessage", "agentMessage"]],
+      ["peer", ["userMessage", "agentMessage", "agentMessage"]],
+    ]);
   });
 
   it("finds the sender among running sessions, trusting a pid only with its process start", () => {
@@ -102,7 +127,7 @@ describe("messages between Claude agents", () => {
       type: "collabAgentToolCall", id: "toolu-send", tool: "sendInput", status: "completed", senderThreadId: "receiver",
       receiverThreadIds: [], prompt: "Hi", model: null, reasoningEffort: null, agentsStates: {},
     };
-    const home = registry([{ pid: 1, sessionId: SENDER, name: "work-8c" }]);
+    const home = registry([{ pid: 1, sessionId: SENDER, name: "work-8c", messagingSocketPath: "/tmp/cc-socks/1.sock" }]);
     expect(sentMessageItem(call, { to: "a0eb" }, { success: true, pin: { id: "a0eb" } }, peers(home, {}, new Set(["a0eb"]))))
       .toEqual({ ...call, receiverThreadIds: ["agent-a0eb"] });
     const chat = {
@@ -111,6 +136,8 @@ describe("messages between Claude agents", () => {
     };
     expect(sentMessageItem(call, { to: "gone" }, { msg_id: "m" }, peers(emptyHome(), { receivers: { m: SENDER } }))).toEqual(chat);
     expect(sentMessageItem(call, { to: "work-8c [5bc12a]" }, undefined, peers(home))).toEqual(chat);
+    // A reply goes to the address the message came from.
+    expect(sentMessageItem(call, { to: "uds:/tmp/cc-socks/1.sock" }, undefined, peers(home))).toEqual(chat);
     expect(sentMessageItem(call, { to: "work-99" }, { msg_id: "other" }, peers(home))).toBe(call);
     expect(sentMessageItem(call, {}, undefined, peers(home))).toBe(call);
   });

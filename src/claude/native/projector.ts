@@ -404,6 +404,7 @@ function errorMessage(records: readonly TranscriptChainRecord[]): string {
 /**
  * Prompts Claude took while a turn was running (Desktop's steer): live they fold into that turn, so here too. A prompt
  * sent to an idle session is dequeued right after its `enqueue`; a steer waits in the queue while the turn goes on.
+ * A message another agent sent waits there too (its record wraps what was queued) but starts a turn of its own.
  */
 function steeredPrompts(records: readonly TranscriptRecord[]): ReadonlySet<string> {
   const steered = new Set<string>();
@@ -416,11 +417,20 @@ function steeredPrompts(records: readonly TranscriptRecord[]): ReadonlySet<strin
         const entry = queue.shift();
         if (entry?.waited) taken.push(entry.content);
       }
-    } else if (record.type === "user" && taken.length && (peerOrigin(record.origin) || userText(record).trim() === taken[0])) {
-      // A message another agent sent waits in the queue too; it shows as a message of its own.
-      if (!peerOrigin(record.origin)) steered.add(record.uuid);
-      taken.shift();
-    } else if (record.type === "assistant" || record.type === "user") for (const entry of queue) entry.waited = true;
+      continue;
+    }
+    if (record.type === "user" && taken.length) {
+      const text = userText(record).trim();
+      const peer = peerOrigin(record.origin) !== undefined;
+      const index = taken.findIndex((content) => peer ? text.includes(content) : text === content);
+      if (index >= 0) {
+        taken.splice(index, 1);
+        // What else waited in the queue (a finished task's notification) is no prompt of the turn.
+        if (!peer && startsTurn(record)) steered.add(record.uuid);
+        continue;
+      }
+    }
+    if (record.type === "assistant" || record.type === "user") for (const entry of queue) entry.waited = true;
   }
   return steered;
 }
@@ -497,7 +507,10 @@ function projectTurns(
       else if (record.type === "attachment") {
         // A message sent mid-turn: Claude folds it into the running turn.
         const attachment = object(record.attachment);
-        if (attachment?.type === "queued_command" && attachment.commandMode === "prompt" && typeof attachment.prompt === "string") {
+        const peer = peerOrigin(attachment?.origin);
+        if (attachment?.type === "queued_command" && peer) {
+          items.push(peerMessageItem(string(attachment.source_uuid) ?? record.uuid, peer, string(attachment.prompt) ?? "", peers));
+        } else if (attachment?.type === "queued_command" && attachment.commandMode === "prompt" && typeof attachment.prompt === "string") {
           items.push({
             type: "userMessage", id: string(attachment.source_uuid) ?? record.uuid, clientId: null,
             content: [{ type: "text", text: attachment.prompt, text_elements: [] }],

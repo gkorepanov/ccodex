@@ -117,10 +117,16 @@ function siblingBlocks(
   return expanded;
 }
 
+/** A message another agent sent: a meta record Claude answers like a prompt, or (while it works) a queued command. */
+function peerMessage(record: TranscriptChainRecord): boolean {
+  if (record.type === "user") return record.origin?.kind === "peer";
+  const attachment = record.type === "attachment" ? record.attachment as { type?: unknown; origin?: { kind?: unknown } } | undefined : undefined;
+  return attachment?.type === "queued_command" && attachment.origin?.kind === "peer";
+}
+
 function visible(record: TranscriptChainRecord): boolean {
-  if (record.type !== "user" && record.type !== "assistant" && record.type !== "system") return false;
-  // A message another agent sent is a meta record Claude answers like a prompt.
-  const peer = record.type === "user" && record.origin?.kind === "peer";
+  const peer = peerMessage(record);
+  if (record.type !== "user" && record.type !== "assistant" && record.type !== "system" && !peer) return false;
   return (record.isMeta !== true || peer) && record.isSidechain !== true && !record.teamName;
 }
 

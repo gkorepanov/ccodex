@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import { stat } from "node:fs/promises";
+import { join } from "node:path";
 import {
   query, type CanUseTool, type PermissionMode, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -12,10 +14,10 @@ import {
 import { claudeContent, normalizeUserInput, userMessage } from "./inputMapper.js";
 import { completedToolItem } from "./native/projector.js";
 import { assistantBlockItemId } from "./native/ids.js";
-import { readTranscriptRecords } from "./native/records.js";
+import { readTranscriptRecords, type UserRecord } from "./native/records.js";
 import { userText } from "./native/summary.js";
 import { normalizeClaudeModelIdentifier } from "./modelSelection.js";
-import { peerMessageItem, peerOrigin, sentMessageItem, type Peers } from "./peers.js";
+import { peerKey, peerMessageItem, peerOrigin, sentMessageItem, type Peers } from "./peers.js";
 import { baseOptions } from "./sdk.js";
 import { proposedChanges, startTool, updateToolInput, type ActiveTool } from "./toolMapper.js";
 import type { ClaudeThreads } from "./threads.js";
@@ -56,6 +58,27 @@ interface BackgroundTask {
   readonly toolUseId: string | undefined;
   readonly description: string;
   readonly taskType: string | undefined;
+}
+
+/** The transcript's last prompt record (Claude writes it before it asks the model), not a tool result. */
+function lastPrompt(path: string): UserRecord | undefined {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const bytes = Buffer.alloc(Math.min(size, 262_144));
+    readSync(fd, bytes, 0, bytes.length, size - bytes.length);
+    const lines = bytes.toString("utf8").split("\n");
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      let record: UserRecord;
+      try { record = JSON.parse(lines[index]!); } catch { continue; }
+      if (record?.type !== "user") continue;
+      if (Array.isArray(record.message?.content) && record.message.content.some((block) => block.type === "tool_result")) continue;
+      return record;
+    }
+    return undefined;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 class Inbox implements AsyncIterable<SDKUserMessage> {
@@ -146,15 +169,16 @@ export class ClaudeSession {
   private readonly injections = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   private readonly turnWaiters = new Map<string, (status: string) => void>();
   private continuationTimer?: NodeJS.Timeout;
-  private idleTimer?: NodeJS.Timeout;
   private runningTimer?: NodeJS.Timeout;
   private exists: boolean;
   public compactSummary?: (summary: string) => void;
   private readonly codexTails = new Map<string, () => void>();
   /** Claude's task list (TaskCreate/TaskUpdate), sent like stock's plan updates: the client shows it as the turn's to-do list. */
   private readonly plan = new Map<string, { step: string; status: string }>();
-  /** Agent ids of the sub-agents this session started. */
-  private readonly children = new Set<string>();
+  /** Messages from other agents shown (peerKey), whichever of transcript and result told them first. */
+  private readonly peerMessages = new Set<string>();
+  /** The running turn's result came: Claude answering again means it took another prompt by itself. */
+  private afterResult = false;
 
   public constructor(
     private readonly host: ClaudeThreads,
@@ -176,7 +200,6 @@ export class ClaudeSession {
 
   private ensureQuery(): Query {
     if (this.sdk) return this.sdk;
-    clearTimeout(this.idleTimer);
     this.inbox = new Inbox();
     const settings = this.settings;
     const sdk = query({
@@ -250,21 +273,12 @@ export class ClaudeSession {
 
   /** Closes the query; the next turn resumes the session from disk. */
   public unload(): Promise<void> {
-    clearTimeout(this.idleTimer);
     const sdk = this.sdk;
     this.sdk = undefined;
     this.inbox?.close();
     this.inbox = undefined;
     sdk?.close();
     return this.consumed;
-  }
-
-  private scheduleUnload(): void {
-    clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => {
-      if (!this.turn && this.tasks.size === 0) this.unload();
-    }, this.host.config.idleTimeoutSeconds * 1_000);
-    this.idleTimer.unref();
   }
 
   // ---- inputs ----
@@ -383,9 +397,9 @@ export class ClaudeSession {
 
   /** `announced`: the provider switch already started the turn under this preallocated id. */
   private openTurn(id: string, input: UserInput[], clientId: string | null, hidden: boolean, announced = false): Turn {
-    clearTimeout(this.idleTimer);
     const turn = this.newTurnObject(id);
     this.turn = { id, startedAt: Date.now(), items: turn.items, resultSeen: false, interrupted: false, error: null };
+    this.afterResult = false;
     if (!announced) this.emit("turn/started", { threadId: this.threadId, turn: startedTurn(turn) });
     this.emit("thread/status/changed", { threadId: this.threadId, status: { type: "active", activeFlags: [] } });
     if (!hidden) {
@@ -445,8 +459,6 @@ export class ClaudeSession {
       this.emit("thread/queue/changed", { threadId: this.threadId });
       void this.startTurn({ input: next.input, clientUserMessageId: next.clientUserMessageId }).catch((error: unknown) =>
         this.host.logger.warn("claude.queue.start-failed", { threadId: this.threadId, error: String(error) }));
-    } else {
-      this.scheduleUnload();
     }
   }
 
@@ -478,6 +490,7 @@ export class ClaudeSession {
       this.host.subagentMessage(this, m);
       return;
     }
+    if (this.afterResult && (m.type === "stream_event" || m.type === "assistant")) this.continuedByPeer();
     switch (m.type) {
       case "stream_event": return this.onStream(m.event);
       case "assistant": return this.onAssistant(m);
@@ -524,29 +537,65 @@ export class ClaudeSession {
     this.itemCompleted(item);
   }
 
+  /** The session's sub-agents are its transcripts under `<session>/subagents` (a resumed session's earlier ones too). */
   private get peers(): Peers {
-    return { directory: this.host.catalog, children: this.children };
+    const session = this.host.catalog.get(this.threadId)?.path.replace(/\.jsonl$/u, "");
+    return {
+      directory: this.host.catalog,
+      children: { has: (agentId) => session !== undefined && /^[\w-]+$/u.test(agentId) && existsSync(join(session, "subagents", `agent-${agentId}.jsonl`)) },
+    };
+  }
+
+  /**
+   * Claude answers again right after a result, without going idle. When the prompt it took is a message another agent
+   * sent (a sub-agent's has no command uuid, so only the transcript tells), that message starts a turn, as in history.
+   */
+  private continuedByPeer(): void {
+    this.afterResult = false;
+    try {
+      const path = this.host.catalog.get(this.threadId)?.path;
+      const record = path ? lastPrompt(path) : undefined;
+      const origin = peerOrigin(record?.origin);
+      if (!record || !origin || !this.turn || this.turn.id === record.uuid || this.queued.length) return;
+      this.completeTurn();
+      this.ensureTurn(record.uuid);
+      this.showPeer(record.uuid, origin, userText(record));
+    } catch (error) {
+      this.host.logger.warn("claude.peer-message.unreadable", { threadId: this.threadId, error: String(error) });
+    }
+  }
+
+  private showPeer(id: string, origin: Record<string, unknown>, recordText: string): void {
+    const key = peerKey(origin, recordText);
+    if (!this.turn || this.peerMessages.has(key)) return;
+    this.peerMessages.add(key);
+    const item = peerMessageItem(id, origin, recordText, this.peers);
+    this.itemStarted(item);
+    this.itemCompleted(item);
   }
 
   /**
    * A command Claude started by itself may be a message another agent sent. The stream leaves that message out, so it
-   * is read back from the transcript as soon as Claude writes it there; until the turn's result, which tells it too.
+   * is read back from the transcript as soon as Claude writes it there (the result of the turn it starts tells it too).
    */
   private async showPeerMessage(uuid: string): Promise<void> {
     try {
       const path = this.host.catalog.get(this.threadId)?.path;
-      for (let attempt = 0; path && attempt < 10 && !this.turn?.resultSeen; attempt += 1) {
+      for (let attempt = 0; path && attempt < 10; attempt += 1) {
         const { size } = await stat(path);
         for await (const record of readTranscriptRecords(path, { start: Math.max(0, size - 262_144) })) {
-          if (record.type !== "user" || record.uuid !== uuid) continue;
-          const origin = peerOrigin(record.origin);
+          // Idle, Claude takes the message as a prompt of its own; working, as a queued command of the running turn.
+          const queued = record.type === "attachment" ? record.attachment as { type?: unknown; source_uuid?: unknown; origin?: unknown; prompt?: unknown } | undefined : undefined;
+          const prompt = record.type === "user" && record.uuid === uuid;
+          if (!prompt && !(queued?.type === "queued_command" && queued.source_uuid === uuid)) continue;
+          const origin = peerOrigin(prompt ? record.origin : queued!.origin);
           if (!origin) return;
-          this.ensureTurn(uuid);
-          if (this.turn!.resultSeen) return;
-          const item = peerMessageItem(uuid, origin, userText(record), this.peers);
-          this.itemStarted(item);
-          this.itemCompleted(item);
-          return;
+          // Taken as a prompt of its own right after a turn's result (no idle between): a turn of its own, as in history.
+          if (prompt && this.turn && this.turn.id !== uuid && this.turn.resultSeen && !this.queued.length) {
+            this.completeTurn();
+            this.ensureTurn(uuid);
+          }
+          return this.showPeer(uuid, origin, prompt ? userText(record) : String(queued!.prompt ?? ""));
         }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
@@ -781,10 +830,10 @@ export class ClaudeSession {
       if (!tool) continue;
       this.tools.delete(block.tool_use_id);
       const result = typeof m.tool_use_result === "object" && m.tool_use_result !== null ? m.tool_use_result : undefined;
-      const item = completedToolItem(tool, { record: { toolUseResult: result }, block }, this.settings.cwd);
+      // The result tells where a message went (its msg_id) when the call alone did not.
+      const item = completedToolItem({ ...tool, item: sentMessageItem(tool.item, tool.state.input, result, this.peers) }, { record: { toolUseResult: result }, block }, this.settings.cwd);
       if (item.type === "collabAgentToolCall" && item.tool === "spawnAgent" && item.receiverThreadIds.length) {
         this.host.subagentSpawned(this, item, result?.status === "async_launched");
-        if (typeof result?.agentId === "string") this.children.add(result.agentId);
       }
       this.itemCompleted(item);
       if (tool.state.name === "TaskCreate" || tool.state.name === "TaskUpdate") this.updatePlan(tool.state.input, result);
@@ -805,13 +854,10 @@ export class ClaudeSession {
   private onResult(m: any): void {
     if (!this.turn) return;
     this.turn.resultSeen = true;
-    // A turn a message from another agent started, which showPeerMessage could not read back.
+    this.afterResult = true;
+    // A turn a message from another agent started, unless showPeerMessage read it back already.
     const origin = peerOrigin(m.origin);
-    if (origin && !this.turn.items.some((item) => item.type === "userMessage")) {
-      const item = peerMessageItem(this.turn.id, origin, "", this.peers);
-      this.itemStarted(item);
-      this.itemCompleted(item);
-    }
+    if (origin) this.showPeer(this.turn.id, origin, "");
     this.costUsd += Number(m.total_cost_usd ?? 0);
     for (const [model, usage] of Object.entries<any>(m.modelUsage ?? {})) {
       if (usage?.contextWindow) this.host.contextWindows.set(normalizeClaudeModelIdentifier(model), Number(usage.contextWindow));
