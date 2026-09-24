@@ -525,7 +525,7 @@ const scenarios = {
     // Every visible 0.4 Claude thread that still has a transcript is listed under its 0.4 id (lineage parts aside).
     const backends = new Set(lineages.flatMap(([, segments]) => segments.map((segment) => segment.threadId)));
     const state04 = new DatabaseSync("/mig/state04/state.sqlite", { readOnly: true });
-    const missing = state04.prepare(`select id, claude_session_id session from threads where ephemeral = 0 and deletion_pending = 0
+    const missing = state04.prepare(`select id, claude_session_id session from threads where deletion_pending = 0
       and json_extract(thread_json, '$.parentThreadId') is null`).all()
       .filter((thread) => {
         const expected = meta.lineages[thread.id] ? thread.id : thread.session;

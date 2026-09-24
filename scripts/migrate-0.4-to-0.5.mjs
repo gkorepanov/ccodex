@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// One-off migration of CCodex 0.4 state (state.sqlite + handoffs.sqlite) to 0.5's meta.json. Throwaway quality:
-// run it once after installing 0.5 and before restarting the gateway. `--dry-run` only prints what it would do.
+// One-off migration of CCodex 0.4 state (state.sqlite + handoffs.sqlite) to 0.5's meta.json. `ccodex setup` runs it
+// once, before it activates 0.5 (0.4's state.sqlite is there, meta.json is not). `--dry-run` only prints what it would do.
 //
 // - Every 0.4 Claude thread keeps its id: meta.lineages[<0.4 id>] = [{ claude, <session id> }].
 // - Provider-switch lineages become segment lists; forks whose 0.4 id was no backend move to their current backend.
@@ -46,14 +46,14 @@ const records = (sessionId) => (restored.get(sessionId)?.content ?? readFileSync
   try { return line ? [JSON.parse(line)] : []; } catch { return []; }
 });
 
-const claudeThreads = new Map(state.prepare(`select id, claude_session_id, archived, ephemeral, deletion_pending, updated_at,
+const claudeThreads = new Map(state.prepare(`select id, claude_session_id, archived, deletion_pending, updated_at,
   json_extract(thread_json, '$.parentThreadId') parent, json_extract(thread_json, '$.name') name,
   json_extract(thread_json, '$.section') section, json_extract(thread_json, '$.sectionEnteredAt') section_entered_at
   from threads`).all().map((row) => [row.id, row]));
 
 // A turn's last record takes the uuid 0.4 kept for it, so provider-switch segments still end at that turn.
 for (const thread of state.prepare(`select id, claude_session_id, cwd, claude_code_version, coalesce(resolved_model, claude_model_value) model
-  from threads where claude_session_id is not null and ephemeral = 0 and deletion_pending = 0
+  from threads where claude_session_id is not null and deletion_pending = 0
   and json_extract(thread_json, '$.parentThreadId') is null`).all()) {
   const sessionId = thread.claude_session_id;
   if (transcripts.has(sessionId)) continue;
@@ -142,7 +142,7 @@ const sections = {};
 const named = [];
 for (const thread of claudeThreads.values()) {
   const sessionId = thread.claude_session_id;
-  if (thread.ephemeral || thread.deletion_pending || thread.parent || !transcripts.has(sessionId)) continue;
+  if (thread.deletion_pending || thread.parent || !transcripts.has(sessionId)) continue;
   if (!lineages[thread.id] && !lineageBackends.has(thread.id) && thread.id !== sessionId) {
     lineages[thread.id] = [{ provider: "claude", threadId: sessionId, lastTurnId: null }];
   }
@@ -154,8 +154,15 @@ for (const thread of claudeThreads.values()) {
   }
 }
 
-const archived04 = new Set([...claudeThreads.values()].filter((thread) => thread.archived).map((thread) => thread.claude_session_id));
+// 0.4 hid every stock backend of a lineage; one left out of all 0.5 lineages (a switch never kept) stays out of sight archived.
 const stockArchives = [];
+for (const { backend_thread_id: id } of handoffs?.prepare("select backend_thread_id from lineage_epochs where provider = 'stock'").all() ?? []) {
+  if (lineageBackends.has(id) || lineages[id] || stock.prepare("select archived from threads where id = ?").get(id)?.archived !== 0) continue;
+  log(`archive ${id} (a stock backend 0.4 hid, in no lineage)`);
+  stockArchives.push(["thread/archive", { threadId: id }]);
+}
+
+const archived04 = new Set([...claudeThreads.values()].filter((thread) => thread.archived).map((thread) => thread.claude_session_id));
 for (const [publicId, segments] of Object.entries(lineages)) {
   const row = segments.find((segment) => segment.threadId === publicId) ?? segments[0];
   const isArchived = (segment) => segment.provider === "codex"

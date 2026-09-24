@@ -199,7 +199,7 @@ export class NativeSessionCatalog {
     }));
     const entries = scanned.filter((entry): entry is CatalogEntry => entry !== undefined);
     this.entries = new Map(entries.map((entry) => [entry.path, entry]));
-    const threads = entries.filter((entry) => entry.state.hasConversation);
+    const threads = entries.filter((entry) => entry.state.hasFirstPrompt);
     const summaries = threads.map((entry) => entry.summary)
       .sort((left, right) => right.updatedAt - left.updatedAt || left.sessionId.localeCompare(right.sessionId));
     this.ordered = summaries;

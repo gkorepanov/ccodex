@@ -154,6 +154,23 @@ describe("native Claude session catalog", () => {
     }
   });
 
+  it("lists no session that only ran a local command", async () => {
+    const temporary = await temporaryCatalog();
+    try {
+      const sessionId = "86d884b5-889d-434a-9c4c-7a28bb049898";
+      const command = { ...prompt(sessionId), origin: undefined, message: { role: "user", content: "<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>" } };
+      await writeFile(join(temporary.project, `${sessionId}.jsonl`), line(command));
+      const catalog = new NativeSessionCatalog(temporary.projects);
+      await catalog.refresh();
+      expect(catalog.sessions().map((summary) => summary.sessionId)).toEqual([temporary.sessionId]);
+      await appendFile(join(temporary.project, `${sessionId}.jsonl`), line({ ...prompt(sessionId), uuid: "second" }));
+      await catalog.refresh();
+      expect(catalog.get(sessionId)?.preview).toBe("Synthetic prompt");
+    } finally {
+      await rm(temporary.root, { recursive: true });
+    }
+  });
+
   it("memoises projections by exact file identity", async () => {
     const temporary = await temporaryCatalog();
     try {

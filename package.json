@@ -36,7 +36,8 @@
     "examples/config.toml",
     "legal/LICENSES.md",
     "legal/THIRD_PARTY_NOTICES.md",
-    "scripts/migrate-0.4-to-0.5.mjs"
+    "scripts/migrate-0.4-to-0.5.mjs",
+    "config/compatibility.json"
   ],
   "scripts": {
     "build": "npm run build:ts && npm run build:relay",
