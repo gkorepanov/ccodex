@@ -75,6 +75,10 @@ export function productHome(): string {
   return expandHome(process.env.CCODEX_HOME ?? join(homedir(), ".ccodex"));
 }
 
+export function claudeHome(): string {
+  return process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+}
+
 export function codexHome(): string {
   return process.env.CODEX_HOME ?? join(homedir(), ".codex");
 }
@@ -125,7 +129,7 @@ export function loadConfig(): Config {
   return {
     codex,
     claudeBinary: process.env.CCODEX_CLAUDE_BINARY ?? file.claude_binary ?? bundledClaudeExecutable(),
-    claudeHome: process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
+    claudeHome: claudeHome(),
     productHome: home,
     dataDir: expandHome(process.env.CCODEX_DATA_DIR ?? file.data_dir ?? join(home, "state")),
     publicSocket: expandHome(process.env.CCODEX_SOCKET ?? file.public_socket

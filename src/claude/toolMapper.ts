@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { basename, extname, isAbsolute, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
+import { claudeHome } from "../config.js";
 import type { JsonValue, ThreadItem } from "../protocol/codex.js";
 import { bashCommandActions } from "./commandActions.js";
 
@@ -42,6 +43,13 @@ function imagePath(name: string, input: Record<string, unknown>, cwd: string): s
   return imageExtensions.has(extname(path).toLocaleLowerCase()) ? absolutePath(path, cwd) : undefined;
 }
 
+/** Claude's own file of a skill or command (the user's before the project's, as Claude picks), if it has one. */
+export function claudeSkillFile(name: string, cwd: string, home = claudeHome()): string | undefined {
+  const command = `${name.split(":").join("/")}.md`;
+  return [home, join(cwd, ".claude")].flatMap((root) => [join(root, "skills", name, "SKILL.md"), join(root, "commands", command)])
+    .find((file) => existsSync(file));
+}
+
 function nativeCommand(
   name: string,
   input: Record<string, unknown>,
@@ -71,6 +79,13 @@ function nativeCommand(
     const path = text(input.path) || null;
     const command = `Grep ${query}${path ? ` in ${path}` : ""}`;
     return { command, actions: [{ type: "search", command, query, path }] };
+  }
+  if (name === "Skill") {
+    // Stock has no skill tool: its model reads the skill's SKILL.md, which Desktop shows as "Read <name> skill".
+    const skill = text(input.skill);
+    if (!skill) return { command: "", actions: [] };
+    const command = `Skill ${skill}`;
+    return { command, actions: [{ type: "read", command, name: `${skill} skill`, path: claudeSkillFile(skill, cwd) ?? "" }] };
   }
   if (name === "ToolSearch") {
     const query = text(input.query);

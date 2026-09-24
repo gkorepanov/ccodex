@@ -6,7 +6,7 @@ import type { JsonObject, QueuedSubmissionLike, ThreadItem, TokenUsageBreakdown,
 import { invalidRequest } from "../protocol/codex.js";
 import { startedTurn } from "../protocol/turnPagination.js";
 import {
-  CODEX_MCP_TOOLS, codexMcpItem, tailCodexRollout,
+  CODEX_MCP_TOOLS, codexMcpItem, tailCodexRollout, type CodexTurnContext,
 } from "./codexRollout.js";
 import { claudeContent, normalizeUserInput, userMessage } from "./inputMapper.js";
 import { completedToolItem } from "./native/projector.js";
@@ -696,12 +696,25 @@ export class ClaudeSession {
       if (agentId) this.host.subagentActivity(`agent-${agentId}`);
       else if (this.turn) { this.itemStarted(item); this.itemCompleted(item); }
     };
-    if (typeof input.prompt === "string" && input.prompt) show(codexMcpItem(toolUseId, "prompt", { kind: "prompt", text: input.prompt }));
+    // The prompt shows once the journal tells what codex runs it with (or when the call ends without telling).
+    const prompt = typeof input.prompt === "string" ? input.prompt : "";
+    let promptShown = !prompt;
+    const showPrompt = (context?: CodexTurnContext) => {
+      if (promptShown) return;
+      promptShown = true;
+      show(codexMcpItem(toolUseId, "prompt", { kind: "prompt", text: prompt, context }));
+    };
     let said = 0;
-    this.codexTails.set(toolUseId, tailCodexRollout(toolUseId, toolName, input, (event) => {
+    const stop = tailCodexRollout(toolUseId, toolName, input, (event) => {
+      if (event.kind === "context") return showPrompt(event);
+      showPrompt();
       if (event.kind === "turnComplete") this.codexTails.get(toolUseId)?.();
       else show(codexMcpItem(toolUseId, said++, event));
-    }));
+    });
+    this.codexTails.set(toolUseId, () => {
+      stop();
+      showPrompt();
+    });
   }
 
   private onUser(m: any): void {

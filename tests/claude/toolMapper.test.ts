@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { completeTool, projectToolCompletion, startTool, updateToolInput } from "../../src/claude/toolMapper.js";
 
@@ -98,6 +101,22 @@ describe("Claude tool projection", () => {
       aggregatedOutput: "ENOENT: no such file", exitCode: 1,
     });
     expect(projected.completed.type).toBe("commandExecution");
+  });
+
+  it("shows a Skill call as stock shows a skill: a read of its SKILL.md, named after the skill", () => {
+    process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "ccodex-claude-"));
+    const cwd = mkdtempSync(join(tmpdir(), "ccodex-skill-"));
+    const file = join(cwd, ".claude", "skills", "dataviz", "SKILL.md");
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "---\nname: dataviz\n---\n");
+    const skill = (name: string) => startTool(0, { type: "tool_use", id: "tool-skill", name: "Skill", input: { skill: name } }, cwd, "thread-1").item;
+    expect(skill("dataviz")).toMatchObject({
+      type: "commandExecution", command: "Skill dataviz",
+      commandActions: [{ type: "read", command: "Skill dataviz", name: "dataviz skill", path: file }],
+    });
+    // Claude's bundled skills have no file of their own.
+    expect(skill("simplify")).toMatchObject({ commandActions: [{ type: "read", name: "simplify skill", path: "" }] });
+    rmSync(cwd, { recursive: true });
   });
 
   it("keeps non-image Reads as command actions", () => {

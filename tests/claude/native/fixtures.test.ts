@@ -19,7 +19,7 @@ describe("native Claude fixtures", () => {
     expect(first.turns.map((turn) => turn.items.map((item) => item.id)))
       .toEqual(second.turns.map((turn) => turn.items.map((item) => item.id)));
     expect(first.turns[0]!.items.map((item) => item.type)).toEqual([
-      "userMessage", "reasoning", "dynamicToolCall", "reasoning", "agentMessage",
+      "userMessage", "reasoning", "commandExecution", "reasoning", "agentMessage",
       "collabAgentToolCall", "reasoning", "agentMessage",
     ]);
   });

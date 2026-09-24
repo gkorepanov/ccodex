@@ -464,7 +464,7 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     const threadId = await claudeThread();
     const before = client.messages.length;
     await client.turn(threadId, "ask codex: DIG");
-    const codex = ["◆ CCodex │ Codex MCP prompt\n\nDIG", "◆ CCodex │ Codex MCP message\n\ncodex says: DIG"];
+    const codex = ["◆ CCodex │ Codex MCP prompt · gpt-6-sol · high\n\nDIG", "◆ CCodex │ Codex MCP message\n\ncodex says: DIG"];
     const live = client.messages.slice(before).filter((message) => message.method === "item/completed" && message.params.item.text?.startsWith("◆"))
       .map((message) => message.params.item);
     expect(live.map((item) => item.text)).toEqual(codex);
@@ -485,7 +485,7 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     await client.waitFor("turn/completed", (params) => params.threadId === childId);
     const shown = client.notifications("item/completed", childId).map((message) => message.params.item)
       .map((item) => item.type === "agentMessage" ? item.text : item.type === "userMessage" ? `user:${item.content[0].text}` : item.type);
-    const conversation = ["user:DIG", "mcpToolCall", "◆ CCodex │ Codex MCP prompt\n\nDIG", "◆ CCodex │ Codex MCP message\n\ncodex says: DIG", "Codex is done"];
+    const conversation = ["user:DIG", "mcpToolCall", "◆ CCodex │ Codex MCP prompt · gpt-6-sol · high\n\nDIG", "◆ CCodex │ Codex MCP message\n\ncodex says: DIG", "Codex is done"];
     expect([...new Set(shown)]).toEqual(conversation);
     const { thread: child } = await client.request("thread/read", { threadId: childId, includeTurns: true });
     expect(itemsOf(child.turns)).toEqual(["user:DIG", "mcpToolCall", ...conversation.slice(2).map((text) => `agent:${text}`)]);

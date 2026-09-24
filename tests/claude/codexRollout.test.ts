@@ -44,6 +44,15 @@ describe("parseRolloutChunk", () => {
     ]);
   });
 
+  it("maps a turn's context: the model and reasoning effort codex runs it with", () => {
+    const chunk = line({ type: "turn_context", payload: { cwd: "/work", model: "gpt-6-sol", effort: "high", summary: "none" } })
+      + line({ type: "turn_context", payload: { cwd: "/work", model: "gpt-6-luna" } });
+    expect(parseRolloutChunk("", chunk).events).toEqual([
+      { kind: "context", model: "gpt-6-sol", effort: "high" },
+      { kind: "context", model: "gpt-6-luna", effort: null },
+    ]);
+  });
+
   it("buffers partial lines across chunks and survives malformed lines", () => {
     const full = line({ type: "event_msg", payload: { type: "agent_message", message: "split" } });
     const first = parseRolloutChunk("", `not json\n${full.slice(0, 25)}`);

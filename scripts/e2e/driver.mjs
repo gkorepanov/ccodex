@@ -317,7 +317,20 @@ const scenarios = {
     const tools = itemsOf((await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread.turns);
     check(tools.includes("mcpToolCall"), "mcp tool call item", tools);
     check(streamed.length > 0, "codex messages streamed into the thread", { answers: done.answers });
+    // The prompt names what codex ran it with (its journal's turn_context; no effort there = the model's default).
+    check(streamed.some((text) => new RegExp(`^◆ CCodex │ Codex MCP prompt · ${GPT}( · \\w+)?\n`, "u").test(text)), "prompt labelled with model and effort", streamed);
     return { streamed, tools, answers: done.answers };
+  },
+
+  /** Claude's Skill tool shows as stock shows a skill: a read of the skill's SKILL.md, named after it. */
+  async claudeSkillCall() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    const done = await client.turn(thread.id, "Use the Skill tool to load the workforce skill, then reply with just SKILL-OK.");
+    const skill = join(HOME, ".claude", "skills", "workforce", "SKILL.md");
+    const reads = (await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread.turns.flatMap((turn) => turn.items)
+      .filter((item) => item.type === "commandExecution").flatMap((item) => item.commandActions);
+    check(reads.some((action) => action.type === "read" && action.name === "workforce skill" && action.path === skill), "Skill call shown as a read of its SKILL.md", reads);
+    return { reads, answers: done.answers };
   },
 
   async interruptSteerQueue() {

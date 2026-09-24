@@ -85,6 +85,7 @@ function codexJournal(prompt: string): string {
   writeFileSync(join(directory, `rollout-2026-09-23T00-00-00-${threadId}.jsonl`),
     `${JSON.stringify({ type: "session_meta", payload: { id: threadId, timestamp: new Date().toISOString(), source: "mcp" } })}\n`
     + event({ type: "task_started" })
+    + `${JSON.stringify({ type: "turn_context", payload: { cwd: "/work", model: "gpt-6-sol", effort: "high", summary: "none" } })}\n`
     + event({ type: "item_completed", item: { type: "UserMessage", content: [{ type: "text", text: prompt }] } })
     + event({ type: "item_completed", item: { type: "AgentMessage", content: [{ type: "Text", text: `codex says: ${prompt}` }] } })
     + event({ type: "task_complete" }));

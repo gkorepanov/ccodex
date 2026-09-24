@@ -1,9 +1,10 @@
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { query, type ModelInfo, type Options, type PermissionMode, type Query, type SDKUserMessage, type SlashCommand } from "@anthropic-ai/claude-agent-sdk";
 import type { Config } from "../config.js";
 import type { JsonObject } from "../protocol/codex.js";
 import { modelCatalogValue, normalizeClaudeModelIdentifier } from "./modelSelection.js";
+import { claudeSkillFile } from "./toolMapper.js";
 
 export function claudeEnvironment(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env, CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1" };
@@ -142,9 +143,7 @@ export async function withProbeQuery<T>(config: Config, cwd: string | undefined,
  * built-in, plugin or MCP command has none and points at a note that it runs only in Claude chats.
  */
 export async function mapSkill(config: Config, cwd: string, skill: SlashCommand): Promise<JsonObject> {
-  const command = `${skill.name.split(":").join("/")}.md`;
-  const files = [config.claudeHome, join(cwd, ".claude")].flatMap((root) => [join(root, "skills", skill.name, "SKILL.md"), join(root, "commands", command)]);
-  let path = (await Promise.all(files.map((file) => access(file).then(() => file, () => null)))).find(Boolean);
+  let path = claudeSkillFile(skill.name, cwd, config.claudeHome);
   if (!path) {
     path = join(config.dataDir, "virtual", "claude-skills", encodeURIComponent(skill.name), "SKILL.md");
     await mkdir(dirname(path), { recursive: true });

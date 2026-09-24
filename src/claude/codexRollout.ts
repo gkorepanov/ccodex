@@ -10,9 +10,17 @@ export const CODEX_MCP_PROMPT_LABEL = "◆ CCodex │ Codex MCP prompt";
 export const CODEX_MCP_MESSAGE_LABEL = "◆ CCodex │ Codex MCP message";
 export const CODEX_MCP_REASONING_LABEL = "◆ CCodex │ Codex MCP reasoning";
 
+/** Model and reasoning effort a codex turn ran with (its journal's `turn_context`). */
+export interface CodexTurnContext {
+  readonly kind: "context";
+  readonly model: string;
+  readonly effort: string | null;
+}
+
 export type CodexRolloutEvent =
   | { readonly kind: "message"; readonly text: string }
   | { readonly kind: "reasoning"; readonly text: string }
+  | CodexTurnContext
   | { readonly kind: "turnComplete" };
 
 /** Locates the rollout journal for a codex MCP call; injectable for tests. */
@@ -133,8 +141,11 @@ export function defaultCodexRolloutLocator(sessionsDir = codexSessionsDir()): Co
 type RolloutLine = CodexRolloutEvent | { readonly kind: "turnStarted" } | { readonly kind: "prompt"; readonly text: string };
 
 function rolloutLine(line: string): RolloutLine | undefined {
-  let parsed: { type?: string; payload?: { type?: string; message?: unknown; text?: unknown; item?: { type?: string; content?: { text?: string }[]; summary_text?: string[] } } };
+  let parsed: { type?: string; payload?: { type?: string; message?: unknown; text?: unknown; model?: unknown; effort?: unknown; item?: { type?: string; content?: { text?: string }[]; summary_text?: string[] } } };
   try { parsed = JSON.parse(line) as typeof parsed; } catch { return undefined; }
+  if (parsed.type === "turn_context" && typeof parsed.payload?.model === "string") {
+    return { kind: "context", model: parsed.payload.model, effort: typeof parsed.payload.effort === "string" ? parsed.payload.effort : null };
+  }
   if (parsed.type !== "event_msg") return undefined;
   const payload = parsed.payload;
   if (payload?.type === "task_started") return { kind: "turnStarted" };
@@ -161,9 +172,10 @@ export function parseRolloutChunk(buffer: string, chunk: string): { rest: string
   return { rest: combined.slice(boundary + 1), events };
 }
 
-/** One codex turn of a journal: its prompt and what codex said. */
+/** One codex turn of a journal: its prompt, what it ran with and what codex said. */
 interface RolloutTurn {
   prompt?: string;
+  context?: CodexTurnContext;
   readonly events: CodexRolloutEvent[];
 }
 
@@ -179,7 +191,8 @@ function rolloutTurns(path: string): RolloutTurn[] {
     if (!event) continue;
     if (event.kind === "turnStarted") turns.push({ events: [] });
     else if (event.kind === "prompt" && turns.length) turns.at(-1)!.prompt ??= event.text;
-    else if (event.kind !== "prompt") turns.at(-1)?.events.push(event);
+    else if (event.kind === "context" && turns.length) turns.at(-1)!.context ??= event;
+    else if (event.kind !== "prompt" && event.kind !== "context") turns.at(-1)?.events.push(event);
   }
   turnCache.set(path, { size, turns });
   return turns;
@@ -188,11 +201,16 @@ function rolloutTurns(path: string): RolloutTurn[] {
 /** Journals of in-flight `mcp__codex__codex` calls (whose result, carrying the codex thread id, is not in yet). */
 const liveRollouts = new Map<string, string>();
 
-/** The item a codex MCP prompt, message or reasoning shows as; ids are shared by the live stream and history. */
-export function codexMcpItem(toolUseId: string, index: number | "prompt", event: CodexRolloutEvent | { kind: "prompt"; text: string }): ThreadItem {
-  const label = event.kind === "prompt" ? CODEX_MCP_PROMPT_LABEL : event.kind === "reasoning" ? CODEX_MCP_REASONING_LABEL : CODEX_MCP_MESSAGE_LABEL;
-  const text = "text" in event ? event.text : "";
-  return { type: "agentMessage", id: `${toolUseId}:codex:${index}`, text: `${label}\n\n${text}`, phase: "commentary", memoryCitation: null };
+/** The item a codex MCP prompt, message or reasoning shows as; ids are shared by the live stream and history. The
+ *  prompt names the model and effort codex ran it with, once its journal tells. */
+export function codexMcpItem(
+  toolUseId: string,
+  index: number | "prompt",
+  event: { kind: "message" | "reasoning"; text: string } | { kind: "prompt"; text: string; context?: CodexTurnContext | undefined },
+): ThreadItem {
+  const ran = event.kind === "prompt" && event.context ? [event.context.model, event.context.effort].filter(Boolean).map((part) => ` · ${part}`).join("") : "";
+  const label = event.kind === "prompt" ? `${CODEX_MCP_PROMPT_LABEL}${ran}` : event.kind === "reasoning" ? CODEX_MCP_REASONING_LABEL : CODEX_MCP_MESSAGE_LABEL;
+  return { type: "agentMessage", id: `${toolUseId}:codex:${index}`, text: `${label}\n\n${event.text}`, phase: "commentary", memoryCitation: null };
 }
 
 /**
@@ -207,18 +225,21 @@ export function codexMcpItems(
   locator: CodexRolloutLocator = defaultCodexRolloutLocator(),
 ): ThreadItem[] {
   const prompt = typeof input.prompt === "string" ? input.prompt : "";
-  const items = prompt ? [codexMcpItem(toolUseId, "prompt", { kind: "prompt", text: prompt })] : [];
   let threadId = typeof input.threadId === "string" ? input.threadId : undefined;
   try { threadId ??= (JSON.parse(result ?? "") as { threadId?: string }).threadId; } catch { /* not a codex result */ }
   const path = liveRollouts.get(toolUseId) ?? (threadId ? locator.byThreadId(threadId) : undefined);
-  if (!path) return items;
-  const key = `${path}\n${prompt}`;
-  const nth = seen.get(key) ?? 0;
-  seen.set(key, nth + 1);
   let turn: RolloutTurn | undefined;
-  try { turn = rolloutTurns(path).filter((candidate) => candidate.prompt === prompt)[nth]; } catch { return items; }
-  const said = (turn?.events ?? []).filter((event) => event.kind !== "turnComplete");
-  return [...items, ...said.map((event, index) => codexMcpItem(toolUseId, index, event))];
+  if (path) {
+    const key = `${path}\n${prompt}`;
+    const nth = seen.get(key) ?? 0;
+    seen.set(key, nth + 1);
+    try { turn = rolloutTurns(path).filter((candidate) => candidate.prompt === prompt)[nth]; } catch { /* the prompt alone */ }
+  }
+  const said = (turn?.events ?? []).filter((event): event is Extract<CodexRolloutEvent, { text: string }> => "text" in event);
+  return [
+    ...(prompt ? [codexMcpItem(toolUseId, "prompt", { kind: "prompt", text: prompt, context: turn?.context })] : []),
+    ...said.map((event, index) => codexMcpItem(toolUseId, index, event)),
+  ];
 }
 
 const claimedRollouts = new Set<string>();
