@@ -51,7 +51,9 @@ export interface ChainRecord {
 export interface UserRecord extends ChainRecord {
   readonly type: "user";
   readonly message: TranscriptMessage<UserContentBlock>;
-  readonly origin?: { readonly kind?: string };
+  readonly origin?: { readonly kind?: string; readonly [key: string]: unknown };
+  /** The prompt a record belongs to: the user's, or a message another agent sent (`origin.kind` "peer"). */
+  readonly promptId?: string;
   readonly isCompactSummary?: boolean;
   readonly isVisibleInTranscriptOnly?: boolean;
   readonly interruptedByShutdown?: boolean;

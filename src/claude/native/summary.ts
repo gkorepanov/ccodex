@@ -32,6 +32,9 @@ export interface TranscriptSummaryState extends TranscriptHeader {
    * a local command, nor a deleted one whose metadata (title, cost) Claude rewrote after closing it.
    */
   readonly hasFirstPrompt: boolean;
+  /** Cross-session messages (`msg_id`) the session sent (its SendMessage results) and got (peer records). */
+  readonly sentMessages: readonly string[];
+  readonly receivedMessages: readonly string[];
 }
 
 export function timestampSeconds(timestamp: string | undefined): number | null {
@@ -88,6 +91,8 @@ const EMPTY_STATE: TranscriptSummaryState = {
   goal: null,
   hasCreatedAt: false,
   hasFirstPrompt: false,
+  sentMessages: [],
+  receivedMessages: [],
 };
 
 function serviceTier(record: TranscriptRecord): string | null {
@@ -128,6 +133,10 @@ export class TranscriptSummarizer {
         this.state.hasFirstPrompt = true;
       }
       if (record.permissionMode !== undefined) this.state.permissionMode = record.permissionMode;
+      const sent = record.toolUseResult?.msg_id;
+      if (typeof sent === "string") this.state.sentMessages = [...this.state.sentMessages, sent];
+      const received = record.origin?.kind === "peer" ? record.origin.msg_id : undefined;
+      if (typeof received === "string") this.state.receivedMessages = [...this.state.receivedMessages, received];
     } else if (record.type === "assistant") {
       if (record.message.model !== undefined) this.state.model = record.message.model;
       if (record.effort !== undefined) this.state.reasoningEffort = record.effort;

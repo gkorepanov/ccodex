@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
 import {
   query, type CanUseTool, type PermissionMode, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -11,7 +12,10 @@ import {
 import { claudeContent, normalizeUserInput, userMessage } from "./inputMapper.js";
 import { completedToolItem } from "./native/projector.js";
 import { assistantBlockItemId } from "./native/ids.js";
+import { readTranscriptRecords } from "./native/records.js";
+import { userText } from "./native/summary.js";
 import { normalizeClaudeModelIdentifier } from "./modelSelection.js";
+import { peerMessageItem, peerOrigin, sentMessageItem, type Peers } from "./peers.js";
 import { baseOptions } from "./sdk.js";
 import { proposedChanges, startTool, updateToolInput, type ActiveTool } from "./toolMapper.js";
 import type { ClaudeThreads } from "./threads.js";
@@ -143,11 +147,14 @@ export class ClaudeSession {
   private readonly turnWaiters = new Map<string, (status: string) => void>();
   private continuationTimer?: NodeJS.Timeout;
   private idleTimer?: NodeJS.Timeout;
+  private runningTimer?: NodeJS.Timeout;
   private exists: boolean;
   public compactSummary?: (summary: string) => void;
   private readonly codexTails = new Map<string, () => void>();
   /** Claude's task list (TaskCreate/TaskUpdate), sent like stock's plan updates: the client shows it as the turn's to-do list. */
   private readonly plan = new Map<string, { step: string; status: string }>();
+  /** Agent ids of the sub-agents this session started. */
+  private readonly children = new Set<string>();
 
   public constructor(
     private readonly host: ClaudeThreads,
@@ -498,6 +505,16 @@ export class ClaudeSession {
       this.injections.delete(uuid);
     }
     const pending = uuid ? this.pendingInputs.get(uuid) : undefined;
+    // A command Claude started by itself (a message another agent sent): its turn has the id history gives it.
+    if (m.state === "started" && uuid && !pending && !this.injections.has(uuid)) {
+      clearTimeout(this.runningTimer);
+      if (!this.turn) this.ensureTurn(uuid);
+      void this.showPeerMessage(uuid);
+    }
+    if (m.state === "completed" && this.turn && this.turn.id === uuid && !this.turn.resultSeen) {
+      this.turn.resultSeen = true;
+      this.maybeComplete();
+    }
     if (m.state !== "started" || !pending) return;
     if (!this.turn) return this.ensureTurn(uuid);
     this.pendingInputs.delete(uuid!);
@@ -505,6 +522,37 @@ export class ClaudeSession {
     const item: ThreadItem = { type: "userMessage", id: uuid!, clientId: pending.clientId, content: pending.input };
     this.itemStarted(item);
     this.itemCompleted(item);
+  }
+
+  private get peers(): Peers {
+    return { directory: this.host.catalog, children: this.children };
+  }
+
+  /**
+   * A command Claude started by itself may be a message another agent sent. The stream leaves that message out, so it
+   * is read back from the transcript as soon as Claude writes it there; until the turn's result, which tells it too.
+   */
+  private async showPeerMessage(uuid: string): Promise<void> {
+    try {
+      const path = this.host.catalog.get(this.threadId)?.path;
+      for (let attempt = 0; path && attempt < 10 && !this.turn?.resultSeen; attempt += 1) {
+        const { size } = await stat(path);
+        for await (const record of readTranscriptRecords(path, { start: Math.max(0, size - 262_144) })) {
+          if (record.type !== "user" || record.uuid !== uuid) continue;
+          const origin = peerOrigin(record.origin);
+          if (!origin) return;
+          this.ensureTurn(uuid);
+          if (this.turn!.resultSeen) return;
+          const item = peerMessageItem(uuid, origin, userText(record), this.peers);
+          this.itemStarted(item);
+          this.itemCompleted(item);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    } catch (error) {
+      this.host.logger.warn("claude.peer-message.unreadable", { threadId: this.threadId, error: String(error) });
+    }
   }
 
   private onSystem(m: any): void {
@@ -517,7 +565,11 @@ export class ClaudeSession {
         if (m.state === "running") {
           clearTimeout(this.continuationTimer);
           this.continuationTimer = undefined;
-          if (!this.injections.size) this.ensureTurn();
+          // Claude started it by itself: the command it runs (announced right after) gives the turn its id.
+          if (!this.injections.size && !this.turn) {
+            clearTimeout(this.runningTimer);
+            this.runningTimer = setTimeout(() => { if (this.state !== "idle") this.ensureTurn(); }, 100);
+          }
         }
         if (m.state === "idle") this.maybeComplete();
         return;
@@ -681,6 +733,7 @@ export class ClaudeSession {
           item: { type: "fileChange", id: block.id, changes: [], status: "inProgress" } as ThreadItem,
         }
       : startTool(index, block, this.settings.cwd, this.threadId);
+    started.item = sentMessageItem(started.item, started.state.input, undefined, this.peers);
     if (block.name.startsWith("mcp__ccodex_goal__")) return;
     this.tools.set(block.id, started);
     this.itemStarted(started.item);
@@ -731,6 +784,7 @@ export class ClaudeSession {
       const item = completedToolItem(tool, { record: { toolUseResult: result }, block }, this.settings.cwd);
       if (item.type === "collabAgentToolCall" && item.tool === "spawnAgent" && item.receiverThreadIds.length) {
         this.host.subagentSpawned(this, item, result?.status === "async_launched");
+        if (typeof result?.agentId === "string") this.children.add(result.agentId);
       }
       this.itemCompleted(item);
       if (tool.state.name === "TaskCreate" || tool.state.name === "TaskUpdate") this.updatePlan(tool.state.input, result);
@@ -751,6 +805,13 @@ export class ClaudeSession {
   private onResult(m: any): void {
     if (!this.turn) return;
     this.turn.resultSeen = true;
+    // A turn a message from another agent started, which showPeerMessage could not read back.
+    const origin = peerOrigin(m.origin);
+    if (origin && !this.turn.items.some((item) => item.type === "userMessage")) {
+      const item = peerMessageItem(this.turn.id, origin, "", this.peers);
+      this.itemStarted(item);
+      this.itemCompleted(item);
+    }
     this.costUsd += Number(m.total_cost_usd ?? 0);
     for (const [model, usage] of Object.entries<any>(m.modelUsage ?? {})) {
       if (usage?.contextWindow) this.host.contextWindows.set(normalizeClaudeModelIdentifier(model), Number(usage.contextWindow));

@@ -3,6 +3,7 @@ import { isAbsolute, resolve } from "node:path";
 import type { Thread, ThreadItem, TokenUsageBreakdown, Turn, UserInput } from "../../protocol/codex.js";
 import { CODEX_MCP_TOOLS, codexMcpItems } from "../codexRollout.js";
 import { normalizeClaudeModelIdentifier } from "../modelSelection.js";
+import { NO_PEERS, peerMessageItem, peerOrigin, sentMessageItem, type PeerDirectory, type Peers } from "../peers.js";
 import {
   projectToolCompletion,
   startTool,
@@ -38,6 +39,8 @@ export interface ProjectTranscriptInput {
   readonly history?: SelectedHistory;
   readonly header?: TranscriptHeader;
   readonly parentThreadId?: string | null;
+  /** Links messages between sessions to their threads. */
+  readonly peers?: PeerDirectory;
   readonly subagent?: {
     readonly promptRecordUuid: string;
     readonly nickname: string;
@@ -245,14 +248,16 @@ function projectTool(
   cwd: string,
   threadId: string,
   completions: ReadonlyMap<string, ToolCompletion>,
+  peers: Peers,
 ): ThreadItem | undefined {
   if (block.name.startsWith("mcp__ccodex_goal__")) return undefined;
   const started = activeTool(blockIndex, block, cwd, threadId, record.timestamp);
   const completion = completions.get(block.id);
-  if (!completion) return started.item;
-  const result = completion.record.toolUseResult;
+  const result = completion?.record.toolUseResult;
+  const item = sentMessageItem(started.item, started.state.input, result, peers);
+  if (!completion) return item;
   return completedToolItem(
-    { state: { ...started.state, startedAtMs: Date.parse(record.timestamp) }, item: started.item },
+    { state: { ...started.state, startedAtMs: Date.parse(record.timestamp) }, item },
     { ...completion, record: { ...completion.record, toolUseResult: { ...result, duration_ms: typeof result?.duration_ms === "number" ? result.duration_ms : 0 } } },
     cwd,
   );
@@ -284,13 +289,14 @@ export function completedToolItem(
     const status = string(result?.status);
     item = {
       ...item,
-      receiverThreadIds: childId ? [childId] : [],
+      // A message (sendInput) keeps the sub-agent it went to.
+      receiverThreadIds: childId ? [childId] : item.receiverThreadIds,
       agentsStates: childId ? {
         [childId]: {
           status: status === "stopped" ? "interrupted" : completion.block.is_error ? "errored" : "completed",
           message: string(result?.description) ?? null,
         },
-      } : {},
+      } : item.agentsStates,
     };
   }
   return item;
@@ -335,6 +341,7 @@ function assistantItems(
   completions: ReadonlyMap<string, ToolCompletion>,
   toolResponses: ReadonlySet<string>,
   codexCalls: Map<string, number>,
+  peers: Peers,
 ): ThreadItem[] {
   let reasoning: Extract<ThreadItem, { type: "reasoning" }> | undefined;
   return responseBlocks(records).flatMap(({ record, block, apiBlockIndex }): ThreadItem[] => {
@@ -357,7 +364,7 @@ function assistantItems(
     }
     if (["tool_use", "server_tool_use", "mcp_tool_use"].includes(String(block.type))
       && typeof block.id === "string" && typeof block.name === "string") {
-      const item = projectTool(block as unknown as ToolUseBlock, apiBlockIndex, record, cwd, threadId, completions);
+      const item = projectTool(block as unknown as ToolUseBlock, apiBlockIndex, record, cwd, threadId, completions, peers);
       if (!item) return [];
       if (!CODEX_MCP_TOOLS.has(block.name)) return [item];
       const result = completions.get(block.id)?.block.content;
@@ -409,17 +416,33 @@ function steeredPrompts(records: readonly TranscriptRecord[]): ReadonlySet<strin
         const entry = queue.shift();
         if (entry?.waited) taken.push(entry.content);
       }
-    } else if (record.type === "user" && taken.length && userText(record).trim() === taken[0]) {
-      steered.add(record.uuid);
+    } else if (record.type === "user" && taken.length && (peerOrigin(record.origin) || userText(record).trim() === taken[0])) {
+      // A message another agent sent waits in the queue too; it shows as a message of its own.
+      if (!peerOrigin(record.origin)) steered.add(record.uuid);
       taken.shift();
     } else if (record.type === "assistant" || record.type === "user") for (const entry of queue) entry.waited = true;
   }
   return steered;
 }
 
+/** A message another agent sent starts a turn when Claude took it as a prompt of its own (a new `promptId`). */
 function turnStarts(records: readonly TranscriptChainRecord[], subagentPromptUuid: string | undefined, steered: ReadonlySet<string>): number[] {
-  return records.flatMap((record, index) =>
-    record.type === "user" && !steered.has(record.uuid) && startsTurn(record, subagentPromptUuid) ? [index] : []);
+  let promptId: string | undefined;
+  return records.flatMap((record, index) => {
+    if (record.type !== "user") return [];
+    const previous = promptId;
+    promptId = record.promptId ?? promptId;
+    if (steered.has(record.uuid)) return [];
+    const starts = peerOrigin(record.origin)
+      ? record.promptId === undefined || record.promptId !== previous
+      : startsTurn(record, subagentPromptUuid);
+    return starts ? [index] : [];
+  });
+}
+
+/** The session's sub-agents, from the results of the calls that started them. */
+function subagentIds(completions: ReadonlyMap<string, ToolCompletion>): Set<string> {
+  return new Set([...completions.values()].flatMap(({ record }) => string(record.toolUseResult?.agentId) ?? []));
 }
 
 function projectTurns(
@@ -428,9 +451,11 @@ function projectTurns(
   threadId: string,
   subagentPromptUuid: string | undefined,
   steered: ReadonlySet<string>,
+  directory: PeerDirectory,
 ): Turn[] {
   const starts = turnStarts(records, subagentPromptUuid, steered);
   const completions = toolCompletions(records);
+  const peers: Peers = { directory, children: subagentIds(completions) };
   const toolResponses = responseHasTools(records);
   const codexCalls = new Map<string, number>();
   const turns = starts.map((start, turnIndex) => {
@@ -440,8 +465,9 @@ function projectTurns(
     const input = userInputs(prompt);
     const hiddenCommand = input.length === 1 && input[0]?.type === "text"
       && /^\/(?:compact(?:\s|$)|goal clear$)/u.test(input[0].text);
-    const items: ThreadItem[] = hiddenCommand
-      ? []
+    const peer = peerOrigin(prompt.origin);
+    const items: ThreadItem[] = peer ? [peerMessageItem(prompt.uuid, peer, userText(prompt), peers)]
+      : hiddenCommand ? []
       : [{ type: "userMessage", id: prompt.uuid, clientId: null, content: input }];
     const responses = new Map<string, AssistantRecord[]>();
     for (const record of turnRecords) {
@@ -457,7 +483,10 @@ function projectTurns(
         const messageId = record.message.id!;
         if (projectedResponses.has(messageId)) continue;
         projectedResponses.add(messageId);
-        items.push(...assistantItems(responses.get(messageId)!, cwd, threadId, completions, toolResponses, codexCalls));
+        items.push(...assistantItems(responses.get(messageId)!, cwd, threadId, completions, toolResponses, codexCalls, peers));
+      }
+      else if (record.type === "user" && peerOrigin(record.origin)) {
+        items.push(peerMessageItem(record.uuid, peerOrigin(record.origin)!, userText(record), peers));
       }
       else if (record.type === "user" && steered.has(record.uuid)) {
         items.push({ type: "userMessage", id: record.uuid, clientId: null, content: userInputs(record) });
@@ -587,7 +616,7 @@ export async function projectTranscript(input: ProjectTranscriptInput): Promise<
   const selected = history.records;
   const header = input.header ?? summarizeTranscript(rawRecords, input.subagent?.promptRecordUuid);
   const steered = steeredPrompts(rawRecords);
-  const turns = projectTurns(selected, header.cwd, input.sessionId, input.subagent?.promptRecordUuid, steered);
+  const turns = projectTurns(selected, header.cwd, input.sessionId, input.subagent?.promptRecordUuid, steered, input.peers ?? NO_PEERS.directory);
   const nickname = input.subagent?.nickname ?? null;
   const parentThreadId = input.parentThreadId ?? null;
   const status: Thread["status"] = turns.at(-1)?.status === "inProgress"

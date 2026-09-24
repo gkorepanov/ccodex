@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, watch as watchFileSystem, type FSWatcher } from "node:fs";
 import { open, readdir, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import type { PeerDirectory } from "../peers.js";
 import { projectTranscript, type TranscriptProjection } from "./projector.js";
 import { readTranscriptRecords } from "./records.js";
 import {
@@ -70,7 +71,7 @@ async function hashHead(path: string, length: number): Promise<string> {
   }
 }
 
-export class NativeSessionCatalog {
+export class NativeSessionCatalog implements PeerDirectory {
   private readonly projectsDir: string;
   private entries = new Map<string, CatalogEntry>();
   private entriesBySessionId = new Map<string, CatalogEntry>();
@@ -79,6 +80,8 @@ export class NativeSessionCatalog {
   private bySessionId = new Map<string, SessionSummary>();
   private refreshInFlight: Promise<void> | undefined;
   private readonly projections = new Map<string, Promise<TranscriptProjection>>();
+  private senders = new Map<string, string>();
+  private receivers = new Map<string, string>();
   public bytesParsed = 0;
 
   public constructor(projectsDir: string) {
@@ -102,13 +105,20 @@ export class NativeSessionCatalog {
     return this.bySessionId.get(sessionId);
   }
 
+  public sender(msgId: string): string | undefined { return this.senders.get(msgId); }
+
+  public receiver(msgId: string): string | undefined { return this.receivers.get(msgId); }
+
+  public has(sessionId: string): boolean { return this.bySessionId.has(sessionId); }
+
   public async projection(sessionId: string, leafUuid?: string): Promise<TranscriptProjection> {
     const entry = this.entriesBySessionId.get(sessionId);
     if (!entry) throw new Error(`Unknown native Claude session: ${sessionId}`);
     const summary = entry.summary;
-    // The file itself, not the catalog's (debounced) view of it: a read right after a turn sees that turn.
+    // The file itself, not the catalog's (debounced) view of it: a read right after a turn sees that turn. Messages
+    // the catalog learns of later link a projection's messages to their threads.
     const { mtimeMs, size } = await stat(summary.path);
-    const key = `${summary.path}\0${mtimeMs}\0${size}\0${leafUuid ?? ""}`;
+    const key = `${summary.path}\0${mtimeMs}\0${size}\0${leafUuid ?? ""}\0${this.senders.size}\0${this.receivers.size}`;
     const cached = this.projections.get(key);
     if (cached) {
       this.projections.delete(key);
@@ -119,6 +129,7 @@ export class NativeSessionCatalog {
       sessionId,
       path: summary.path,
       header: summary,
+      peers: this,
       ...(leafUuid ? { leafUuid } : {}),
     });
     this.projections.set(key, projection);
@@ -205,6 +216,8 @@ export class NativeSessionCatalog {
     this.ordered = summaries;
     this.bySessionId = new Map(summaries.map((summary) => [summary.sessionId, summary]));
     this.entriesBySessionId = new Map(threads.map((entry) => [entry.sessionId, entry]));
+    this.senders = new Map(entries.flatMap((entry) => entry.state.sentMessages.map((id) => [id, entry.sessionId] as const)));
+    this.receivers = new Map(entries.flatMap((entry) => entry.state.receivedMessages.map((id) => [id, entry.sessionId] as const)));
   }
 
   private async discover(): Promise<DiscoveredFile[]> {

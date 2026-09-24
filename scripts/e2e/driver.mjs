@@ -284,6 +284,43 @@ const scenarios = {
     return { name: children[0].agentNickname, childItems, answers: done.answers };
   },
 
+  /**
+   * Claude chats message each other (SendMessage): the sender shows "Sent message to chat" linking to the receiver, the
+   * receiver a turn of its own opened by Desktop's "sent from another task" message linking back, live and in history.
+   * A message to a sub-agent of the chat shows as stock's "Messaged <agent>".
+   */
+  async peerMessages() {
+    const start = () => client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    const { thread: receiver } = await start();
+    await client.turn(receiver.id, "Remember the code word MANGO. Reply only: READY.");
+    const sessions = join(HOME, ".claude", "sessions");
+    const name = readdirSync(sessions).map((file) => JSON.parse(readFileSync(join(sessions, file), "utf8"))).find((session) => session.sessionId === receiver.id)?.name;
+    check(name, "the receiver's session is registered by name", readdirSync(sessions));
+    const { thread: sender } = await start();
+    const since = client.messages.length;
+    const sent = await client.turn(sender.id, `Use the SendMessage tool (load it with ToolSearch first) to send the Claude session named "${name}" exactly: What is your code word? Then stop; do not wait for an answer.`);
+    const received = await client.waitFor("turn/completed", (params) => params.threadId === receiver.id, 240_000, since);
+    const sentItems = (await client.request("thread/read", { threadId: sender.id, includeTurns: true })).thread.turns.flatMap((turn) => turn.items);
+    const toChat = sentItems.find((item) => item.type === "dynamicToolCall" && item.tool === "send_message_to_thread");
+    check(toChat?.namespace === "codex_app" && toChat.arguments.threadId === receiver.id && toChat.status === "completed", "the sender shows Sent message to chat, linking to the receiver", { sentItems, answers: sent.answers });
+    const delegation = (item) => item?.type === "userMessage" && item.content[0].text.startsWith("<codex_delegation>") && item.content[0].text.includes(`<source_thread_id>${sender.id}</source_thread_id>`);
+    const live = client.messages.slice(since).find((m) => m.method === "item/completed" && m.params.threadId === receiver.id && m.params.item.type === "userMessage")?.params;
+    check(delegation(live?.item), "live, the receiver's turn opens with the message, from the sender's chat", live);
+    const { thread: read } = await client.request("thread/read", { threadId: receiver.id, includeTurns: true });
+    const turn = read.turns.at(-1);
+    check(read.turns.length === 2 && delegation(turn.items[0]), "in history, the message opens a turn of its own", itemsOf(read.turns));
+    check(turn.id === live.turnId, "live and history agree on the turn", { live: live.turnId, history: turn.id });
+
+    const agent = await client.turn(sender.id, "Use the Agent tool with run_in_background: true, subagent_type general-purpose, no model parameter, description 'Kiwi keeper' and prompt 'Reply with the word READY.'. Right after, use SendMessage to send that agent (to: its agent id) the message 'The code word is KIWI.'. Then stop.", {}, 300_000);
+    const message = (item) => item.type === "collabAgentToolCall" && item.tool === "sendInput";
+    const liveActivity = client.messages.find((m) => m.method === "item/completed" && m.params.threadId === sender.id && message(m.params.item))?.params.item;
+    const spawned = client.messages.find((m) => m.method === "item/completed" && m.params.threadId === sender.id && m.params.item.tool === "spawnAgent")?.params.item.receiverThreadIds[0];
+    const historyActivity = (await client.request("thread/read", { threadId: sender.id, includeTurns: true })).thread.turns.flatMap((turn) => turn.items).find(message);
+    check(spawned && liveActivity?.receiverThreadIds[0] === spawned, "live, a message to a sub-agent goes to its thread (Messaged <agent>)", { liveActivity, spawned, answers: agent.answers });
+    check(historyActivity?.receiverThreadIds[0] === spawned, "in history too", historyActivity);
+    return { name, toChat: toChat.arguments, received: received.turn.id, message: live.item.content[0].text, activity: historyActivity };
+  },
+
   /** An image attached in Desktop (a local file) reaches Claude and stays on the user message. */
   async claudeImage() {
     const image = join(WORK, "red.png");

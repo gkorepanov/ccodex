@@ -119,7 +119,9 @@ function siblingBlocks(
 
 function visible(record: TranscriptChainRecord): boolean {
   if (record.type !== "user" && record.type !== "assistant" && record.type !== "system") return false;
-  return record.isMeta !== true && record.isSidechain !== true && !record.teamName;
+  // A message another agent sent is a meta record Claude answers like a prompt.
+  const peer = record.type === "user" && record.origin?.kind === "peer";
+  return (record.isMeta !== true || peer) && record.isSidechain !== true && !record.teamName;
 }
 
 export function selectHistory(input: readonly TranscriptRecord[], leafUuid?: string): SelectedHistory {
