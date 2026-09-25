@@ -82,5 +82,18 @@ describe("Claude going on after an answer: a turn of its own, as history shows i
     const next = await client.waitFor("turn/started", (params) => params.threadId === threadId && ![first.turn.id, holder.turn.id].includes(params.turn.id), 500);
     const prompt = await client.waitFor("item/completed", (params) => params.turnId === next.turn.id && params.item.type === "userMessage", 500);
     expect(prompt.item.content[0].text).toBe("and meanwhile?");
+    expect(fakeClaude.calls.some((call) => call.method === "stopTask")).toBe(false);
+  });
+
+  it("stops the background task with Claude when the waiting turn is stopped", async () => {
+    fakeClaude.backgroundMs = 3_000;
+    const threadId = await chat();
+    void client.turn(threadId, "watch in background: sleep 3");
+    const first = await client.waitFor("turn/completed", (params) => params.threadId === threadId);
+    const holder = await client.waitFor("turn/started", (params) => params.threadId === threadId && params.turn.id !== first.turn.id);
+    await client.request("turn/interrupt", { threadId, turnId: holder.turn.id });
+    const stopped = await client.waitFor("turn/completed", (params) => params.turn.id === holder.turn.id, 500);
+    expect(stopped.turn.status).toBe("interrupted");
+    expect(fakeClaude.calls.filter((call) => ["interrupt", "stopTask"].includes(call.method))).toEqual([{ method: "interrupt", args: [] }, { method: "stopTask", args: ["bg1"] }]);
   });
 });

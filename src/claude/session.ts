@@ -162,6 +162,8 @@ export class ClaudeSession {
   public turn: ActiveTurn | undefined;
   public state: "idle" | "running" | "requires_action" = "idle";
   public readonly tasks = new Map<string, BackgroundTask>();
+  /** Claude's sub-agents running (in the background they keep no turn open: each has a chat of its own). */
+  private readonly agents = new Set<string>();
   public queued: QueuedSubmissionLike[] = [];
   public totalUsage: TokenUsageBreakdown = EMPTY_USAGE;
   public lastUsage: TokenUsageBreakdown = EMPTY_USAGE;
@@ -333,6 +335,7 @@ export class ClaudeSession {
     this.inbox = undefined;
     this.state = "idle";
     this.tasks.clear();
+    this.agents.clear();
     if (this.turn) {
       this.turn.resultSeen = true;
       this.maybeComplete();
@@ -413,8 +416,12 @@ export class ClaudeSession {
       return;
     }
     this.host.gateway.cancelServerRequests(this.threadId);
-    await this.sdk.interrupt().catch(() => undefined);
-    if (this.state === "idle" && this.tasks.size === 0) {
+    // Stop stops all Claude runs: its background tasks and sub-agents too (a message sent meanwhile leaves them running).
+    const sdk = this.sdk;
+    await Promise.all([sdk.interrupt(), ...[...this.tasks.keys(), ...this.agents].map((id) => sdk.stopTask(id))].map((done) => done.catch(() => undefined)));
+    this.tasks.clear();
+    this.agents.clear();
+    if (this.state === "idle" && this.turn) {
       this.turn.resultSeen = true;
       this.maybeComplete();
     }
@@ -758,11 +765,13 @@ export class ClaudeSession {
         return;
       }
       case "task_started":
-        if (m.skip_transcript || m.ambient || m.task_type === "local_agent") return;
+        if (m.skip_transcript || m.ambient) return;
+        if (m.task_type === "local_agent") return void this.agents.add(m.task_id);
         this.tasks.set(m.task_id, { taskId: m.task_id, toolUseId: m.tool_use_id, description: m.description ?? "", taskType: m.task_type });
         return;
       case "task_notification":
         this.tasks.delete(m.task_id);
+        this.agents.delete(m.task_id);
         this.host.subagentFinished(`agent-${m.task_id}`);
         this.awaitWakeup();
         return;
@@ -928,7 +937,6 @@ export class ClaudeSession {
         }
       : startTool(index, block, this.settings.cwd, this.threadId);
     started.item = sentMessageItem(started.item, started.state.input, undefined, this.peers);
-    if (block.name.startsWith("mcp__ccodex_goal__")) return;
     this.tools.set(block.id, started);
     this.itemStarted(started.item);
   }

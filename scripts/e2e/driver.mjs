@@ -558,7 +558,20 @@ const scenarios = {
     const live = shape(liveTurns(thread.id, 0));
     const history = shape((await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread.turns);
     check(JSON.stringify(live) === JSON.stringify(history), "live turns are history's", { live, history });
-    return { turns: history };
+
+    // Stop stops everything: the command running in the background too.
+    const before = client.messages.length;
+    void client.turn(thread.id, `${TEST}Use the Bash tool with run_in_background set to true to run exactly: sleep 118; echo late. Do not wait for it: reply STARTED right away.`, {}, 240_000, 2).catch(() => undefined);
+    const started = await client.waitFor("turn/completed", (p) => p.threadId === thread.id, 120_000, before);
+    const waiting = await client.waitFor("turn/started", (p) => p.threadId === thread.id && p.turn.id !== started.turn.id, 30_000, before);
+    check(spawnSync("pgrep", ["-f", "sleep 118"]).status === 0, "the background command runs", {});
+    await client.request("turn/interrupt", { threadId: thread.id, turnId: waiting.turn.id });
+    const stopped = await client.waitFor("turn/completed", (p) => p.turn.id === waiting.turn.id, 15_000, before);
+    await sleep(8_000);
+    const after = client.messages.slice(before).filter((m) => m.method === "turn/started" && m.params.threadId === thread.id).map((m) => m.params.turn.id);
+    check(stopped.turn.status === "interrupted" && spawnSync("pgrep", ["-f", "sleep 118"]).status !== 0, "Stop stops the background command", { status: stopped.turn.status });
+    check(after.length === 2, "Claude says nothing more after Stop", { after, answers: answers(client, thread.id, before) });
+    return { turns: history, stopped: stopped.turn.status };
   },
 
   async compactRollbackManage() {

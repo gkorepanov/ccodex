@@ -249,8 +249,7 @@ function projectTool(
   threadId: string,
   completions: ReadonlyMap<string, ToolCompletion>,
   peers: Peers,
-): ThreadItem | undefined {
-  if (block.name.startsWith("mcp__ccodex_goal__")) return undefined;
+): ThreadItem {
   const started = activeTool(blockIndex, block, cwd, threadId, record.timestamp);
   const completion = completions.get(block.id);
   const result = completion?.record.toolUseResult;
@@ -371,7 +370,6 @@ function assistantItems(
     if (["tool_use", "server_tool_use", "mcp_tool_use"].includes(String(block.type))
       && typeof block.id === "string" && typeof block.name === "string") {
       const item = projectTool(block as unknown as ToolUseBlock, apiBlockIndex, record, cwd, threadId, completions, peers);
-      if (!item) return [];
       if (!CODEX_MCP_TOOLS.has(block.name)) return [item];
       const result = completions.get(block.id)?.block.content;
       return [item, ...codexMcpItems(block.id, object(block.input) ?? {}, result === undefined ? undefined : outputText(result), codexCalls)];
