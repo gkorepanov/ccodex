@@ -1,6 +1,6 @@
 /** Owns pure projection of selected Claude transcript history into Codex protocol objects. */
 import { isAbsolute, resolve } from "node:path";
-import type { Thread, ThreadItem, TokenUsageBreakdown, Turn, UserInput } from "../../protocol/codex.js";
+import type { JsonValue, Thread, ThreadItem, TokenUsageBreakdown, Turn, UserInput } from "../../protocol/codex.js";
 import { CODEX_MCP_TOOLS, codexMcpItems } from "../codexRollout.js";
 import { normalizeClaudeModelIdentifier } from "../modelSelection.js";
 import { NO_PEERS, peerMessageItem, peerOrigin, sentMessageItem, type PeerDirectory, type Peers } from "../peers.js";
@@ -299,7 +299,15 @@ export function completedToolItem(
       } : item.agentsStates,
     };
   }
-  return item;
+  // Claude reports a message it could not deliver as a result (`success: false` and why), not as an error.
+  const undelivered = state.name === "SendMessage" && result?.success === false ? string(result.message) ?? "Not delivered." : undefined;
+  if (!undelivered) return item;
+  const reason = [{ type: "inputText", text: undelivered }];
+  return item.type === "dynamicToolCall"
+    ? { ...item, status: "failed", success: false, contentItems: reason }
+    // A message to no known chat or agent: a sendInput has nowhere to show why, a plain tool call does.
+    : { type: "dynamicToolCall", id: item.id, namespace: null, tool: state.name, arguments: state.input as JsonValue,
+      status: "failed", contentItems: reason, success: false, durationMs: null };
 }
 
 function responseHasTools(records: readonly TranscriptChainRecord[]): ReadonlySet<string> {

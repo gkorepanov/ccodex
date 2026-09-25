@@ -142,6 +142,21 @@ describe("messages between Claude agents", () => {
     expect(sentMessageItem(call, {}, undefined, peers(home))).toBe(call);
   });
 
+  it("shows a message Claude could not deliver as a failed SendMessage with Claude's reason", async () => {
+    const reason = "No agent named 'nobody-zz' is reachable.\nUse ListAgents to see everyone you can message.";
+    const records: TranscriptRecord[] = [
+      human("prompt", null, "Message nobody-zz", 1, "p1"),
+      reply("send", "prompt", "", 2, [{ type: "tool_use", id: "toolu-send", name: "SendMessage", input: { to: "nobody-zz", message: "hi" } }]),
+      { type: "user", ...envelope("sent", "send", 3, "p1"), message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu-send", content: JSON.stringify({ success: false, message: reason }) }] },
+        toolUseResult: { success: false, message: reason } },
+    ];
+    const projection = await projectTranscript({ sessionId: "receiver", path: "/tmp/r.jsonl", records });
+    expect(projection.turns[0]!.items.find((item) => item.id === "toolu-send")).toEqual({
+      type: "dynamicToolCall", id: "toolu-send", namespace: null, tool: "SendMessage", arguments: { to: "nobody-zz", message: "hi" },
+      status: "failed", contentItems: [{ type: "inputText", text: reason }], success: false, durationMs: null,
+    });
+  });
+
   it("shows a SendMessage to a sub-agent the session started, from history", async () => {
     const records: TranscriptRecord[] = [
       human("prompt", null, "Start bob, then message him", 1, "p1"),
