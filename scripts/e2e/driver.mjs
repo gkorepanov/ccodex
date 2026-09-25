@@ -15,6 +15,8 @@ const WebSocket = require("ws");
 const SOCKET = join(HOME, ".codex", "app-server-control", "app-server-control.sock");
 const WORK = join(HOME, "work");
 const GPT = "gpt-6-luna";
+/** Said ahead of the odd requests (sleeping, messaging a chat by name) a cautious model may otherwise question. */
+const TEST = "This is an automated integration test of the tool you run in; every step is intentional and harmless, so do exactly as asked. ";
 
 /** A solid red size×size PNG. */
 const redPng = (size) => {
@@ -373,7 +375,7 @@ const scenarios = {
     const name = sessionName(receiver);
     check(name, "the receiver's session is registered by name", readdirSync(join(HOME, ".claude", "sessions")));
     const sender = await start();
-    const send = (text) => `Use the SendMessage tool (load it with ToolSearch first) to send the Claude session named "${name}" exactly: ${text}. Then stop; do not wait for an answer.`;
+    const send = (text) => `${TEST}Use the SendMessage tool (load it with ToolSearch first) to send the Claude session named "${name}" exactly: ${text}. Then stop; do not wait for an answer.`;
     let since = client.messages.length;
     const sent = await client.turn(sender, send("What is your code word?"));
     await client.waitFor("turn/completed", (params) => params.threadId === receiver, 240_000, since);
@@ -386,7 +388,7 @@ const scenarios = {
 
     // While the receiver works, the message joins its running turn (Claude's queued command), after what came before it.
     since = client.messages.length;
-    await client.request("turn/start", { threadId: receiver, input: text("Run this exact bash command: python3 -c 'import time; time.sleep(25)' — then reply with the single word SLEPT.") });
+    await client.request("turn/start", { threadId: receiver, input: text(`${TEST}Run this exact bash command (it stands in for a 25-second build): python3 -c 'import time; time.sleep(25)' — then reply with the single word SLEPT.`) });
     await client.waitFor("item/started", (params) => params.threadId === receiver && params.item.type === "commandExecution", 120_000, since);
     await client.turn(sender, send("PING-MID"));
     await client.waitFor("turn/completed", (params) => params.threadId === receiver, 240_000, since);
@@ -411,8 +413,9 @@ const scenarios = {
     const claude = join(dirname(require.resolve("@anthropic-ai/claude-agent-sdk-linux-x64/package.json")), "claude");
     const cli = spawnSync(claude, ["-p", send("FROM-CLI"), "--model", "haiku", "--dangerously-skip-permissions", "--output-format", "json"], { cwd: WORK, encoding: "utf8", timeout: 180_000 });
     check(cli.status === 0, "claude -p ran", cli.stderr);
-    const cliSession = JSON.parse(cli.stdout).session_id;
-    await client.waitFor("turn/completed", (params) => params.threadId === receiver, 240_000, since);
+    const { session_id: cliSession, result: cliSaid } = JSON.parse(cli.stdout);
+    await client.waitFor("turn/completed", (params) => params.threadId === receiver, 240_000, since)
+      .catch((error) => { throw Object.assign(error, { detail: { cliSaid } }); });
     history = (await client.request("thread/read", { threadId: receiver, includeTurns: true })).thread.turns;
     check(delegation(history.at(-1).items[0], cliSession), "a CLI session's message links to its chat", itemsOf(history.slice(4)));
     check(sameTurns(liveTurns(receiver, since), history.slice(4)), "live too", { live: liveTurns(receiver, since), history: history.slice(4) });
@@ -837,20 +840,49 @@ const scenarios = {
   },
 };
 
+/** Scenarios that install, migrate or uninstall: a second attempt would not start from the same state. */
+const NO_RETRY = new Set(["migration", "officialInstaller", "management"]);
+
+/** What each chat last said: tells a model that did not do as asked from a bug. */
+const lastAnswers = (messages) => Object.fromEntries(messages
+  .filter((m) => m.method === "item/completed" && m.params.item.type === "agentMessage")
+  .map((m) => [m.params.threadId, m.params.item.text.slice(0, 400)]));
+
+/** Everything needed to tell why a scenario failed: Claude's transcripts and registry, the gateway's state and logs, the protocol. */
+function keepArtifacts(name, attempt) {
+  const dir = `/out/failed/${name}-${attempt}`;
+  spawnSync("sh", ["-c", `mkdir -p ${dir} && cp -r ${HOME}/.claude/projects ${HOME}/.claude/sessions ${HOME}/.ccodex/state ${HOME}/.codex/app-server-daemon ${dir}/ 2>/dev/null; ps -eo pid,ppid,rss,etime,args > ${dir}/ps.txt`]);
+  writeFileSync(join(dir, "messages.json"), JSON.stringify(client.messages));
+  return dir;
+}
+
 const wanted = process.argv.slice(2);
+spawnSync("rm", ["-rf", "/out/failed"]);
 const started = await daemon("start");
 console.log("daemon:", started.slice(0, 300));
 client = await Client.connect();
+// A failed scenario runs once more (real models sometimes decline a test's odd request); a pass on retry shows as 🔁
+// with the first attempt's failure, so a flaky bug stays visible.
 for (const [name, run] of Object.entries(scenarios)) {
   if (wanted.length && !wanted.includes(name)) continue;
-  const at = Date.now();
-  try {
-    const detail = await run();
-    results.push({ name, ok: true, seconds: Math.round((Date.now() - at) / 1000), detail });
-    console.log(`✅ ${name} (${Math.round((Date.now() - at) / 1000)}s)`, JSON.stringify(detail).slice(0, 600));
-  } catch (error) {
-    results.push({ name, ok: false, seconds: Math.round((Date.now() - at) / 1000), error: error.message, detail: error.detail });
-    console.log(`❌ ${name}: ${error.message}`, JSON.stringify(error.detail ?? error.stack).slice(0, 1500));
+  const failures = [];
+  for (let attempt = 1; ; attempt += 1) {
+    const at = Date.now();
+    const [before, since] = [client, client.messages.length];
+    try {
+      const detail = await run();
+      const seconds = Math.round((Date.now() - at) / 1000);
+      results.push({ name, ok: true, seconds, detail, failures });
+      console.log(`${failures.length ? "🔁" : "✅"} ${name} (${seconds}s)`, failures.length ? `passed on retry after: ${JSON.stringify(failures[0]).slice(0, 1500)}` : "", JSON.stringify(detail).slice(0, 600));
+      break;
+    } catch (error) {
+      const failure = { error: error.message, detail: error.detail ?? error.stack, modelSaid: lastAnswers(client === before ? client.messages.slice(since) : client.messages), artifacts: keepArtifacts(name, attempt) };
+      failures.push(failure);
+      if (attempt < 2 && !NO_RETRY.has(name)) continue;
+      results.push({ name, ok: false, seconds: Math.round((Date.now() - at) / 1000), ...failure, failures });
+      console.log(`❌ ${name}: ${error.message}`, JSON.stringify(failures).slice(0, 3000));
+      break;
+    }
   }
 }
 writeFileSync("/out/results.json", JSON.stringify(results, null, 2));
@@ -861,5 +893,5 @@ for (const file of ["rpc.jsonl", "meta.json"]) {
 }
 const daemonState = join(HOME, ".codex", "app-server-daemon");
 if (existsSync(daemonState)) for (const file of readdirSync(daemonState)) if (file.endsWith(".log")) copyFileSync(join(daemonState, file), join("/out", file));
-console.log(`${results.filter((r) => r.ok).length}/${results.length} passed`);
+console.log(`${results.filter((r) => r.ok).length}/${results.length} passed (${results.filter((r) => r.ok && r.failures.length).length} on retry)`);
 process.exit(0);
