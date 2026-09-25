@@ -49,7 +49,7 @@ function hasDaemonChildHandshake(): boolean {
   return true;
 }
 
-function processExists(pid: number): boolean {
+export function processExists(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);

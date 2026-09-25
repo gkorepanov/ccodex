@@ -7,6 +7,7 @@ import type { Config } from "../config.js";
 import type { Connection } from "../gateway/connection.js";
 import type { Gateway } from "../gateway/server.js";
 import type { Logger } from "../log.js";
+import { packageVersion } from "../management/commands.js";
 import { invalidParams, invalidRequest, requestedModel, type JsonObject, type Thread, type Turn } from "../protocol/codex.js";
 import { historyCursors, paginateItems, paginateTurns, startedTurn } from "../protocol/turnPagination.js";
 import { normalizeUserInput } from "./inputMapper.js";
@@ -17,6 +18,7 @@ import { projectSubagents, type ProjectedSubagent } from "./native/subagents.js"
 import { readTranscriptRecords } from "./native/records.js";
 import { summarizeTranscript, userText, type TranscriptHeader } from "./native/summary.js";
 import { codexPermissions, mapClaudeModel, mapSkill, permissionModeFrom, withProbeQuery } from "./sdk.js";
+import { killProcesses, sessionProcesses } from "./processes.js";
 import { ClaudeSession, type SessionSettings } from "./session.js";
 
 interface SideThread {
@@ -36,6 +38,12 @@ interface RateLimitWindow {
 /** Claude's standard context window, until a session of the model reports its own. */
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const WINDOW_MINUTES: Record<string, number> = { five_hour: 300, seven_day: 10_080, seven_day_opus: 10_080, seven_day_sonnet: 10_080 };
+
+/**
+ * Stock unloads a thread after 30 minutes without subscribers or activity; a Claude chat's process goes the same way,
+ * unless a command it runs still works (e2e shortens the wait).
+ */
+const IDLE_MS = Number(process.env.CCODEX_E2E_IDLE_MS) || 30 * 60_000;
 
 /** The Claude side of the gateway: catalog of native sessions, live sessions, side chats, models, skills. */
 export class ClaudeThreads {
@@ -61,7 +69,7 @@ export class ClaudeThreads {
     public readonly gateway: Gateway,
     public readonly logger: Logger,
   ) {
-    this.catalog = new NativeSessionCatalog(join(config.claudeHome, "projects"));
+    this.catalog = new NativeSessionCatalog(join(config.claudeHome, "projects"), { path: join(config.dataDir, "claude-catalog.json"), key: packageVersion() });
   }
 
   public async start(): Promise<void> {
@@ -71,7 +79,7 @@ export class ClaudeThreads {
     this.gateway.meta.prune((segment) => segment.provider === "codex" || this.catalog.get(segment.threadId) !== undefined);
     const known = new Map(this.catalog.sessions().map((summary) => [summary.sessionId, summary.customTitle ?? summary.aiTitle]));
     // Sessions and titles changed outside CCodex (the claude CLI, /rename) show up without a reload.
-    this.stopWatching = this.catalog.watch(() => {
+    const announce = () => {
       for (const summary of this.catalog.sessions()) {
         const header = this.headerOf(summary, undefined);
         const name = header.customTitle ?? header.aiTitle;
@@ -83,11 +91,55 @@ export class ClaudeThreads {
         }
         known.set(id, name);
       }
-    });
+    };
+    this.stopWatching = this.catalog.watch(announce);
+    // What was written between the scan and the watch.
+    await this.catalog.refresh();
+    announce();
     void this.models().catch((error: unknown) => this.logger.warn("claude.models.unavailable", { error: String(error) }));
+    this.sweeper = setInterval(() => this.sweep(), Math.min(60_000, IDLE_MS / 4));
+    this.sweeper.unref();
+  }
+
+  /** CPU seconds each command of a loaded session used, and since when unchanged. */
+  private cpuSeen = new Map<number, { cpu: number; at: number }>();
+  private sweeper?: NodeJS.Timeout;
+
+  /**
+   * A turn that only waits for background commands that hung (no CPU for IDLE_MS) gets them ended: Claude learns
+   * their tasks ended and finishes it. A quiet session nobody watches is unloaded, with the idle commands it leaves.
+   */
+  private sweep(): void {
+    const now = Date.now();
+    const loaded = [...this.sessions.values()].filter((session) => session.loaded);
+    let processes;
+    try {
+      processes = loaded.length ? sessionProcesses() : [];
+    } catch (error) {
+      return void this.logger.warn("claude.processes.unreadable", { error: String(error) });
+    }
+    this.cpuSeen = new Map(processes.map((process) => {
+      const seen = this.cpuSeen.get(process.pid);
+      return [process.pid, seen?.cpu === process.cpu ? seen : { cpu: process.cpu, at: now }];
+    }));
+    for (const session of loaded) {
+      const own = processes.filter((process) => process.session === session.threadId).map((process) => process.pid);
+      if (own.some((pid) => now - this.cpuSeen.get(pid)!.at < IDLE_MS)) continue;
+      if (session.waitingOnTasks && own.length) {
+        this.logger.warn("claude.tasks.hung", { threadId: session.threadId, pids: own });
+        killProcesses(own);
+      } else if (session.quiet(now, IDLE_MS) && !this.gateway.subscribers(session.threadId)) {
+        this.logger.info("claude.unloaded", { threadId: session.threadId, pids: own });
+        this.sessions.delete(session.threadId);
+        void session.unload().then(() => killProcesses(own));
+        this.gateway.emit(session.threadId, "thread/status/changed", { threadId: session.threadId, status: { type: "notLoaded" } });
+        this.gateway.emit(session.threadId, "thread/closed", { threadId: session.threadId });
+      }
+    }
   }
 
   public async close(): Promise<void> {
+    clearInterval(this.sweeper);
     this.stopWatching?.();
     for (const session of this.sessions.values()) session.unload();
   }
@@ -508,9 +560,10 @@ export class ClaudeThreads {
       const cached = this.skillCache.get(cwd);
       if (!cached || Date.now() - cached.at > 5 * 60_000) {
         const skills = withProbeQuery(this.config, cwd, (probe) => probe.supportedCommands())
-          .then((commands) => Promise.all(commands.map((command) => mapSkill(this.config, cwd, command))))
-          .catch(() => []);
-        this.skillCache.set(cwd, { at: Date.now(), skills });
+          .then((commands) => Promise.all(commands.map((command) => mapSkill(this.config, cwd, command))));
+        // An outdated list answers at once while the fresh one loads.
+        this.skillCache.set(cwd, { at: Date.now(), skills: cached?.skills ?? skills.catch(() => []) });
+        if (cached) void skills.then((fresh) => this.skillCache.set(cwd, { at: Date.now(), skills: Promise.resolve(fresh) }), () => undefined);
       }
       return [cwd, await this.skillCache.get(cwd)!.skills] as const;
     }));
@@ -746,7 +799,17 @@ export class ClaudeThreads {
     const thread = this.decorate(this.freshThread(session));
     this.gateway.emit(threadId, "thread/started", { thread });
     this.gateway.titles.track(threadId);
+    this.prewarm(session);
     return { thread, ...this.settingsResponse(settings) };
+  }
+
+  /** The chat last opened gets Claude's process started ahead of its prompt (one such process at a time). */
+  private warmSession?: ClaudeSession;
+
+  private prewarm(session: ClaudeSession): void {
+    if (this.warmSession !== session) this.warmSession?.discardWarm();
+    this.warmSession = session;
+    session.prewarm();
   }
 
   /** A new session, not announced (thread/start announces it; a provider switch keeps it hidden). */
@@ -769,6 +832,7 @@ export class ClaudeThreads {
     const settings = thread.parentThreadId && thread.model
       ? { ...this.settings(threadId), cwd: thread.cwd, model: this.pickerModel(thread.model.slice(this.config.modelPrefix.length)) }
       : this.settings(threadId);
+    if (!thread.parentThreadId && this.catalog.get(threadId)) this.prewarm(this.session(threadId));
     const response: JsonObject = {
       thread: { ...thread, turns: params.excludeTurns ? [] : turns },
       ...this.settingsResponse(settings),

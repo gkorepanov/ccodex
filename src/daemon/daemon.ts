@@ -9,6 +9,7 @@ import {
   type PidRecord,
   daemonStateDirectory,
   killManagedProcess,
+  processExists,
   reconcileManagedProcess,
   spawnDetachedGateway,
   stopManagedProcess,
@@ -27,7 +28,7 @@ import {
 } from "./settings.js";
 
 const execFileAsync = promisify(execFile);
-const START_TIMEOUT_MS = 10_000;
+const START_TIMEOUT_MS = 30_000;
 const POLL_MS = 50;
 
 interface DaemonInvocation {
@@ -77,10 +78,11 @@ async function probeMaybe(socketPath: string): Promise<ProbeInfo | undefined> {
   }
 }
 
-async function waitUntilReady(socketPath: string): Promise<ProbeInfo> {
+/** Polls the socket until the app server answers; gives up at once when the process just spawned for it died. */
+async function waitUntilReady(socketPath: string, pid?: number): Promise<ProbeInfo> {
   const deadline = Date.now() + START_TIMEOUT_MS;
   let lastError: unknown;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && (pid === undefined || processExists(pid))) {
     try {
       return await probeAppServer(socketPath);
     } catch (error) {
@@ -168,7 +170,7 @@ class HybridDaemon {
   private async spawnReady(settings: DaemonSettings): Promise<{ pid: number; info: ProbeInfo }> {
     const expected = await this.spawn(settings);
     try {
-      const info = await waitUntilReady(this.paths.socketPath);
+      const info = await waitUntilReady(this.paths.socketPath, expected.pid);
       const current = reconcileManagedProcess(this.paths.pidFile);
       if (!current || current.pid !== expected.pid || current.processStartTime !== expected.processStartTime) {
         throw new Error(`managed app server ${expected.pid} lost daemon ownership during readiness`);

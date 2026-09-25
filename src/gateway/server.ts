@@ -51,6 +51,8 @@ export class Gateway {
   public lineages!: Lineages;
   public titles!: Titles;
   public remote!: RemoteControl;
+  /** Claude's sessions are known (the first scan is done): until then clients wait, past their handshake. */
+  public ready: Promise<void> = Promise.resolve();
   private stockProcess!: StockProcess;
   private readonly subscriptions = new Map<string, Set<Connection>>();
   private readonly serverRequests = new Map<string, PendingServerRequest>();
@@ -75,7 +77,11 @@ export class Gateway {
     this.lineages = new Lineages(this);
     this.titles = new Titles(this);
     this.remote = new RemoteControl(this.socketPath, this.logger, remoteControl);
-    await this.claude.start();
+    // The socket opens before the first scan: a client connects at once and its requests wait for it.
+    this.ready = this.claude.start().catch((error: unknown) => this.logger.error("claude.start.failed", { error: String(error) }));
+    // Desktop's first skills/list (no cwds: stock's own) finds Claude's skills ready.
+    void this.stock.request("skills/list", {})
+      .then((stock: JsonObject) => this.claude.skills(stock.data.map((entry: JsonObject) => entry.cwd)), () => undefined);
     this.registerHandlers();
     await this.remote.start();
   }

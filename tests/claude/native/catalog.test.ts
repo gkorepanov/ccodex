@@ -3,6 +3,7 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  readFile,
   rm,
   stat,
   writeFile,
@@ -57,9 +58,12 @@ describe("native Claude session catalog", () => {
     const catalog = new NativeSessionCatalog(fixtureProjects);
     await catalog.refresh();
 
+    // A session was last updated by its last timestamped record, not by its file's mtime.
     const expectedOrder = await Promise.all(fixtureIds.map(async (sessionId) => ({
       sessionId,
-      updatedAt: Math.floor((await stat(join(fixtureProject, `${sessionId}.jsonl`))).mtimeMs / 1_000),
+      updatedAt: Math.max(...(await readFile(join(fixtureProject, `${sessionId}.jsonl`), "utf8")).split("\n")
+        .flatMap((text) => text ? [JSON.parse(text).timestamp] : []).filter(Boolean)
+        .map((timestamp: string) => Math.floor(Date.parse(timestamp) / 1_000))),
     })));
     expectedOrder.sort((left, right) =>
       right.updatedAt - left.updatedAt || left.sessionId.localeCompare(right.sessionId));
@@ -106,6 +110,30 @@ describe("native Claude session catalog", () => {
 
       expect(catalog.get(temporary.sessionId)?.customTitle).toBe("Incremental synthetic title");
       expect(catalog.bytesParsed - parsedBefore).toBe(Buffer.byteLength(appended));
+    } finally {
+      await rm(temporary.root, { recursive: true });
+    }
+  });
+
+  it("keeps its summaries across restarts: a new catalog reads only what was written since", async () => {
+    const temporary = await temporaryCatalog();
+    const cache = { path: join(temporary.root, "catalog.json"), key: "1.0.0" };
+    try {
+      const first = new NativeSessionCatalog(temporary.projects, cache);
+      await first.refresh();
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      const appended = line({ type: "custom-title", customTitle: "Written while stopped", sessionId: temporary.sessionId });
+      await appendFile(temporary.path, appended);
+
+      const second = new NativeSessionCatalog(temporary.projects, cache);
+      await second.refresh();
+      expect(second.bytesParsed).toBe(Buffer.byteLength(appended));
+      // Claude appends records like this when it closes a session: it does not move the chat in the list.
+      expect(second.get(temporary.sessionId)).toEqual({ ...first.get(temporary.sessionId), customTitle: "Written while stopped", sizeBytes: expect.any(Number) });
+
+      const upgraded = new NativeSessionCatalog(temporary.projects, { ...cache, key: "1.0.1" });
+      await upgraded.refresh();
+      expect(upgraded.bytesParsed).toBe((await stat(temporary.path)).size);
     } finally {
       await rm(temporary.root, { recursive: true });
     }

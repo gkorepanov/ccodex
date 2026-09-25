@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  query, type CanUseTool, type PermissionMode, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage,
+  query, startup, type CanUseTool, type Options, type PermissionMode, type PermissionResult, type Query, type SDKMessage,
+  type SDKUserMessage, type WarmQuery,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { JsonObject, QueuedSubmissionLike, ThreadItem, TokenUsageBreakdown, Turn, UserInput } from "../protocol/codex.js";
 import { invalidRequest } from "../protocol/codex.js";
@@ -60,25 +61,37 @@ interface BackgroundTask {
   readonly taskType: string | undefined;
 }
 
-/** The transcript's last prompt record (Claude writes it before it asks the model), not a tool result. */
-function lastPrompt(path: string): UserRecord | undefined {
+/** The complete records Claude wrote from byte `start` on (at most the last 256 KB), and the byte they end at. */
+function recordsFrom(path: string, start: number): { records: any[]; end: number } {
   const fd = openSync(path, "r");
   try {
     const size = fstatSync(fd).size;
-    const bytes = Buffer.alloc(Math.min(size, 262_144));
-    readSync(fd, bytes, 0, bytes.length, size - bytes.length);
-    const lines = bytes.toString("utf8").split("\n");
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      let record: UserRecord;
-      try { record = JSON.parse(lines[index]!); } catch { continue; }
-      if (record?.type !== "user") continue;
-      if (Array.isArray(record.message?.content) && record.message.content.some((block) => block.type === "tool_result")) continue;
-      return record;
-    }
-    return undefined;
+    const from = Math.max(start, size - 262_144);
+    const bytes = Buffer.alloc(Math.max(0, size - from));
+    readSync(fd, bytes, 0, bytes.length, from);
+    const complete = bytes.lastIndexOf(0x0a) + 1;
+    const records = bytes.subarray(0, complete).toString("utf8").split("\n").flatMap((line) => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    });
+    return { records, end: from + complete };
   } finally {
     closeSync(fd);
   }
+}
+
+/** The transcript's last prompt record (Claude writes it before it asks the model), not a tool result. */
+function lastPrompt(path: string): UserRecord | undefined {
+  return recordsFrom(path, 0).records.findLast((record: UserRecord) => record?.type === "user"
+    && !(Array.isArray(record.message?.content) && record.message.content.some((block) => block.type === "tool_result")));
+}
+
+/** How long a process started ahead of a first prompt waits for it. */
+const WARM_MS = 10 * 60_000;
+
+interface WarmProcess {
+  readonly key: string;
+  query?: WarmQuery;
+  closed: boolean;
 }
 
 class Inbox implements AsyncIterable<SDKUserMessage> {
@@ -156,6 +169,10 @@ export class ClaudeSession {
   public costUsd = 0;
   public liveModel: string | null = null;
   private sdk?: Query;
+  /** Last sign of life: a message from Claude, a prompt, a command. */
+  private activeAt = Date.now();
+  /** Claude's scheduled wakeups (CronCreate, ScheduleWakeup, /loop) as of the last turn's end: the process must stay. */
+  private crons = 0;
   /** Settles once the query's process is gone: Claude writes its last transcript records on the way out. */
   private consumed: Promise<void> = Promise.resolve();
   private inbox?: Inbox;
@@ -179,6 +196,9 @@ export class ClaudeSession {
   private readonly peerMessages = new Set<string>();
   /** The running turn's result came: Claude answering again means it took another prompt by itself. */
   private afterResult = false;
+  private transcript?: string;
+  /** Where the transcript ended when the turn began, then as far as it was read for messages queued mid-turn. */
+  private transcriptRead = 0;
 
   public constructor(
     private readonly host: ClaudeThreads,
@@ -196,45 +216,86 @@ export class ClaudeSession {
 
   public get busy(): boolean { return this.turn !== undefined; }
 
+  /** A loaded process with nothing to do for `idleMs` (unloading it loses nothing: the next turn resumes from disk). */
+  public quiet(now: number, idleMs: number): boolean {
+    return this.sdk !== undefined && !this.turn && !this.queued.length && !this.injections.size && !this.crons && now - this.activeAt >= idleMs;
+  }
+
+  /** The turn has its answer and only waits for background tasks to end. */
+  public get waitingOnTasks(): boolean {
+    return this.turn?.resultSeen === true && this.state === "idle" && this.tasks.size > 0;
+  }
+
   // ---- lifecycle ----
+
+  /** The process started ahead of the first prompt (prewarm), and what it was started with. */
+  private warm?: WarmProcess;
+
+  private optionsKey(): string {
+    return JSON.stringify([this.settings, this.exists, this.resumeAt ?? null]);
+  }
+
+  /** Starts Claude's process before the first prompt, so that prompt does not wait for it; unused, it goes. */
+  public prewarm(): void {
+    if (this.sdk || this.warm) return;
+    const warm: WarmProcess = { key: this.optionsKey(), closed: false };
+    this.warm = warm;
+    void startup({ options: this.options() }).then(
+      (ready) => { if (warm.closed) ready.close(); else warm.query = ready; },
+      () => { if (this.warm === warm) this.warm = undefined; },
+    );
+    setTimeout(() => { if (this.warm === warm) this.discardWarm(); }, WARM_MS).unref();
+  }
+
+  public discardWarm(): void {
+    if (!this.warm) return;
+    this.warm.closed = true;
+    this.warm.query?.close();
+    this.warm = undefined;
+  }
 
   private ensureQuery(): Query {
     if (this.sdk) return this.sdk;
     this.inbox = new Inbox();
-    const settings = this.settings;
-    const sdk = query({
-      prompt: this.inbox,
-      options: {
-        ...baseOptions(this.host.config),
-        cwd: settings.cwd,
-        ...(settings.model ? { model: settings.model } : {}),
-        ...(settings.effort ? { effort: settings.effort as never } : {}),
-        ...(settings.fast ? { settings: { fastMode: true } } : {}),
-        permissionMode: settings.permissionMode,
-        // Claude 5 omits its thinking by default: summarized, it shows as the turn's reasoning summary like stock's.
-        extraArgs: { "thinking-display": "summarized" },
-        allowDangerouslySkipPermissions: true,
-        includePartialMessages: true,
-        ...(this.exists ? { resume: this.threadId } : { sessionId: this.threadId }),
-        ...(this.resumeAt ? { resumeSessionAt: this.resumeAt } : {}),
-        canUseTool: this.canUseTool,
-        onElicitation: async (request) => this.elicit(request),
-        hooks: {
-          PostCompact: [{ hooks: [async (input: any) => { this.compactSummary?.(String(input.compact_summary ?? "")); return {}; }] }],
-          PreToolUse: [{ matcher: "mcp__codex__.*", hooks: [async (input: any) => {
-            this.codexMcpCall(String(input.tool_name), input.tool_input ?? {}, String(input.tool_use_id), input.agent_id);
-            return {};
-          }] }],
-        },
-        stderr: (line) => this.host.logger.debug("claude.stderr", { threadId: this.threadId, line }),
-      },
-    });
+    const ready = this.warm?.key === this.optionsKey() ? this.warm.query : undefined;
+    if (ready) this.warm = undefined;
+    else this.discardWarm();
+    const sdk = ready ? ready.query(this.inbox) : query({ prompt: this.inbox, options: this.options() });
     this.sdk = sdk;
     this.exists = true;
     if (this.resumeAt) this.host.resumedAtLeaf(this.threadId);
     this.resumeAt = undefined;
     this.consumed = this.consume(sdk);
     return sdk;
+  }
+
+  private options(): Options {
+    const settings = this.settings;
+    return {
+      ...baseOptions(this.host.config),
+      cwd: settings.cwd,
+      ...(settings.model ? { model: settings.model } : {}),
+      ...(settings.effort ? { effort: settings.effort as never } : {}),
+      ...(settings.fast ? { settings: { fastMode: true } } : {}),
+      permissionMode: settings.permissionMode,
+      // Claude 5 omits its thinking by default: summarized, it shows as the turn's reasoning summary like stock's.
+      extraArgs: { "thinking-display": "summarized" },
+      allowDangerouslySkipPermissions: true,
+      includePartialMessages: true,
+      ...(this.exists ? { resume: this.threadId } : { sessionId: this.threadId }),
+      ...(this.resumeAt ? { resumeSessionAt: this.resumeAt } : {}),
+      canUseTool: this.canUseTool,
+      onElicitation: async (request) => this.elicit(request),
+      hooks: {
+        Stop: [{ hooks: [async (input: any) => { this.crons = Array.isArray(input.session_crons) ? input.session_crons.length : 0; return {}; }] }],
+        PostCompact: [{ hooks: [async (input: any) => { this.compactSummary?.(String(input.compact_summary ?? "")); return {}; }] }],
+        PreToolUse: [{ matcher: "mcp__codex__.*", hooks: [async (input: any) => {
+          this.codexMcpCall(String(input.tool_name), input.tool_input ?? {}, String(input.tool_use_id), input.agent_id);
+          return {};
+        }] }],
+      },
+      stderr: (line) => this.host.logger.debug("claude.stderr", { threadId: this.threadId, line }),
+    };
   }
 
   private async consume(sdk: Query): Promise<void> {
@@ -273,6 +334,7 @@ export class ClaudeSession {
 
   /** Closes the query; the next turn resumes the session from disk. */
   public unload(): Promise<void> {
+    this.discardWarm();
     const sdk = this.sdk;
     this.sdk = undefined;
     this.inbox?.close();
@@ -399,7 +461,13 @@ export class ClaudeSession {
   private openTurn(id: string, input: UserInput[], clientId: string | null, hidden: boolean, announced = false): Turn {
     const turn = this.newTurnObject(id);
     this.turn = { id, startedAt: Date.now(), items: turn.items, resultSeen: false, interrupted: false, error: null };
+    this.activeAt = Date.now();
     this.afterResult = false;
+    try {
+      this.transcriptRead = statSync(this.transcriptPath() ?? "").size;
+    } catch {
+      this.transcriptRead = 0;
+    }
     if (!announced) this.emit("turn/started", { threadId: this.threadId, turn: startedTurn(turn) });
     this.emit("thread/status/changed", { threadId: this.threadId, status: { type: "active", activeFlags: [] } });
     if (!hidden) {
@@ -486,6 +554,7 @@ export class ClaudeSession {
 
   private handle(message: SDKMessage): void {
     const m = message as any;
+    this.activeAt = Date.now();
     if (m.parent_tool_use_id) {
       this.host.subagentMessage(this, m);
       return;
@@ -539,7 +608,7 @@ export class ClaudeSession {
 
   /** The session's sub-agents are its transcripts under `<session>/subagents` (a resumed session's earlier ones too). */
   private get peers(): Peers {
-    const session = this.host.catalog.get(this.threadId)?.path.replace(/\.jsonl$/u, "");
+    const session = this.transcriptPath()?.replace(/\.jsonl$/u, "");
     return {
       directory: this.host.catalog,
       children: { has: (agentId) => session !== undefined && /^[\w-]+$/u.test(agentId) && existsSync(join(session, "subagents", `agent-${agentId}.jsonl`)) },
@@ -553,13 +622,40 @@ export class ClaudeSession {
   private continuedByPeer(): void {
     this.afterResult = false;
     try {
-      const path = this.host.catalog.get(this.threadId)?.path;
+      const path = this.transcriptPath();
       const record = path ? lastPrompt(path) : undefined;
       const origin = peerOrigin(record?.origin);
       if (!record || !origin || !this.turn || this.turn.id === record.uuid || this.queued.length) return;
       this.completeTurn();
       this.ensureTurn(record.uuid);
       this.showPeer(record.uuid, origin, userText(record));
+    } catch (error) {
+      this.host.logger.warn("claude.peer-message.unreadable", { threadId: this.threadId, error: String(error) });
+    }
+  }
+
+  /** The session's transcript: the catalog's, or (a new session it has not scanned yet) found among Claude's projects. */
+  private transcriptPath(): string | undefined {
+    const projects = join(this.host.config.claudeHome, "projects");
+    return this.transcript ??= this.host.catalog.get(this.threadId)?.path
+      ?? readdirSync(projects).map((key) => join(projects, key, `${this.threadId}.jsonl`)).find(existsSync);
+  }
+
+  /**
+   * Messages other agents sent while Claude worked join the running turn. A sub-agent's comes with no command in the
+   * stream: Claude writes it to the transcript before its next request, so it is read back as the next answer starts.
+   */
+  private showQueuedPeers(): void {
+    try {
+      const path = this.transcriptPath();
+      if (!path) return;
+      const { records, end } = recordsFrom(path, this.transcriptRead);
+      this.transcriptRead = end;
+      for (const record of records) {
+        const queued = record?.type === "attachment" && record.attachment?.type === "queued_command" ? record.attachment : undefined;
+        const origin = peerOrigin(queued?.origin);
+        if (origin) this.showPeer(String(queued.source_uuid ?? record.uuid), origin, String(queued.prompt ?? ""));
+      }
     } catch (error) {
       this.host.logger.warn("claude.peer-message.unreadable", { threadId: this.threadId, error: String(error) });
     }
@@ -580,7 +676,7 @@ export class ClaudeSession {
    */
   private async showPeerMessage(uuid: string): Promise<void> {
     try {
-      const path = this.host.catalog.get(this.threadId)?.path;
+      const path = this.transcriptPath();
       for (let attempt = 0; path && attempt < 10; attempt += 1) {
         const { size } = await stat(path);
         for await (const record of readTranscriptRecords(path, { start: Math.max(0, size - 262_144) })) {
@@ -681,6 +777,7 @@ export class ClaudeSession {
       case "message_start":
         this.flushResponse();
         this.ensureTurn();
+        this.showQueuedPeers();
         this.response = { id: event.message.id, hasTool: false, texts: new Map(), blockKinds: new Map() };
         return;
       case "content_block_start": return this.blockStart(event.index, event.content_block);

@@ -63,8 +63,8 @@ class Client {
   #next = 0;
   #pending = new Map();
 
-  static async connect(name = "codex_desktop") {
-    const socket = new WebSocket("ws://ccodex/rpc", { createConnection: () => createConnection(SOCKET), perMessageDeflate: false });
+  static async connect(name = "codex_desktop", path = SOCKET) {
+    const socket = new WebSocket("ws://ccodex/rpc", { createConnection: () => createConnection(path), perMessageDeflate: false });
     await new Promise((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
     const client = new Client(socket);
     await client.request("initialize", { clientInfo: { name, title: "E2E", version: "26.917.51856" }, capabilities: { experimentalApi: true } });
@@ -151,6 +151,36 @@ const scenarios = {
     const skills = await client.request("skills/list", { cwds: [WORK] });
     const limits = await client.request("account/rateLimits/read", {});
     return { models: state.models, skills: skills.data[0].skills.map((skill) => skill.name).slice(0, 20), limits: Object.keys(limits) };
+  },
+
+  /** What the gateway adds to each request Desktop makes on start, next to its own stock app-server (A/B). */
+  async latency() {
+    client.close();
+    let at = performance.now();
+    await daemon("restart");
+    const restartMs = Math.round(performance.now() - at);
+    client = await Client.connect();
+    const run = join(HOME, ".ccodex", "state", "run");
+    const stock = await Client.connect("codex_desktop", readdirSync(run).map((pid) => join(run, pid, "stock.sock")).find(existsSync));
+    const { thread } = await stock.request("thread/start", { model: GPT, cwd: WORK });
+    await stock.turn(thread.id, "Reply OK", { model: GPT });
+    const methods = [
+      ["model/list", { includeHidden: false }], ["skills/list", {}], ["plugin/list", {}], ["account/rateLimits/read", {}],
+      ["account/read", {}], ["config/read", {}], ["thread/list", { limit: 50 }], ["thread/read", { threadId: thread.id, includeTurns: true }],
+    ];
+    const rows = [];
+    for (const [method, params] of methods) {
+      const time = async (target) => { const start = performance.now(); await target.request(method, params); return performance.now() - start; };
+      const gateway = [], direct = [];
+      for (let round = 0; round < 7; round += 1) { direct.push(await time(stock)); gateway.push(await time(client)); }
+      const median = (values) => values.slice(1).sort((left, right) => left - right)[3];
+      rows.push({ method, stockMs: +median(direct).toFixed(1), gatewayMs: +median(gateway).toFixed(1), firstStockMs: Math.round(direct[0]), firstGatewayMs: Math.round(gateway[0]) });
+    }
+    stock.close();
+    // Methods stock answers from the network (plugins, rate limits) vary by hundreds of ms: reported, not checked.
+    const slow = rows.filter((row) => row.stockMs < 50 && row.gatewayMs > row.stockMs + 5);
+    check(!slow.length, "the gateway adds no noticeable latency", rows);
+    return { restartMs, rows };
   },
 
   async stockPassthrough() {
@@ -554,6 +584,52 @@ const scenarios = {
     tmux("kill-server");
     check(screen.includes("TUI-OK."), "TUI answered", screen);
     return { screen: screen.split("\n").filter((line) => line.trim()).slice(-12) };
+  },
+
+  /** Claude processes nobody uses go like stock's idle threads, never taking work that still runs with them. */
+  async idleUnload() {
+    client.close();
+    await daemon("restart", { ...process.env, CCODEX_E2E_IDLE_MS: "8000" });
+    client = await Client.connect();
+    try {
+      const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+      // A background command that computes for 25 s (3× the idle wait) finishes; one that sleeps is ended once idle.
+      let at = Date.now();
+      await client.turn(thread.id, "Use the Bash tool with run_in_background set to true to run exactly: timeout 25 sh -c 'while :; do :; done'; echo busy-done > /home/node/work/busy.txt\nThen reply STARTED at once, without waiting for it.");
+      const busySeconds = (Date.now() - at) / 1_000;
+      check(existsSync(join(WORK, "busy.txt")) && busySeconds >= 25, "a working background command runs to its end", busySeconds);
+      at = Date.now();
+      await client.turn(thread.id, "Use the Bash tool to run exactly: nohup sleep 600 >/dev/null 2>&1 & echo $! > /home/node/work/detached.pid\nThen use the Bash tool with run_in_background set to true to run exactly: sleep 600; echo slept > /home/node/work/hung.txt\nThen reply STARTED at once, without waiting for it.");
+      const hungSeconds = (Date.now() - at) / 1_000;
+      check(!existsSync(join(WORK, "hung.txt")) && hungSeconds < 120, "a hung background command is ended", hungSeconds);
+      const detached = Number(readFileSync(join(WORK, "detached.pid"), "utf8"));
+
+      // Nobody subscribed and nothing to do: unloaded, the command it detached lives on.
+      const since = client.messages.length;
+      await client.request("thread/unsubscribe", { threadId: thread.id });
+      await client.waitFor("thread/closed", (p) => p.threadId === thread.id, 60_000, since);
+      const status = (await client.request("thread/read", { threadId: thread.id })).thread.status.type;
+      check(status === "notLoaded", "unloaded", status);
+      check((() => { try { return process.kill(detached, 0); } catch { return false; } })(), "detached command survives");
+      process.kill(detached, "SIGKILL");
+      await client.request("thread/resume", { threadId: thread.id });
+      const again = await client.turn(thread.id, "Which file was the `timeout 25` command to write? Reply with its file name only.");
+      check(/busy\.txt/u.test(again.answers.join(" ")), "resumed with its history", again.answers);
+
+      // A session cron keeps its chat loaded.
+      const { thread: cron } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+      await client.turn(cron.id, "Use the CronCreate tool (load it with ToolSearch first if needed) to schedule the prompt 'Reply with the word TICK.' to run once per hour. Then reply DONE.");
+      check(/CronCreate/u.test(JSON.stringify(await items(cron.id))), "cron created", await items(cron.id));
+      const cronSince = client.messages.length;
+      await client.request("thread/unsubscribe", { threadId: cron.id });
+      await sleep(20_000);
+      check(!client.messages.slice(cronSince).some((m) => m.method === "thread/closed" && m.params.threadId === cron.id), "a chat with a cron stays loaded");
+      return { busySeconds, hungSeconds };
+    } finally {
+      client.close();
+      await daemon("restart");
+      client = await Client.connect();
+    }
   },
 
   async restartDeterminism() {

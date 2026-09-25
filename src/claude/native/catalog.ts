@@ -1,7 +1,7 @@
 /** Owns discovery, incremental summaries, projection caching, and filesystem watches for native sessions. */
 import { createHash } from "node:crypto";
-import { mkdirSync, watch as watchFileSystem, type FSWatcher } from "node:fs";
-import { open, readdir, stat } from "node:fs/promises";
+import { mkdirSync, readFileSync, watch as watchFileSystem, type FSWatcher } from "node:fs";
+import { open, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import type { PeerDirectory } from "../peers.js";
 import { projectTranscript, type TranscriptProjection } from "./projector.js";
@@ -42,7 +42,14 @@ interface DiscoveredFile {
   readonly hasSubagents: boolean;
 }
 
+/** Where the summaries are kept between runs; `key` (the package version) drops them when the summarizer may differ. */
+export interface CatalogCache {
+  readonly path: string;
+  readonly key: string;
+}
+
 const HEAD_BYTES = 4_096;
+const CACHE_WRITE_DELAY_MS = 1_000;
 const PROJECTION_CACHE_SIZE = 8;
 const WATCH_DEBOUNCE_MS = 250;
 
@@ -57,6 +64,15 @@ async function directoryExists(path: string): Promise<boolean> {
   } catch (error) {
     if (ignored(error)) return false;
     throw error;
+  }
+}
+
+function readCache(cache: CatalogCache): Map<string, CatalogEntry> {
+  try {
+    const file = JSON.parse(readFileSync(cache.path, "utf8")) as { key?: string; entries?: CatalogEntry[] };
+    return file.key === cache.key && Array.isArray(file.entries) ? new Map(file.entries.map((entry) => [entry.path, entry])) : new Map();
+  } catch {
+    return new Map();
   }
 }
 
@@ -83,9 +99,11 @@ export class NativeSessionCatalog implements PeerDirectory {
   private senders = new Map<string, string>();
   private receivers = new Map<string, string>();
   public bytesParsed = 0;
+  private cacheWrite?: NodeJS.Timeout;
 
-  public constructor(projectsDir: string) {
+  public constructor(projectsDir: string, private readonly cache?: CatalogCache) {
     this.projectsDir = resolve(projectsDir);
+    if (cache) this.entries = readCache(cache);
   }
 
   public refresh(_sessionId?: string): Promise<void> {
@@ -209,7 +227,10 @@ export class NativeSessionCatalog implements PeerDirectory {
       }
     }));
     const entries = scanned.filter((entry): entry is CatalogEntry => entry !== undefined);
+    const previous = this.entries;
     this.entries = new Map(entries.map((entry) => [entry.path, entry]));
+    if (entries.length !== previous.size || entries.some((entry) => previous.get(entry.path)?.offset !== entry.offset
+      || previous.get(entry.path)?.mtimeMs !== entry.mtimeMs)) this.writeCache();
     const threads = entries.filter((entry) => entry.state.hasFirstPrompt);
     const summaries = threads.map((entry) => entry.summary)
       .sort((left, right) => right.updatedAt - left.updatedAt || left.sessionId.localeCompare(right.sessionId));
@@ -218,6 +239,20 @@ export class NativeSessionCatalog implements PeerDirectory {
     this.entriesBySessionId = new Map(threads.map((entry) => [entry.sessionId, entry]));
     this.senders = new Map(entries.flatMap((entry) => entry.state.sentMessages.map((id) => [id, entry.sessionId] as const)));
     this.receivers = new Map(entries.flatMap((entry) => entry.state.receivedMessages.map((id) => [id, entry.sessionId] as const)));
+  }
+
+  /** Soon after a change, so a restart re-reads only what was written since. */
+  private writeCache(): void {
+    const cache = this.cache;
+    if (!cache || this.cacheWrite) return;
+    this.cacheWrite = setTimeout(() => {
+      this.cacheWrite = undefined;
+      const temporary = `${cache.path}.${process.pid}.tmp`;
+      void writeFile(temporary, JSON.stringify({ key: cache.key, entries: [...this.entries.values()] }), { mode: 0o600 })
+        .then(() => rename(temporary, cache.path))
+        .catch(() => undefined);
+    }, CACHE_WRITE_DELAY_MS);
+    this.cacheWrite.unref();
   }
 
   private async discover(): Promise<DiscoveredFile[]> {
@@ -302,7 +337,7 @@ export class NativeSessionCatalog implements PeerDirectory {
       headHash: await hashHead(file.path, headLength),
       state: summarizer.snapshot(),
       summary: {
-        ...summarizer.header(Math.floor(file.mtimeMs / 1_000)),
+        ...summarizer.header(),
         sessionId: file.sessionId,
         path: file.path,
         projectKey: file.projectKey,

@@ -25,6 +25,8 @@ export class Connection {
   /** Ephemeral threads this client is creating: only their creator hears of them (stock tells every client). */
   public readonly ephemeralRequests = new Set<RequestId>();
   private closed = false;
+  /** What the client sent past its handshake before the gateway was ready, in order. */
+  private backlog?: string[] = [];
 
   public constructor(
     private readonly gateway: Gateway,
@@ -37,6 +39,11 @@ export class Connection {
     client.on("error", () => this.close());
     upstream.onFrame = (text) => this.onStockText(text);
     upstream.onClose = () => this.close();
+    void gateway.ready.then(() => {
+      const backlog = this.backlog ?? [];
+      this.backlog = undefined;
+      for (const text of backlog) this.dispatch(text);
+    });
   }
 
   /** Everything to the client goes here; a switched thread's current backend id reads as its public id. */
@@ -76,6 +83,11 @@ export class Connection {
 
   private onClientText(text: string): void {
     this.gateway.recorder.frame(this.id, "client_to_gateway", text);
+    if (this.backlog && !/^\{(?:"id":[^,]*,)?"method":"initialized?"/u.test(text)) this.backlog.push(text);
+    else this.dispatch(text);
+  }
+
+  private dispatch(text: string): void {
     let message: JsonObject;
     try {
       message = JSON.parse(text) as JsonObject;
