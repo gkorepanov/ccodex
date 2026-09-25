@@ -207,6 +207,32 @@ const scenarios = {
     return { approvals, items, answers: done.answers };
   },
 
+  /** Claude's process starts ahead of a first prompt: a new chat's at once, an earlier chat's once it stayed open 10 s. */
+  async prewarm() {
+    const running = (flag, id) => spawnSync("pgrep", ["-f", `claude .*--${flag}=${id}`]).status === 0;
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    await sleep(4_000);
+    check(running("session-id", thread.id), "a new chat's process runs before its first prompt");
+    let at = Date.now();
+    const fresh = await client.turn(thread.id, "Reply with the single word WARM-NEW.");
+    const newMs = Date.now() - at;
+    check(fresh.answers.join(" ").includes("WARM-NEW"), "the new chat answers", fresh.answers);
+
+    client.close();
+    await daemon("restart");
+    client = await Client.connect();
+    await client.request("thread/resume", { threadId: thread.id });
+    await sleep(3_000);
+    check(!running("resume", thread.id), "an earlier chat just opened has no process yet");
+    await sleep(9_000);
+    check(running("resume", thread.id), "an earlier chat open for 10 s has its process");
+    at = Date.now();
+    const again = await client.turn(thread.id, "What single word did you reply before? Reply with it only.");
+    const resumedMs = Date.now() - at;
+    check(again.answers.join(" ").includes("WARM-NEW"), "the earlier chat answers knowing its history", again.answers);
+    return { newMs, resumedMs };
+  },
+
   async status() {
     const stock = await client.turn(state.stock, "/ccstatus");
     const claude = await client.turn(state.claude, "/ccstate");
@@ -602,6 +628,10 @@ const scenarios = {
       await client.turn(thread.id, "Use the Bash tool to run exactly: nohup sleep 600 >/dev/null 2>&1 & echo $! > /home/node/work/detached.pid\nThen use the Bash tool with run_in_background set to true to run exactly: sleep 600; echo slept > /home/node/work/hung.txt\nThen reply STARTED at once, without waiting for it.");
       const hungSeconds = (Date.now() - at) / 1_000;
       check(!existsSync(join(WORK, "hung.txt")) && hungSeconds < 120, "a hung background command is ended", hungSeconds);
+      // Stopped the way Claude's stop control does: Claude does not take it for a failure to retry.
+      await sleep(10_000);
+      const sleeps = (await items(thread.id)).filter((item) => item.type === "commandExecution" && /sleep 600;/u.test(item.command));
+      check(sleeps.length === 1, "the stopped command is not run again", sleeps.map((item) => item.command));
       const detached = Number(readFileSync(join(WORK, "detached.pid"), "utf8"));
 
       // Nobody subscribed and nothing to do: unloaded, the command it detached lives on.

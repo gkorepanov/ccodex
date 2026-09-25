@@ -226,6 +226,11 @@ export class ClaudeSession {
     return this.turn?.resultSeen === true && this.state === "idle" && this.tasks.size > 0;
   }
 
+  /** Stops the background tasks as Claude's own stop control does: Claude learns they were stopped, not that they failed. */
+  public async stopTasks(): Promise<void> {
+    await Promise.all([...this.tasks.keys()].map((taskId) => this.sdk!.stopTask(taskId)));
+  }
+
   // ---- lifecycle ----
 
   /** The process started ahead of the first prompt (prewarm), and what it was started with. */

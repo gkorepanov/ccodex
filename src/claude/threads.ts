@@ -108,8 +108,8 @@ export class ClaudeThreads {
   private sweeper?: NodeJS.Timeout;
 
   /**
-   * A turn that only waits for background commands that hung (no CPU for IDLE_MS) gets them ended: Claude learns
-   * their tasks ended and finishes it. A quiet session nobody watches is unloaded, with the idle commands it leaves.
+   * A turn that only waits for background commands that hung (no CPU for IDLE_MS) gets their tasks stopped: Claude
+   * learns they were stopped and finishes it. A quiet session nobody watches is unloaded, with the idle commands it leaves.
    */
   private sweep(): void {
     const now = Date.now();
@@ -130,7 +130,7 @@ export class ClaudeThreads {
       if (own?.some((pid) => now - this.cpuSeen.get(pid)!.at < IDLE_MS)) continue;
       if (session.waitingOnTasks && own?.length) {
         this.logger.warn("claude.tasks.hung", { threadId: session.threadId, pids: own });
-        killProcesses(own);
+        void session.stopTasks().catch(() => killProcesses(own));
       } else if (session.quiet(now, IDLE_MS) && !this.gateway.subscribers(session.threadId)) {
         this.logger.info("claude.unloaded", { threadId: session.threadId, pids: own });
         this.sessions.delete(session.threadId);
