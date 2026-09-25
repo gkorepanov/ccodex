@@ -140,7 +140,7 @@ export class ClaudeThreads {
     }));
     const own = (session: ClaudeSession) => processes?.filter((process) => process.session === session.threadId).map((process) => process.pid);
     const computing = (pids: number[] | undefined) => pids?.some((pid) => now - this.cpuSeen.get(pid)!.at < IDLE_MS) ?? false;
-    const idle = `${IDLE_MS / 60_000} min`;
+    const idle = IDLE_MS < 60_000 ? `${IDLE_MS / 1000} s` : `${Math.round(IDLE_MS / 60_000)} min`;
     for (const session of sessions) {
       const pids = own(session);
       if (computing(pids)) continue;
