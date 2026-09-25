@@ -12,7 +12,7 @@ export interface FakeClaudeLog {
   readonly calls: Array<{ method: string; args: unknown[] }>;
 }
 
-export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string; spawnError: string | null; compactError: string | null; hold: Promise<void> | null } = {
+export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string; spawnError: string | null; compactError: string | null; hold: Promise<void> | null; backgroundMs: number } = {
   prompts: [],
   options: [],
   calls: [],
@@ -23,6 +23,8 @@ export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) 
   compactError: null,
   /** Set: an injection (no model reply) is confirmed only once it settles, its record already on disk. */
   hold: null,
+  /** How long a background command runs after Claude's answer. */
+  backgroundMs: 500,
   reset() {
     this.prompts.length = 0;
     this.options.length = 0;
@@ -31,6 +33,7 @@ export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) 
     this.spawnError = null;
     this.compactError = null;
     this.hold = null;
+    this.backgroundMs = 500;
   },
 };
 
@@ -160,8 +163,43 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     yield* finish("");
     return;
   }
-  transcript.write({ type: "user", uuid, origin: { kind: "human" }, message: { role: "user", content: prompt.message.content } });
+  transcript.write({ type: "user", uuid, origin: { kind: "human" }, promptId: randomUUID(), message: { role: "user", content: prompt.message.content } });
   let reply = fakeClaude.reply(text);
+  const tool = (messageId: string, index: number, name: string, input: Message): Message => ({ type: "assistant", message: { id: messageId, role: "assistant", model: "claude-opus-5-5", content: [{ type: "tool_use", id: `toolu_${randomUUID().slice(0, 8)}`, name, input }], stop_reason: "tool_use", usage: { input_tokens: 5, output_tokens: 1 } }, apiBlockIndex: index });
+  const toolResult = function* (call: Message, output: string): Generator<Message> {
+    const content = [{ type: "tool_result", tool_use_id: call.message.content[0].id, content: output }];
+    transcript.write({ type: "user", message: { role: "user", content }, toolUseResult: { stdout: output, stderr: "" } });
+    yield base(sessionId, { type: "user", message: { role: "user", content }, tool_use_result: { stdout: output, stderr: "" } });
+  };
+  // Like Claude: a long message, then more work in the same response.
+  const report = /^report at length: (.+)$/u.exec(text);
+  if (report) {
+    const messageId = `msg_${randomUUID().slice(0, 8)}`;
+    const long = `${report[1]}: ${"all checks passed. ".repeat(50)}`;
+    yield base(sessionId, { type: "stream_event", event: { type: "message_start", message: { id: messageId } } });
+    yield base(sessionId, { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
+    yield base(sessionId, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: long } } });
+    const said = { type: "assistant", message: { id: messageId, role: "assistant", model: "claude-opus-5-5", content: [{ type: "text", text: long }], stop_reason: "tool_use", usage: { input_tokens: 10, output_tokens: 3 } }, apiBlockIndex: 0 };
+    transcript.write(said);
+    yield base(sessionId, said);
+    const call = tool(messageId, 1, "Bash", { command: "true" });
+    yield base(sessionId, { type: "stream_event", event: { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: call.message.content[0].id, name: "Bash", input: {} } } });
+    transcript.write(call);
+    yield base(sessionId, call);
+    yield base(sessionId, { type: "stream_event", event: { type: "message_stop" } });
+    yield* toolResult(call, "");
+    reply = "checked";
+  }
+  // Like Claude: a command in the background, whose end wakes Claude up after its answer (`fakeClaude.backgroundMs` later).
+  const background = /^watch in background: (.+)$/u.exec(text);
+  if (background) {
+    const call = tool(`msg_${randomUUID().slice(0, 8)}`, 0, "Bash", { command: background[1], run_in_background: true });
+    transcript.write(call);
+    yield base(sessionId, call);
+    yield base(sessionId, { type: "system", subtype: "task_started", task_id: "bg1", tool_use_id: call.message.content[0].id, description: background[1], task_type: "local_bash" });
+    yield* toolResult(call, "Command running in background with ID: bg1");
+    reply = "watching";
+  }
   const fileTool = text.includes("needs file approval");
   if (text.includes("needs approval") || fileTool) {
     const toolUseId = `toolu_${randomUUID().slice(0, 8)}`;
@@ -293,6 +331,22 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   // Streamed assistant messages never carry the stop reason (only the transcript does).
   yield base(sessionId, { ...assistant, message: { ...assistant.message, stop_reason: null } });
   yield* finish(reply);
+  if (!background) return;
+  await sleep(fakeClaude.backgroundMs);
+  yield base(sessionId, { type: "system", subtype: "background_tasks_changed", tasks: [] });
+  yield base(sessionId, { type: "system", subtype: "task_notification", task_id: "bg1", status: "completed", output_file: "", summary: background[1] });
+  yield base(sessionId, { type: "system", subtype: "session_state_changed", state: "running" });
+  transcript.write({ type: "user", origin: { kind: "task-notification" }, promptId: randomUUID(), message: { role: "user", content: `<task-notification>\n<task-id>bg1</task-id>\n<status>completed</status>\n</task-notification>` } });
+  const woken = `msg_${randomUUID().slice(0, 8)}`;
+  yield base(sessionId, { type: "stream_event", event: { type: "message_start", message: { id: woken } } });
+  yield base(sessionId, { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
+  yield base(sessionId, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "the task finished" } } });
+  yield base(sessionId, { type: "stream_event", event: { type: "message_stop" } });
+  const done = { type: "assistant", message: { id: woken, role: "assistant", model: "claude-opus-5-5", content: [{ type: "text", text: "the task finished" }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 3 } } };
+  transcript.write({ ...done, apiBlockIndex: 0 });
+  yield base(sessionId, done);
+  yield base(sessionId, { type: "result", subtype: "success", is_error: false, result: "the task finished", total_cost_usd: 0.01 });
+  yield base(sessionId, { type: "system", subtype: "session_state_changed", state: "idle" });
 }
 
 /** The SDK's prewarm: the process it starts runs the fake once it gets its prompt. */

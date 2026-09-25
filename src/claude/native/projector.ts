@@ -10,7 +10,7 @@ import {
   type ActiveTool,
 } from "../toolMapper.js";
 import { selectHistory, type SelectedHistory } from "./history.js";
-import { assistantBlockItemId } from "./ids.js";
+import { ANSWER_CHARS, assistantBlockItemId, continuationTurnId } from "./ids.js";
 import {
   isCompactBoundary,
   readTranscriptRecords,
@@ -441,19 +441,53 @@ function steeredPrompts(records: readonly TranscriptRecord[]): ReadonlySet<strin
   return steered;
 }
 
-/** A message another agent sent starts a turn when Claude took it as a prompt of its own (a new `promptId`). */
-function turnStarts(records: readonly TranscriptChainRecord[], subagentPromptUuid: string | undefined, steered: ReadonlySet<string>): number[] {
+interface TurnStart {
+  readonly index: number;
+  readonly id: string;
+  /** None when Claude went on after an answer by itself. */
+  readonly prompt?: UserRecord;
+}
+
+/**
+ * A message another agent sent starts a turn when Claude took it as a prompt of its own (a new `promptId`). Claude
+ * also goes on by itself after an answer, in a turn of its own named after that answer (live turns split the same
+ * way): with a finished task's notification it took after its result (a new `promptId`), or with more work after a
+ * message of an answer's length. A sub-agent's transcript is one turn.
+ */
+function turnStarts(records: readonly TranscriptChainRecord[], subagentPromptUuid: string | undefined, steered: ReadonlySet<string>): TurnStart[] {
+  const starts: TurnStart[] = [];
   let promptId: string | undefined;
-  return records.flatMap((record, index) => {
-    if (record.type !== "user") return [];
+  let lastBlock: string | undefined;
+  let answer = false;
+  const goOn = (index: number) => {
+    starts.push({ index, id: continuationTurnId(lastBlock!) });
+    lastBlock = undefined;
+  };
+  records.forEach((record, index) => {
+    if (record.type === "assistant" && starts.length && !subagentPromptUuid) {
+      assistantBlocks(record).forEach((block, position) => {
+        if (answer) goOn(index);
+        lastBlock = assistantBlockItemId(record.message.id!, (record.apiBlockIndex ?? 0) + position);
+        answer = block.type === "text" && typeof block.text === "string" && block.text.length >= ANSWER_CHARS;
+      });
+    }
+    if (record.type !== "user") return;
     const previous = promptId;
     promptId = record.promptId ?? promptId;
-    if (steered.has(record.uuid)) return [];
-    const starts = peerOrigin(record.origin)
+    if (steered.has(record.uuid)) return;
+    const prompt = peerOrigin(record.origin)
       ? record.promptId === undefined || record.promptId !== previous
       : startsTurn(record, subagentPromptUuid);
-    return starts ? [index] : [];
+    if (prompt) {
+      starts.push({ index, id: record.uuid, prompt: record });
+      lastBlock = undefined;
+      answer = false;
+    } else if (lastBlock && record.origin?.kind === "task-notification" && record.promptId !== previous) {
+      goOn(index);
+      answer = false;
+    }
   });
+  return starts;
 }
 
 /** The session's sub-agents, from the results of the calls that started them. */
@@ -474,16 +508,15 @@ function projectTurns(
   const peers: Peers = { directory, children: subagentIds(completions) };
   const toolResponses = responseHasTools(records);
   const codexCalls = new Map<string, number>();
-  const turns = starts.map((start, turnIndex) => {
-    const end = starts[turnIndex + 1] ?? records.length;
-    const prompt = records[start] as UserRecord;
+  const turns = starts.map(({ index: start, id, prompt }, turnIndex) => {
+    const end = starts[turnIndex + 1]?.index ?? records.length;
     const turnRecords = records.slice(start, end);
-    const input = userInputs(prompt);
+    const input = prompt ? userInputs(prompt) : [];
     const hiddenCommand = input.length === 1 && input[0]?.type === "text"
       && /^\/(?:compact(?:\s|$)|goal clear$)/u.test(input[0].text);
-    const peer = peerOrigin(prompt.origin);
-    const items: ThreadItem[] = peer ? [peerMessageItem(prompt.uuid, peer, userText(prompt), peers)]
-      : hiddenCommand ? []
+    const peer = peerOrigin(prompt?.origin);
+    const items: ThreadItem[] = peer ? [peerMessageItem(prompt!.uuid, peer, userText(prompt!), peers)]
+      : hiddenCommand || !prompt ? []
       : [{ type: "userMessage", id: prompt.uuid, clientId: null, content: input }];
     const responses = new Map<string, AssistantRecord[]>();
     for (const record of turnRecords) {
@@ -494,7 +527,7 @@ function projectTurns(
       responses.set(messageId, response);
     }
     const projectedResponses = new Set<string>();
-    for (const record of turnRecords.slice(1)) {
+    for (const record of prompt ? turnRecords.slice(1) : turnRecords) {
       if (record.type === "assistant") {
         const messageId = record.message.id!;
         if (projectedResponses.has(messageId)) continue;
@@ -525,13 +558,13 @@ function projectTurns(
       }
     }
     const status = turnStatus(turnRecords, turnIndex + 1 < starts.length);
-    const startedAt = timestampSeconds(prompt.timestamp);
+    const startedAt = timestampSeconds(turnRecords[0]!.timestamp);
     // A later local command (a model switch) trails the turn in the transcript without extending it.
-    const last = turnRecords.findLast((record) => record.type !== "user" || record === prompt
+    const last = turnRecords.findLast((record) => record.type !== "user" || record === turnRecords[0]
       || record.isMeta !== true && !/^<(?:command-name|local-command-)/u.test(userText(record)));
     const completedAt = status === "inProgress" ? null : timestampSeconds(last?.timestamp);
     return {
-      id: prompt.uuid,
+      id,
       items,
       itemsView: "full",
       status,
@@ -558,13 +591,12 @@ function projectTurnBoundaries(
   steered: ReadonlySet<string>,
 ): TurnProviderBoundary[] {
   const starts = turnStarts(records, subagentPromptUuid, steered);
-  return starts.flatMap((start, turnIndex) => {
-    const prompt = records[start] as UserRecord;
-    const range = records.slice(start + 1, starts[turnIndex + 1] ?? records.length);
+  return starts.map(({ index: start, id }, turnIndex) => {
+    const range = records.slice(start + 1, starts[turnIndex + 1]?.index ?? records.length);
     // A compaction that ends the turn (the next turn is the `/compact`) is not part of it: forks stay uncompacted.
     const compaction = range.findLastIndex((record) => isCompactBoundary(record));
     const kept = compaction >= 0 && !range.slice(compaction).some((record) => record.type === "assistant") ? range.slice(0, compaction) : range;
-    return [{ turnId: prompt.uuid, messageUuid: (kept.at(-1) ?? prompt).uuid }];
+    return { turnId: id, messageUuid: (kept.at(-1) ?? records[start]!).uuid };
   });
 }
 

@@ -533,6 +533,34 @@ const scenarios = {
     return { queuedId: queued.queuedSubmission.id, listed: listed.data.length, answers: answers(client, thread.id, since), turns: read.turns.map((t) => `${t.status}:${t.items.length}`) };
   },
 
+  /**
+   * Claude going on after an answer: a long message before more work ends its turn, and a background command's end
+   * wakes Claude in a turn that opened at the answer and stayed working meanwhile. Live turns are history's.
+   */
+  async continuedTurns() {
+    const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+    const shape = (turns) => turns.map((turn) => [turn.id, [...new Map(turn.items.filter((item) => item.type !== "reasoning").map((item) => [item.id, item])).values()]
+      .map((item) => item.type === "agentMessage" ? `agent:${item.text.length}` : item.type)]);
+    const report = await client.turn(thread.id, `${TEST}Write me an explanation of what a mutex is, at least 1200 characters long, as a message. Then, in the same reply, use the Bash tool to run \`echo hi\`. Then reply DONE.`, {}, 240_000, 2);
+    const split = liveTurns(thread.id, 0);
+    const long = shape(split)[0]?.[1].at(-1);
+    check(split.length === 2 && /^agent:\d{3,}$/u.test(long) && Number(long.slice(6)) >= 800, "the long message ends its turn", shape(split));
+    check(split[1].id.endsWith(":continued") && !split[1].items.some((item) => item.type === "userMessage") && /DONE/u.test(report.answers.at(-1)), "the work goes on in a turn with no prompt", shape(split));
+
+    const since = client.messages.length;
+    const watching = client.turn(thread.id, `${TEST}Use the Bash tool with run_in_background set to true to run exactly: sleep 15; echo bg-done. Do not wait for it: reply WATCHING right away. When it finishes, reply FINISHED.`, {}, 240_000, 2);
+    const answered = await client.waitFor("turn/completed", (p) => p.threadId === thread.id, 120_000, since);
+    const holder = await client.waitFor("turn/started", (p) => p.threadId === thread.id && p.turn.id !== answered.turn.id, 30_000, since);
+    const open = (await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread;
+    check(open.status.type === "active" && open.turns.at(-1).id === holder.turn.id && open.turns.at(-1).status === "inProgress", "a new turn keeps the chat working while the command runs", { status: open.status, last: open.turns.at(-1) });
+    const woken = await watching;
+    check(/FINISHED/u.test(woken.answers.at(-1)) && woken.turn.id === holder.turn.id, "the command's end wakes Claude in that turn", { answers: woken.answers, turn: woken.turn.id, holder: holder.turn.id });
+    const live = shape(liveTurns(thread.id, 0));
+    const history = shape((await client.request("thread/read", { threadId: thread.id, includeTurns: true })).thread.turns);
+    check(JSON.stringify(live) === JSON.stringify(history), "live turns are history's", { live, history });
+    return { turns: history };
+  },
+
   async compactRollbackManage() {
     const threadId = state.lifecycle;
     const since = client.messages.length;

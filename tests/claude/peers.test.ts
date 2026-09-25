@@ -83,7 +83,7 @@ describe("messages between Claude agents", () => {
     expect(text(projection.turns[0]!.items[2]!)).toBe(delegation(SENDER, "PING-MID"));
   });
 
-  it("gives a message that waited in Claude's queue a turn of its own, and no queued task notification is a user message", async () => {
+  it("gives a message that waited in Claude's queue a turn of its own; a task notification taken after the answer goes on in a turn with no prompt", async () => {
     const queue = (operation: string, content?: string): TranscriptRecord => ({ type: "queue-operation", operation, sessionId: "receiver", ...(content ? { content } : {}) });
     const envelopeOnly = crossSession("REPORT-OK").split("\n").slice(1, 4).join("\n");
     const notification = "<task-notification>\n<task-id>a0eb</task-id>\n</task-notification>";
@@ -98,7 +98,8 @@ describe("messages between Claude agents", () => {
     const projection = await projectTranscript({ sessionId: "receiver", path: "/tmp/r.jsonl", records });
     expect(projection.turns.map((turn) => [turn.id, turn.items.map((item) => item.type)])).toEqual([
       ["prompt", ["userMessage", "agentMessage"]],
-      ["peer", ["userMessage", "agentMessage", "agentMessage"]],
+      ["peer", ["userMessage", "agentMessage"]],
+      ["message-ack:0:continued", ["agentMessage"]],
     ]);
   });
 

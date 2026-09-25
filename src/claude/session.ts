@@ -14,7 +14,7 @@ import {
 } from "./codexRollout.js";
 import { claudeContent, normalizeUserInput, userMessage } from "./inputMapper.js";
 import { completedToolItem } from "./native/projector.js";
-import { assistantBlockItemId } from "./native/ids.js";
+import { ANSWER_CHARS, assistantBlockItemId, continuationTurnId } from "./native/ids.js";
 import { readTranscriptRecords, type UserRecord } from "./native/records.js";
 import { userText } from "./native/summary.js";
 import { normalizeClaudeModelIdentifier } from "./modelSelection.js";
@@ -196,6 +196,8 @@ export class ClaudeSession {
   private readonly peerMessages = new Set<string>();
   /** The running turn's result came: Claude answering again means it took another prompt by itself. */
   private afterResult = false;
+  /** Claude's last block since a turn began (its item id; the text item while it streams text). */
+  private lastBlock?: { id: string; text?: { text: string } };
   private transcript?: string;
   /** Where the transcript ended when the turn began, then as far as it was read for messages queued mid-turn. */
   private transcriptRead = 0;
@@ -357,6 +359,8 @@ export class ClaudeSession {
     const content = await claudeContent(input, this.settings.cwd);
     // Desktop shows `/goal` messages itself.
     const hidden = typeof content === "string" && /^\/(?:compact|goal)(?:\s|$)/u.test(content);
+    // Claude only waits on background tasks: it takes the message as a prompt of its own.
+    if (this.waitingOnTasks) this.completeTurn();
     if (this.turn) {
       // Claude folds a message sent mid-turn into the running turn, like a steer.
       this.pendingInputs.set(uuid, { input, clientId: params.clientUserMessageId ?? null, hidden });
@@ -377,6 +381,7 @@ export class ClaudeSession {
 
   public async steer(params: JsonObject): Promise<string> {
     if (!this.turn) throw invalidRequest("no active turn to steer");
+    if (this.waitingOnTasks) return (await this.startTurn(params)).id;
     const input = normalizeUserInput(params.input ?? []);
     const uuid = randomUUID();
     this.pendingInputs.set(uuid, { input, clientId: params.clientUserMessageId ?? null, hidden: false });
@@ -468,6 +473,7 @@ export class ClaudeSession {
     this.turn = { id, startedAt: Date.now(), items: turn.items, resultSeen: false, interrupted: false, error: null };
     this.activeAt = Date.now();
     this.afterResult = false;
+    this.lastBlock = undefined;
     try {
       this.transcriptRead = statSync(this.transcriptPath() ?? "").size;
     } catch {
@@ -494,23 +500,38 @@ export class ClaudeSession {
   }
 
   private maybeComplete(): void {
-    if (!this.turn || !this.turn.resultSeen || this.state !== "idle" || this.tasks.size > 0 || this.continuationTimer) return;
-    this.completeTurn();
+    if (!this.turn || !this.turn.resultSeen || this.state !== "idle" || this.continuationTimer) return;
+    if (!this.tasks.size || this.queued.length) return this.completeTurn();
+    // Background tasks run on after the answer: it ends its turn, and a new one keeps the chat working until they end
+    // or wake Claude up.
+    if (!this.lastBlock) return;
+    this.continueTurn();
+    this.turn!.resultSeen = true;
   }
 
-  private completeTurn(): void {
+  /** Claude goes on after an answer with no prompt: the answer ends its turn, the work goes on in a new one (history's). */
+  private continueTurn(): void {
+    const id = continuationTurnId(this.lastBlock!.id);
+    this.completeTurn(true);
+    this.ensureTurn(id);
+  }
+
+  /** `continued`: the work goes on in the next turn (its tools keep running, the chat stays busy). */
+  private completeTurn(continued = false): void {
     const turn = this.turn;
     if (!turn) return;
     this.flushResponse();
-    for (const tool of this.tools.values()) {
-      if ((tool.item as { status?: string }).status === "inProgress") {
-        tool.item = { ...tool.item, status: turn.interrupted ? "declined" : "failed" } as ThreadItem;
-        this.itemCompleted(tool.item);
+    if (!continued) {
+      for (const tool of this.tools.values()) {
+        if ((tool.item as { status?: string }).status === "inProgress") {
+          tool.item = { ...tool.item, status: turn.interrupted ? "declined" : "failed" } as ThreadItem;
+          this.itemCompleted(tool.item);
+        }
       }
+      this.tools.clear();
+      for (const stop of this.codexTails.values()) stop();
+      this.codexTails.clear();
     }
-    this.tools.clear();
-    for (const stop of this.codexTails.values()) stop();
-    this.codexTails.clear();
     this.turn = undefined;
     const status = turn.interrupted ? "interrupted" : turn.error ? "failed" : "completed";
     const completedAt = Math.floor(Date.now() / 1000);
@@ -523,11 +544,11 @@ export class ClaudeSession {
         startedAt: Math.floor(turn.startedAt / 1000), completedAt, durationMs: Date.now() - turn.startedAt,
       },
     });
-    this.emit("thread/status/changed", { threadId: this.threadId, status: { type: "idle" } });
+    if (!continued) this.emit("thread/status/changed", { threadId: this.threadId, status: { type: "idle" } });
     this.host.turnCompleted(this, turn.id);
     this.turnWaiters.get(turn.id)?.(status);
     this.turnWaiters.delete(turn.id);
-    const next = this.queued.shift();
+    const next = continued ? undefined : this.queued.shift();
     if (next) {
       this.emit("thread/queue/changed", { threadId: this.threadId });
       void this.startTurn({ input: next.input, clientUserMessageId: next.clientUserMessageId }).catch((error: unknown) =>
@@ -564,7 +585,7 @@ export class ClaudeSession {
       this.host.subagentMessage(this, m);
       return;
     }
-    if (this.afterResult && (m.type === "stream_event" || m.type === "assistant")) this.continuedByPeer();
+    if (this.afterResult && (m.type === "stream_event" || m.type === "assistant")) this.continued();
     switch (m.type) {
       case "stream_event": return this.onStream(m.event);
       case "assistant": return this.onAssistant(m);
@@ -577,7 +598,8 @@ export class ClaudeSession {
     }
   }
 
-  private ensureTurn(id: string = randomUUID()): void {
+  /** With no id, Claude went on by itself: after an answer, in the turn history names after it. */
+  private ensureTurn(id = this.lastBlock ? continuationTurnId(this.lastBlock.id) : randomUUID()): void {
     if (this.turn) return;
     const pending = this.pendingInputs.get(id);
     this.pendingInputs.delete(id);
@@ -621,16 +643,21 @@ export class ClaudeSession {
   }
 
   /**
-   * Claude answers again right after a result, without going idle. When the prompt it took is a message another agent
-   * sent (a sub-agent's has no command uuid, so only the transcript tells), that message starts a turn, as in history.
+   * Claude answers again right after a result, without going idle: the transcript tells what it took. A message another
+   * agent sent (a sub-agent's has no command uuid, so only the transcript tells) starts a turn, as in history; a
+   * finished task's notification goes on after the answer in a turn of its own.
    */
-  private continuedByPeer(): void {
+  private continued(): void {
     this.afterResult = false;
     try {
       const path = this.transcriptPath();
       const record = path ? lastPrompt(path) : undefined;
-      const origin = peerOrigin(record?.origin);
-      if (!record || !origin || !this.turn || this.turn.id === record.uuid || this.queued.length) return;
+      if (!record || !this.turn || this.turn.id === record.uuid || this.queued.length) return;
+      const origin = peerOrigin(record.origin);
+      if (!origin) {
+        if (record.origin?.kind === "task-notification" && this.lastBlock) this.continueTurn();
+        return;
+      }
       this.completeTurn();
       this.ensureTurn(record.uuid);
       this.showPeer(record.uuid, origin, userText(record));
@@ -737,18 +764,14 @@ export class ClaudeSession {
       case "task_notification":
         this.tasks.delete(m.task_id);
         this.host.subagentFinished(`agent-${m.task_id}`);
-        if (this.state === "idle" && this.turn) {
-          clearTimeout(this.continuationTimer);
-          this.continuationTimer = setTimeout(() => {
-            this.continuationTimer = undefined;
-            this.maybeComplete();
-          }, CONTINUATION_GRACE_MS);
-        }
+        this.awaitWakeup();
         return;
       case "background_tasks_changed": {
+        // Claude tells the change before the task's notification: it may wake Claude up still.
         const live = new Set((m.tasks ?? []).map((task: any) => task.task_id));
-        for (const id of this.tasks.keys()) if (!live.has(id)) this.tasks.delete(id);
-        this.maybeComplete();
+        const ended = [...this.tasks.keys()].filter((id) => !live.has(id));
+        for (const id of ended) this.tasks.delete(id);
+        if (ended.length) this.awaitWakeup();
         return;
       }
       case "api_retry":
@@ -767,6 +790,16 @@ export class ClaudeSession {
       default:
         return undefined;
     }
+  }
+
+  /** A task ended while Claude was idle: its notification may wake Claude up, so the turn waits a moment for that. */
+  private awaitWakeup(): void {
+    if (this.state !== "idle" || !this.turn) return;
+    clearTimeout(this.continuationTimer);
+    this.continuationTimer = setTimeout(() => {
+      this.continuationTimer = undefined;
+      this.maybeComplete();
+    }, CONTINUATION_GRACE_MS);
   }
 
   /** Visible CCodex/Claude notice inside the running turn (e.g. `/goal` output). */
@@ -793,12 +826,22 @@ export class ClaudeSession {
   }
 
   private blockStart(index: number, block: any): void {
+    if (!this.response) return;
+    const tool = block.type === "tool_use" || block.type === "server_tool_use" || block.type === "mcp_tool_use";
+    if (this.lastBlock?.text && this.lastBlock.text.text.length >= ANSWER_CHARS) {
+      // More work after a message of an answer's length: it ends its turn, so Desktop shows it unfolded.
+      this.response.hasTool ||= tool;
+      const { id, hasTool } = this.response;
+      this.continueTurn();
+      this.response = { id, hasTool, texts: new Map(), blockKinds: new Map() };
+    }
     const response = this.response;
-    if (!response) return;
+    this.lastBlock = { id: assistantBlockItemId(response.id, index) };
     if (block.type === "text") {
       const item = { type: "agentMessage" as const, id: assistantBlockItemId(response.id, index), text: "", phase: null, memoryCitation: null };
       response.texts.set(index, item);
       response.blockKinds.set(index, { kind: "text" });
+      this.lastBlock.text = item;
       this.streamed.add(item.id);
       this.itemStarted(item);
     } else if (block.type === "thinking" || block.type === "redacted_thinking") {
@@ -814,7 +857,7 @@ export class ClaudeSession {
         this.streamed.add(item.id);
         this.itemStarted({ ...item, summary: [] });
       }
-    } else if (block.type === "tool_use" || block.type === "server_tool_use" || block.type === "mcp_tool_use") {
+    } else if (tool) {
       response.hasTool = true;
       response.blockKinds.set(index, { kind: "tool" });
     }

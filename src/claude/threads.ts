@@ -750,7 +750,7 @@ export class ClaudeThreads {
       case "thread/queue/add": {
         const session = this.session(threadId);
         const queuedSubmission = { id: randomUUID(), input: normalizeUserInput(params.input ?? []), clientUserMessageId: params.clientUserMessageId };
-        if (session.busy) session.queued.push(queuedSubmission);
+        if (session.busy && !session.waitingOnTasks) session.queued.push(queuedSubmission);
         else await session.startTurn({ input: queuedSubmission.input, clientUserMessageId: queuedSubmission.clientUserMessageId });
         this.gateway.emit(threadId, "thread/queue/changed", { threadId });
         return { queuedSubmission };

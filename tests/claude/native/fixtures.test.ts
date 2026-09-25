@@ -27,7 +27,8 @@ describe("native Claude fixtures", () => {
   it("keeps the compaction marker and the complete pre-compaction turn history", async () => {
     const projection = await fixture("a0cd4fcb-7bd4-43fa-b0d3-7d46e39e912a");
 
-    expect(projection.turns).toHaveLength(7);
+    // One turn Claude went on in after a finished task woke it up.
+    expect(projection.turns).toHaveLength(8);
     expect(projection.compactionBoundaries.size).toBe(1);
     expect(projection.turns.at(-1)!.items.map((item) => item.type)).toEqual([
       "userMessage", "reasoning", "agentMessage", "commandExecution", "reasoning",
@@ -43,7 +44,8 @@ describe("native Claude fixtures", () => {
     const root = await fixture(sessionId);
     const children = await projectSubagents(`${projectDirectory}${sessionId}`, sessionId);
 
-    expect(root.turns).toHaveLength(18);
+    // Three turns Claude went on in: after a finished task woke it up, or after a message of an answer's length.
+    expect(root.turns).toHaveLength(21);
     expect(root.turns[1]!.items.map((item) => item.type)).toEqual([
       "userMessage", "reasoning", "commandExecution", "reasoning", "agentMessage",
     ]);
