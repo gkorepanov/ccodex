@@ -46,6 +46,8 @@ const WINDOW_MINUTES: Record<string, number> = { five_hour: 300, seven_day: 10_0
 const IDLE_MS = Number(process.env.CCODEX_E2E_IDLE_MS) || 30 * 60_000;
 /** How long an earlier chat stays open before its process is started ahead of a prompt (tests shorten it). */
 const RESUME_WARM_MS = Number(process.env.CCODEX_E2E_RESUME_WARM_MS) || 10_000;
+/** Claude processes kept at most (each holds its session in memory: 250–550 MB); tests lower it. */
+const MAX_PROCESSES = Number(process.env.CCODEX_E2E_MAX_PROCESSES) || 10;
 
 /** The Claude side of the gateway: catalog of native sessions, live sessions, side chats, models, skills. */
 export class ClaudeThreads {
@@ -107,16 +109,27 @@ export class ClaudeThreads {
   private cpuSeen = new Map<number, { cpu: number; at: number }>();
   private sweeper?: NodeJS.Timeout;
 
+  /** What CCodex last did to each chat's process and commands, and why (shown by /ccstate). */
+  private readonly actions = new Map<string, { at: number; text: string }[]>();
+
+  private act(session: ClaudeSession, event: string, text: string, pids: number[] | undefined): void {
+    this.logger.info(event, { threadId: session.threadId, pids });
+    this.actions.set(session.threadId, [...this.actions.get(session.threadId) ?? [], { at: Date.now(), text }].slice(-3));
+  }
+
   /**
    * A turn that only waits for background commands that hung (no CPU for IDLE_MS) gets their tasks stopped: Claude
-   * learns they were stopped and finishes it. A quiet session nobody watches is unloaded, with the idle commands it leaves.
+   * learns they were stopped and finishes it. A session quiet for IDLE_MS is unloaded if nobody has it open (as stock
+   * unloads a thread); if a client has it open (Desktop keeps every chat it showed), only its process is closed, and
+   * the next prompt starts it again. Past MAX_PROCESSES, the quiet chats used longest ago lose their processes too.
+   * Closing a process ends the idle commands it leaves.
    */
   private sweep(): void {
     const now = Date.now();
-    const loaded = [...this.sessions.values()].filter((session) => session.loaded);
+    const sessions = [...this.sessions.values()];
     let processes: SessionProcess[] | undefined;
     try {
-      processes = loaded.length ? sessionProcesses() : [];
+      processes = sessions.some((session) => session.loaded) ? sessionProcesses() : [];
     } catch (error) {
       // Unknown commands: a quiet session still goes (as stock's would), and nothing is ended, since nothing says it hung.
       this.logger.warn("claude.processes.unreadable", { error: String(error) });
@@ -125,20 +138,36 @@ export class ClaudeThreads {
       const seen = this.cpuSeen.get(process.pid);
       return [process.pid, seen?.cpu === process.cpu ? seen : { cpu: process.cpu, at: now }];
     }));
-    for (const session of loaded) {
-      const own = processes?.filter((process) => process.session === session.threadId).map((process) => process.pid);
-      if (own?.some((pid) => now - this.cpuSeen.get(pid)!.at < IDLE_MS)) continue;
-      if (session.waitingOnTasks && own?.length) {
-        this.logger.warn("claude.tasks.hung", { threadId: session.threadId, pids: own });
-        void session.stopTasks().catch(() => killProcesses(own));
+    const own = (session: ClaudeSession) => processes?.filter((process) => process.session === session.threadId).map((process) => process.pid);
+    const computing = (pids: number[] | undefined) => pids?.some((pid) => now - this.cpuSeen.get(pid)!.at < IDLE_MS) ?? false;
+    const idle = `${IDLE_MS / 60_000} min`;
+    for (const session of sessions) {
+      const pids = own(session);
+      if (computing(pids)) continue;
+      if (session.waitingOnTasks && pids?.length) {
+        this.act(session, "claude.tasks.hung", `stopped its background tasks: their commands used no CPU for ${idle}`, pids);
+        void session.stopTasks().catch(() => killProcesses(pids));
       } else if (session.quiet(now, IDLE_MS) && !this.gateway.subscribers(session.threadId)) {
-        this.logger.info("claude.unloaded", { threadId: session.threadId, pids: own });
+        this.act(session, "claude.unloaded", `unloaded the chat: nobody had it open and it was quiet for ${idle}`, pids);
         this.sessions.delete(session.threadId);
-        void session.unload().then(() => killProcesses(own ?? []));
+        void session.unload().then(() => killProcesses(pids ?? []));
         this.gateway.emit(session.threadId, "thread/status/changed", { threadId: session.threadId, status: { type: "notLoaded" } });
         this.gateway.emit(session.threadId, "thread/closed", { threadId: session.threadId });
+      } else if (session.loaded && session.quiet(now, IDLE_MS)) {
+        this.closeProcess(session, pids, `closed its Claude process: quiet for ${idle}; the next prompt starts it again`);
       }
     }
+    const running = sessions.filter((session) => session.loaded);
+    running.filter((session) => session.quiet(now, 0) && !computing(own(session)))
+      .sort((left, right) => left.activeAt - right.activeAt)
+      .slice(0, Math.max(0, running.length - MAX_PROCESSES))
+      .forEach((session) => this.closeProcess(session, own(session),
+        `closed its Claude process: ${running.length} were running (at most ${MAX_PROCESSES}) and this chat was used longest ago; the next prompt starts it again`));
+  }
+
+  private closeProcess(session: ClaudeSession, pids: number[] | undefined, text: string): void {
+    this.act(session, "claude.process.closed", text, pids);
+    void session.unload().then(() => killProcesses(pids ?? []));
   }
 
   public async close(): Promise<void> {
@@ -163,8 +192,9 @@ export class ClaudeThreads {
     return normalizeClaudeModelIdentifier(model.slice(this.config.modelPrefix.length));
   }
 
+  /** Loaded as stock's threads are: opened and not unloaded, whether or not a Claude process runs for it now. */
   public loadedIds(): string[] {
-    return [...this.sessions.values()].filter((session) => session.loaded).map((session) => session.threadId);
+    return [...this.sessions.keys()];
   }
 
   // ---- list rows ----
@@ -995,7 +1025,9 @@ export class ClaudeThreads {
       effort: settings.effort,
       fast: settings.fast,
       permissionMode: settings.permissionMode,
-      loaded: session?.loaded ?? false,
+      loaded: session !== undefined,
+      process: session?.loaded ?? false,
+      actions: this.actions.get(threadId) ?? [],
       running: session?.busy ?? false,
       usage: session?.totalUsage,
       contextWindow: session?.contextWindow ?? null,

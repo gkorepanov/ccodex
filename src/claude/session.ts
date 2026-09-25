@@ -170,7 +170,7 @@ export class ClaudeSession {
   public liveModel: string | null = null;
   private sdk?: Query;
   /** Last sign of life: a message from Claude, a prompt, a command. */
-  private activeAt = Date.now();
+  public activeAt = Date.now();
   /** Claude's scheduled wakeups (CronCreate, ScheduleWakeup, /loop) as of the last turn's end: the process must stay. */
   private crons = 0;
   /** Settles once the query's process is gone: Claude writes its last transcript records on the way out. */
@@ -216,9 +216,9 @@ export class ClaudeSession {
 
   public get busy(): boolean { return this.turn !== undefined; }
 
-  /** A loaded process with nothing to do for `idleMs` (unloading it loses nothing: the next turn resumes from disk). */
+  /** Nothing to do for `idleMs` (closing its process loses nothing: the next turn resumes from disk). */
   public quiet(now: number, idleMs: number): boolean {
-    return this.sdk !== undefined && !this.turn && !this.queued.length && !this.injections.size && !this.crons && now - this.activeAt >= idleMs;
+    return !this.turn && !this.queued.length && !this.injections.size && !this.crons && now - this.activeAt >= idleMs;
   }
 
   /** The turn has its answer and only waits for background tasks to end. */

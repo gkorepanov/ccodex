@@ -63,9 +63,11 @@ async function stateText(gateway: Gateway, connection: Connection, threadId: str
     lines.push(
       `model ▸ ${state.model}${state.effort ? ` · effort ${state.effort}` : ""}${state.fast ? " · fast" : ""}`,
       `permissions ▸ ${state.permissionMode}`,
-      `session ▸ ${state.running ? "running" : state.loaded ? "loaded" : "not loaded"}${state.backgroundTasks ? ` · ${state.backgroundTasks} background task(s)` : ""}`,
+      `session ▸ ${state.running ? "running" : state.process ? "loaded" : state.loaded ? "loaded · no Claude process (the next prompt starts it)" : "not loaded"}${state.backgroundTasks ? ` · ${state.backgroundTasks} background task(s)` : ""}`,
       ...(usage?.totalTokens ? [`context ▸ ${compact(usage.inputTokens)}${state.contextWindow ? ` / ${compact(Number(state.contextWindow))}` : ""} tokens`] : []),
       ...(state.costUsd ? [`cost (this process) ▸ $${Number(state.costUsd).toFixed(2)}`] : []),
+      ...(state.actions as { at: number; text: string }[]).map((action) =>
+        `CCodex ▸ ${new Date(action.at).toLocaleString("en-GB", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} ${action.text}`),
     );
   } else {
     const { thread } = await connection.upstream.request("thread/read", { threadId: current });

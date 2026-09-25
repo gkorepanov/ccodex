@@ -33,6 +33,8 @@ async function leftChat(): Promise<string> {
 }
 
 const closed = (threadId: string) => client.notifications("thread/closed", threadId).length > 0;
+const stateText = (threadId: string) => client.notifications("item/completed", threadId).map((message) => message.params.item).filter((item) => item.type === "agentMessage").at(-1).text;
+const processClosed = (threadId: string) => fakeClaude.calls.some((call) => call.method === "close" && call.args[0] === threadId);
 
 describe("Claude processes: started ahead of a prompt, gone when nobody uses them", () => {
   beforeEach(async () => {
@@ -83,5 +85,21 @@ describe("Claude processes: started ahead of a prompt, gone when nobody uses the
     await client.waitFor("thread/closed", (params) => params.threadId === threadId, 3_000);
     await sleep(50);
     expect(commands.killed).toContainEqual([4242]);
+  });
+
+  it("closes only the process of a quiet chat a client still has open: it stays loaded and the next prompt resumes it", async () => {
+    const { thread } = await client.request("thread/start", { model: "claude:claude-opus-5-5", cwd: "/work" });
+    await client.turn(thread.id, "hello");
+    for (let waited = 0; !processClosed(thread.id); waited += 50) {
+      expect(waited).toBeLessThan(3_000);
+      await sleep(50);
+    }
+    expect(closed(thread.id)).toBe(false);
+    expect((await client.request("thread/loaded/list", {})).data).toContain(thread.id);
+    await client.turn(thread.id, "/ccstate");
+    expect(stateText(thread.id)).toMatch(/no Claude process[\s\S]*closed its Claude process: quiet for/u);
+    await client.turn(thread.id, "again");
+    expect(fakeClaude.options.at(-1)).toMatchObject({ resume: thread.id });
+    expect(fakeClaude.prompts.at(-1)).toMatchObject({ sessionId: thread.id, text: "again" });
   });
 });

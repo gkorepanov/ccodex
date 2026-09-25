@@ -53,6 +53,8 @@ const sameTurns = (live, history) => {
   const shape = (turns) => JSON.stringify(turns.map((turn) => [turn.id, turn.items.filter((item) => !["reasoning", "agentMessage"].includes(item.type)).map((item) => `${item.type}:${item.id}`)]));
   return shape(live) === shape(history);
 };
+/** A Claude process runs for the chat (started for a new session or resumed). */
+const claudeRunning = (threadId) => spawnSync("pgrep", ["-f", `claude .*--(session-id|resume)=${threadId}`]).status === 0;
 const items = async (threadId) => (await client.request("thread/read", { threadId, includeTurns: true })).thread.turns.flatMap((turn) => turn.items);
 const answers = (client, threadId, since = 0) => client.messages.slice(since)
   .filter((m) => m.method === "item/completed" && m.params.threadId === threadId && m.params.item.type === "agentMessage")
@@ -649,6 +651,17 @@ const scenarios = {
       const again = await client.turn(thread.id, "Which file was the `timeout 25` command to write? Reply with its file name only.");
       check(/busy\.txt/u.test(again.answers.join(" ")), "resumed with its history", again.answers);
 
+      // Still open (subscribed) and quiet: only its process goes; the chat stays loaded and answers with its history.
+      const openSince = client.messages.length;
+      for (let waited = 0; claudeRunning(thread.id); waited += 1_000) {
+        check(waited < 60_000, "a quiet chat still open loses its process");
+        await sleep(1_000);
+      }
+      check(!client.messages.slice(openSince).some((m) => m.method === "thread/closed" && m.params.threadId === thread.id), "a chat still open is not unloaded");
+      check((await client.request("thread/loaded/list", {})).data.includes(thread.id), "it stays loaded");
+      const later = await client.turn(thread.id, "Which file was the `timeout 25` command to write? Reply with its file name only.");
+      check(/busy\.txt/u.test(later.answers.join(" ")), "the next prompt starts it again, with its history", later.answers);
+
       // A session cron keeps its chat loaded.
       const { thread: cron } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
       await client.turn(cron.id, "Use the CronCreate tool (load it with ToolSearch first if needed) to schedule the prompt 'Reply with the word TICK.' to run once per hour. Then reply DONE.");
@@ -658,6 +671,35 @@ const scenarios = {
       await sleep(20_000);
       check(!client.messages.slice(cronSince).some((m) => m.method === "thread/closed" && m.params.threadId === cron.id), "a chat with a cron stays loaded");
       return { busySeconds, hungSeconds };
+    } finally {
+      client.close();
+      await daemon("restart");
+      client = await Client.connect();
+    }
+  },
+
+  /** At most CCODEX_E2E_MAX_PROCESSES Claude processes: the open chat used longest ago loses its own, and keeps its history. */
+  async processCap() {
+    client.close();
+    await daemon("restart", { ...process.env, CCODEX_E2E_MAX_PROCESSES: "2" });
+    client = await Client.connect();
+    try {
+      const chats = [];
+      for (const word of ["ALPHA", "BRAVO", "CHARLIE"]) {
+        const { thread } = await client.request("thread/start", { model: state.haiku, cwd: WORK, approvalPolicy: "never", sandbox: "danger-full-access" });
+        await client.turn(thread.id, `Remember the word ${word}. Reply only: OK.`);
+        chats.push(thread.id);
+      }
+      for (let waited = 0; claudeRunning(chats[0]); waited += 1_000) {
+        check(waited < 90_000, "the third process closes the first chat's", chats.map(claudeRunning));
+        await sleep(1_000);
+      }
+      check(claudeRunning(chats[1]) && claudeRunning(chats[2]), "the chats used later keep theirs", chats.map(claudeRunning));
+      const said = await client.turn(chats[0], "/ccstate");
+      check(/at most 2\) and this chat was used longest ago/u.test(said.answers.join(" ")), "/ccstate tells why", said.answers);
+      const again = await client.turn(chats[0], "Which word did I ask you to remember? Reply with it only.");
+      check(again.answers.join(" ").includes("ALPHA"), "it answers with its history", again.answers);
+      return { closed: chats[0] };
     } finally {
       client.close();
       await daemon("restart");

@@ -340,6 +340,6 @@ export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<Message>;
     setPermissionMode: (mode: string) => { options.permissionMode = settle(mode); return record("setPermissionMode")(mode); },
     applyFlagSettings: record("applyFlagSettings"),
     stopTask: record("stopTask"),
-    close: () => { closed = true; void iterator.return(undefined); },
+    close: () => { closed = true; fakeClaude.calls.push({ method: "close", args: [sessionId] }); void iterator.return(undefined); },
   });
 }
