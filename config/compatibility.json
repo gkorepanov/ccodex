@@ -1,5 +1,5 @@
 {
   "schemaVersion": 1,
-  "productVersion": "0.5.0-dev.20260924.1",
+  "productVersion": "0.5.0",
   "note": "Read by CCodex 0.4's setup, which checks productVersion before handing setup over to this version."
 }

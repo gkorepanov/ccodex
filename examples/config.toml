@@ -16,7 +16,6 @@ Return only the title.
 # data_dir = "~/.ccodex/state"
 # model_prefix = "claude:"
 
-idle_timeout_seconds = 900
 log_level = "info"
 # Codex App RPC capture under data_dir (rpc.jsonl, mode 0600, rolling).
 rpc_capture = true

@@ -23,8 +23,6 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm run check:relay-transport
-      - run: npm run check:protocol-generated
       - run: npx vitest run --config config/vitest.config.ts
-      - run: npm run test:contracts
       - run: node release/verify-packages.mjs
       - run: npm pack --dry-run

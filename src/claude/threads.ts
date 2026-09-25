@@ -44,6 +44,8 @@ const WINDOW_MINUTES: Record<string, number> = { five_hour: 300, seven_day: 10_0
  * unless a command it runs still works (e2e shortens the wait).
  */
 const IDLE_MS = Number(process.env.CCODEX_E2E_IDLE_MS) || 30 * 60_000;
+/** How long an earlier chat stays open before its process is started ahead of a prompt (tests shorten it). */
+const RESUME_WARM_MS = Number(process.env.CCODEX_E2E_RESUME_WARM_MS) || 10_000;
 
 /** The Claude side of the gateway: catalog of native sessions, live sessions, side chats, models, skills. */
 export class ClaudeThreads {
@@ -141,6 +143,7 @@ export class ClaudeThreads {
 
   public async close(): Promise<void> {
     clearInterval(this.sweeper);
+    clearTimeout(this.warmTimer);
     this.stopWatching?.();
     for (const session of this.sessions.values()) session.unload();
   }
@@ -804,13 +807,19 @@ export class ClaudeThreads {
     return { thread, ...this.settingsResponse(settings) };
   }
 
-  /** The chat last opened gets Claude's process started ahead of its prompt (one such process at a time). */
+  /**
+   * The chat last opened gets Claude's process started ahead of its prompt (one such process at a time); an earlier chat
+   * only once it stayed open a while, so clicking through chats starts none.
+   */
   private warmSession?: ClaudeSession;
+  private warmTimer?: NodeJS.Timeout;
 
-  private prewarm(session: ClaudeSession): void {
+  private prewarm(session: ClaudeSession, delayMs = 0): void {
+    clearTimeout(this.warmTimer);
     if (this.warmSession !== session) this.warmSession?.discardWarm();
     this.warmSession = session;
-    session.prewarm();
+    this.warmTimer = setTimeout(() => { if (this.sessions.get(session.threadId) === session) session.prewarm(); }, delayMs);
+    this.warmTimer.unref();
   }
 
   /** A new session, not announced (thread/start announces it; a provider switch keeps it hidden). */
@@ -833,7 +842,7 @@ export class ClaudeThreads {
     const settings = thread.parentThreadId && thread.model
       ? { ...this.settings(threadId), cwd: thread.cwd, model: this.pickerModel(thread.model.slice(this.config.modelPrefix.length)) }
       : this.settings(threadId);
-    if (!thread.parentThreadId && this.catalog.get(threadId)) this.prewarm(this.session(threadId));
+    if (!thread.parentThreadId && this.catalog.get(threadId)) this.prewarm(this.session(threadId), RESUME_WARM_MS);
     const response: JsonObject = {
       thread: { ...thread, turns: params.excludeTurns ? [] : turns },
       ...this.settingsResponse(settings),

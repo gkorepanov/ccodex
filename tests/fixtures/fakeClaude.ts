@@ -297,6 +297,7 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
 
 /** The SDK's prewarm: the process it starts runs the fake once it gets its prompt. */
 export async function fakeStartup({ options }: { options: Message }): Promise<any> {
+  fakeClaude.calls.push({ method: "startup", args: [options.resume ?? options.sessionId] });
   return { query: (prompt: AsyncIterable<Message>) => fakeQuery({ prompt, options }), close: () => undefined };
 }
 

@@ -106,13 +106,16 @@ The release asset also ships a matching `uninstall.sh` that works even if your s
 
 CCodex is a thin layer in front of the `codex app-server` you already have installed:
 
-- **gpt threads are stock, byte for byte.** Every App connection gets its own stock
-  `codex app-server`; CCodex forwards its traffic unchanged. No pinned Codex: update
-  Codex whenever you like.
+- **gpt threads are stock, byte for byte.** One stock `codex app-server` serves every App
+  connection (each over a connection of its own); CCodex forwards its traffic unchanged.
+  No pinned Codex: update Codex whenever you like.
 - **Claude threads are Claude Code sessions.** `claude:*` models run on the official
   Claude Agent SDK, and `~/.claude/projects` is the only source of truth: every session
   (including ones made in the `claude` CLI) is listed at once. Claude's own `/goal`,
   compaction, sub-agents, skills, and background tasks show up as native Codex items.
+  Like stock's threads, a Claude chat nobody has open is unloaded after 30 idle minutes,
+  unless a command it runs still works (a background command idle for 30 minutes counts
+  as hung and is ended).
 - **Provider switch = compaction.** Switching model provider mid-thread compacts the
   conversation with the Codex prompt, then continues in a new native thread of the other
   provider seeded with the summary; the App keeps showing one thread with one history.
@@ -127,16 +130,16 @@ CCodex is a thin layer in front of the `codex app-server` you already have insta
   `codex exec`, and Claude threads stream what those Codex sessions do.
 
 Setup activates a new version atomically and never restarts a running gateway: the new
-version takes over after `codex app-server daemon restart` (or the next idle restart).
+version takes over after `codex app-server daemon restart`.
 
 ### Upgrading from 0.4
 
-0.5 drops the 0.4 databases. Once, after installing 0.5 and before restarting the
-gateway, carry thread ids, provider-switch history, archive flags, sections and names over:
+0.5 drops the 0.4 databases. `ccodex setup` (also when 0.4's setup hands over to 0.5)
+carries thread ids, provider-switch history, archive flags, sections and names over once,
+before it activates 0.5; a failed migration activates nothing. Claude chats whose
+transcripts Claude's 30-day cleanup deleted come back from 0.4's turns as text. Then:
 
 ```sh
-node ~/.ccodex/current/node_modules/@gkorepanov/ccodex/scripts/migrate-0.4-to-0.5.mjs --dry-run
-node ~/.ccodex/current/node_modules/@gkorepanov/ccodex/scripts/migrate-0.4-to-0.5.mjs
 codex app-server daemon restart
 ```
 

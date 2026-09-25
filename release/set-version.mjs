@@ -22,5 +22,16 @@ for (const directory of platformDirectories) {
   manifest.version = version;
   writeJson(path, manifest);
 }
-execFileSync("npm", ["install", "--package-lock-only", "--ignore-scripts"], { cwd: root, stdio: "inherit" });
+// 0.4's setup reads it before handing setup over to this version.
+const compatibilityPath = join(root, "config", "compatibility.json");
+writeJson(compatibilityPath, { ...JSON.parse(readFileSync(compatibilityPath, "utf8")), productVersion: version });
+// npm 11 drops nested optional esbuild entries from the lock, and `npm ci` then fails in CI: npm 10 writes it.
+execFileSync("npx", ["-y", "npm@10.9.4", "install", "--package-lock-only", "--ignore-scripts"], { cwd: root, stdio: "inherit" });
+// The platform packages of a version not published yet resolve to nothing; `npm ci` (npm 11) needs them in the lock,
+// as optional entries without a tarball.
+const lockPath = join(root, "package-lock.json");
+const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+for (const name of Object.keys(main.optionalDependencies)) lock.packages[`node_modules/${name}`] ??= { optional: true };
+lock.packages = Object.fromEntries(Object.entries(lock.packages).sort(([left], [right]) => left.localeCompare(right, "en")));
+writeJson(lockPath, lock);
 console.log(`CCodex release files now target ${version}.`);
