@@ -152,8 +152,8 @@ describe("messages between Claude agents", () => {
     ];
     const projection = await projectTranscript({ sessionId: "receiver", path: "/tmp/r.jsonl", records });
     expect(projection.turns[0]!.items.find((item) => item.id === "toolu-send")).toEqual({
-      type: "dynamicToolCall", id: "toolu-send", namespace: null, tool: "SendMessage", arguments: { to: "nobody-zz", message: "hi" },
-      status: "failed", contentItems: [{ type: "inputText", text: reason }], success: false, durationMs: null,
+      type: "mcpToolCall", id: "toolu-send", server: "claude", tool: "SendMessage", status: "failed", arguments: { to: "nobody-zz", message: "hi" },
+      appContext: null, pluginId: null, result: null, error: { message: reason }, durationMs: null, readOnlyHint: null,
     });
   });
 

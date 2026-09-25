@@ -299,15 +299,13 @@ export function completedToolItem(
       } : item.agentsStates,
     };
   }
-  // Claude reports a message it could not deliver as a result (`success: false` and why), not as an error.
+  // Claude reports a message it could not deliver as a result (`success: false` and why), not as an error. Desktop
+  // shows a failed tool call with its error only for MCP tools: the send becomes one, of the Claude "server".
   const undelivered = state.name === "SendMessage" && result?.success === false ? string(result.message) ?? "Not delivered." : undefined;
-  if (!undelivered) return item;
-  const reason = [{ type: "inputText", text: undelivered }];
-  return item.type === "dynamicToolCall"
-    ? { ...item, status: "failed", success: false, contentItems: reason }
-    // A message to no known chat or agent: a sendInput has nowhere to show why, a plain tool call does.
-    : { type: "dynamicToolCall", id: item.id, namespace: null, tool: state.name, arguments: state.input as JsonValue,
-      status: "failed", contentItems: reason, success: false, durationMs: null };
+  return undelivered ? {
+    type: "mcpToolCall", id: item.id, server: "claude", tool: state.name, status: "failed", arguments: state.input as JsonValue,
+    appContext: null, pluginId: null, result: null, error: { message: undelivered }, durationMs: null, readOnlyHint: null,
+  } : item;
 }
 
 function responseHasTools(records: readonly TranscriptChainRecord[]): ReadonlySet<string> {
