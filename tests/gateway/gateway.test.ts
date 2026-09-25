@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFi
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fakeClaude, fakeQuery } from "../fixtures/fakeClaude.js";
+import { fakeClaude, fakeQuery, fakeStartup } from "../fixtures/fakeClaude.js";
 import { startTestGateway, type Client, type TestGateway } from "./harness.js";
 
 process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "ccodex-claude-"));
@@ -10,6 +10,7 @@ process.env.CODEX_HOME = mkdtempSync(join(tmpdir(), "ccodex-codex-home-"));
 vi.mock("@anthropic-ai/claude-agent-sdk", async (importOriginal) => ({
   ...await importOriginal<object>(),
   query: fakeQuery,
+  startup: fakeStartup,
 }));
 vi.setConfig({ testTimeout: 30_000 });
 

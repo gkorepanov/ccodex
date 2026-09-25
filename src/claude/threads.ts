@@ -18,7 +18,7 @@ import { projectSubagents, type ProjectedSubagent } from "./native/subagents.js"
 import { readTranscriptRecords } from "./native/records.js";
 import { summarizeTranscript, userText, type TranscriptHeader } from "./native/summary.js";
 import { codexPermissions, mapClaudeModel, mapSkill, permissionModeFrom, withProbeQuery } from "./sdk.js";
-import { killProcesses, sessionProcesses } from "./processes.js";
+import { killProcesses, sessionProcesses, type SessionProcess } from "./processes.js";
 import { ClaudeSession, type SessionSettings } from "./session.js";
 
 interface SideThread {
@@ -112,26 +112,27 @@ export class ClaudeThreads {
   private sweep(): void {
     const now = Date.now();
     const loaded = [...this.sessions.values()].filter((session) => session.loaded);
-    let processes;
+    let processes: SessionProcess[] | undefined;
     try {
       processes = loaded.length ? sessionProcesses() : [];
     } catch (error) {
-      return void this.logger.warn("claude.processes.unreadable", { error: String(error) });
+      // Unknown commands: a quiet session still goes (as stock's would), and nothing is ended, since nothing says it hung.
+      this.logger.warn("claude.processes.unreadable", { error: String(error) });
     }
-    this.cpuSeen = new Map(processes.map((process) => {
+    if (processes) this.cpuSeen = new Map(processes.map((process) => {
       const seen = this.cpuSeen.get(process.pid);
       return [process.pid, seen?.cpu === process.cpu ? seen : { cpu: process.cpu, at: now }];
     }));
     for (const session of loaded) {
-      const own = processes.filter((process) => process.session === session.threadId).map((process) => process.pid);
-      if (own.some((pid) => now - this.cpuSeen.get(pid)!.at < IDLE_MS)) continue;
-      if (session.waitingOnTasks && own.length) {
+      const own = processes?.filter((process) => process.session === session.threadId).map((process) => process.pid);
+      if (own?.some((pid) => now - this.cpuSeen.get(pid)!.at < IDLE_MS)) continue;
+      if (session.waitingOnTasks && own?.length) {
         this.logger.warn("claude.tasks.hung", { threadId: session.threadId, pids: own });
         killProcesses(own);
       } else if (session.quiet(now, IDLE_MS) && !this.gateway.subscribers(session.threadId)) {
         this.logger.info("claude.unloaded", { threadId: session.threadId, pids: own });
         this.sessions.delete(session.threadId);
-        void session.unload().then(() => killProcesses(own));
+        void session.unload().then(() => killProcesses(own ?? []));
         this.gateway.emit(session.threadId, "thread/status/changed", { threadId: session.threadId, status: { type: "notLoaded" } });
         this.gateway.emit(session.threadId, "thread/closed", { threadId: session.threadId });
       }

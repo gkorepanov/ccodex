@@ -7,11 +7,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ajv } from "ajv";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { fakeQuery } from "../fixtures/fakeClaude.js";
+import { fakeQuery, fakeStartup } from "../fixtures/fakeClaude.js";
 import { startTestGateway, type Client, type TestGateway } from "./harness.js";
 
 process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "ccodex-claude-schema-"));
-vi.mock("@anthropic-ai/claude-agent-sdk", async (importOriginal) => ({ ...await importOriginal<object>(), query: fakeQuery }));
+vi.mock("@anthropic-ai/claude-agent-sdk", async (importOriginal) => ({ ...await importOriginal<object>(), query: fakeQuery, startup: fakeStartup }));
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 const CODEX = process.env.CCODEX_SCHEMA_CODEX ?? fileURLToPath(new URL("../../node_modules/.bin/codex", import.meta.url));

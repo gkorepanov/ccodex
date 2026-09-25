@@ -295,6 +295,11 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   yield* finish(reply);
 }
 
+/** The SDK's prewarm: the process it starts runs the fake once it gets its prompt. */
+export async function fakeStartup({ options }: { options: Message }): Promise<any> {
+  return { query: (prompt: AsyncIterable<Message>) => fakeQuery({ prompt, options }), close: () => undefined };
+}
+
 export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<Message>; options: Message }): any {
   fakeClaude.options.push(options);
   // Like the CLI: auto mode is unavailable on Haiku and falls back to default (and stays there after a model switch).
