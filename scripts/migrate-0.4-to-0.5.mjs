@@ -35,7 +35,8 @@ const stock = new DatabaseSync(join(codexHome(), stockDb), { readOnly: true });
 
 // Claude transcripts by session id.
 const transcripts = new Map();
-for (const directory of existsSync(claudeProjects) ? readdirSync(claudeProjects) : []) {
+// Only directories: Finder leaves a `.DS_Store` among them.
+for (const { name: directory } of existsSync(claudeProjects) ? readdirSync(claudeProjects, { withFileTypes: true }).filter((entry) => entry.isDirectory()) : []) {
   for (const file of readdirSync(join(claudeProjects, directory))) {
     if (file.endsWith(".jsonl")) transcripts.set(file.slice(0, -6), join(claudeProjects, directory, file));
   }
@@ -205,8 +206,10 @@ function rowId(id) {
   if (segments) return (segments.find((segment) => segment.threadId === id) ?? segments[0]).threadId;
   return claudeThreads.get(id)?.claude_session_id ?? id;
 }
-const sectionOrder = Object.fromEntries(state.prepare("select section_id, order_json from section_orders").all()
-  .map((row) => [row.section_id, JSON.parse(row.order_json).map(rowId)]));
+// Older 0.4 states predate section orders.
+const sectionOrders = state.prepare("select 1 from sqlite_master where type = 'table' and name = 'section_orders'").get()
+  ? state.prepare("select section_id, order_json from section_orders").all() : [];
+const sectionOrder = Object.fromEntries(sectionOrders.map((row) => [row.section_id, JSON.parse(row.order_json).map(rowId)]));
 
 const existing = existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, "utf8")) : {};
 const meta = {
