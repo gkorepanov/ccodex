@@ -192,20 +192,22 @@ export class TranscriptRecordReader implements AsyncIterable<TranscriptRecord> {
   }
 
   private parseLine(bytes: Buffer): TranscriptRecord | null | undefined {
-    const line = bytes.toString("utf8").replace(/\r$/u, "");
-    if (!line.trim()) return null;
-    try {
-      const value: unknown = JSON.parse(line);
-      if (!record(value)) {
-        this.skippedLines += 1;
-        return null;
-      }
-      this.parsedLines += 1;
-      return value;
-    } catch {
-      this.skippedLines += 1;
-      return undefined;
-    }
+    const parsed = parseTranscriptLine(bytes);
+    if (parsed) this.parsedLines += 1;
+    else if (parsed !== null || bytes.toString("utf8").trim()) this.skippedLines += 1;
+    return parsed;
+  }
+}
+
+/** A transcript line's record: null for a blank line or another JSON value, undefined for a partial line. */
+export function parseTranscriptLine(bytes: Buffer): TranscriptRecord | null | undefined {
+  const line = bytes.toString("utf8").replace(/\r$/u, "");
+  if (!line.trim()) return null;
+  try {
+    const value: unknown = JSON.parse(line);
+    return record(value) ? value : null;
+  } catch {
+    return undefined;
   }
 }
 

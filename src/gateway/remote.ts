@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runtimePlatformKey } from "../config.js";
 import { saveDaemonSettings } from "../daemon/settings.js";
 import type { Logger } from "../log.js";
 import { RpcFailure, invalidRequest, type JsonObject } from "../protocol/codex.js";
@@ -17,15 +18,9 @@ const RELAY_PACKAGES: Readonly<Record<string, string>> = {
   "linux-x64-gnu": "@gkorepanov/ccodex-relay-linux-x64-gnu",
 };
 
-function platformKey(): string {
-  if (process.platform !== "linux") return `${process.platform}-${process.arch}`;
-  const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined;
-  return `linux-${process.arch}-${report?.header?.glibcVersionRuntime ? "gnu" : "musl"}`;
-}
-
 export function relayBinary(): string {
   if (process.env.CCODEX_REMOTE_RELAY) return process.env.CCODEX_REMOTE_RELAY;
-  const packageName = RELAY_PACKAGES[platformKey()];
+  const packageName = RELAY_PACKAGES[runtimePlatformKey()];
   if (packageName) {
     try {
       return join(dirname(require.resolve(`${packageName}/package.json`)), "bin", "ccodex-relay");
@@ -35,7 +30,7 @@ export function relayBinary(): string {
   }
   const local = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "ccodex-relay");
   if (existsSync(local)) return local;
-  throw new Error(`CCodex relay package for '${platformKey()}' is missing. Reinstall @gkorepanov/ccodex with optional dependencies.`);
+  throw new Error(`CCodex relay package for '${runtimePlatformKey()}' is missing. Reinstall @gkorepanov/ccodex with optional dependencies.`);
 }
 
 interface Relay {

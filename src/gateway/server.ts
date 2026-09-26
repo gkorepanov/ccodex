@@ -377,7 +377,8 @@ export async function startGateway(
       response.writeHead(request.headers.origin ? 403 : 404).end();
     });
     server.on("upgrade", (request, socket: Socket, head) => {
-      if (request.url !== "/rpc") {
+      // Like stock's control socket, any path is an app-server connection (the stock daemon client probes "/").
+      if (request.url === "/daemon/shutdown") {
         socket.destroy();
         return;
       }

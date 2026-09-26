@@ -274,7 +274,23 @@ const scenarios = {
     check(items.filter((item) => item === "contextCompaction").length >= 2, "two compactions in stitched history", items);
     const rows = (await client.request("thread/list", { limit: 100 })).data.filter((row) => row.id === thread.id);
     check(rows.length === 1, "one row", rows);
-    return { items, row: { provider: rows[0].modelProvider, model: rows[0].model, name: rows[0].name } };
+    // Desktop's paging across the segments (the GPT one pages by stock's own cursors), from a fresh window's resume.
+    const fresh = await Client.connect();
+    const resumed = await fresh.request("thread/resume", { threadId: thread.id, excludeTurns: true });
+    const paged = [];
+    for (let cursor = resumed.turnsBackwardsCursor; cursor;) {
+      const page = await fresh.request("thread/turns/list", { threadId: thread.id, cursor, limit: 1, sortDirection: "desc", itemsView: "notLoaded" });
+      paged.unshift(...page.data.map((turn) => turn.id).reverse());
+      cursor = page.nextCursor;
+    }
+    check(JSON.stringify(paged) === JSON.stringify(read.turns.map((turn) => turn.id)), "paged turns = stitched turns", { paged, read: read.turns.map((turn) => turn.id) });
+    for (const turn of read.turns) {
+      const page = await fresh.request("thread/items/list", { threadId: thread.id, turnId: turn.id, limit: 100, sortDirection: "desc" });
+      const ids = page.data.map((entry) => entry.item.id).reverse();
+      check(JSON.stringify(ids) === JSON.stringify(turn.items.map((item) => item.id)), "turn items page", { turn: turn.id, ids, read: turn.items.map((item) => item.id) });
+    }
+    fresh.close();
+    return { items, paged: paged.length, row: { provider: rows[0].modelProvider, model: rows[0].model, name: rows[0].name } };
   },
 
   async forkBeforeCompaction() {
@@ -639,7 +655,8 @@ const scenarios = {
   /** Smoke: the plain `codex` TUI (delegated to the installed codex) runs a gpt turn. */
   async tui() {
     const tmux = (...args) => execFileSync("tmux", args, { encoding: "utf8" });
-    tmux("new-session", "-d", "-s", "tui", "-x", "160", "-y", "45", "-c", WORK, `codex -m ${GPT}`);
+    // The pane outlives the TUI: an exit shows its last screen and status.
+    tmux("new-session", "-d", "-s", "tui", "-x", "160", "-y", "45", "-c", WORK, `codex -m ${GPT}; echo "TUI EXITED $?"; sleep 600`);
     let screen = "";
     let sent = false;
     for (let attempt = 0; attempt < 60 && !screen.includes("TUI-OK."); attempt += 1) {

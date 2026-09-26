@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { NativeSessionCatalog } from "../../../src/claude/native/catalog.js";
 import { summarizeTranscript } from "../../../src/claude/native/summary.js";
 import type { TranscriptRecord } from "../../../src/claude/native/records.js";
-import { codexPermissions, permissionModeFrom } from "../../../src/claude/sdk.js";
+import { codexPermissions, permissionSettings } from "../../../src/claude/sdk.js";
 
 const fixtureProjects = fileURLToPath(new URL("../../fixtures/nativeClaudeHome/projects/", import.meta.url));
 const cwd = "/synthetic";
@@ -62,9 +62,21 @@ describe("native Claude thread settings", () => {
   it("round-trips Claude permission modes through the Codex settings Desktop sends back", () => {
     for (const mode of ["default", "auto", "dontAsk", "bypassPermissions"] as const) {
       const codex = codexPermissions(mode, cwd);
-      expect(permissionModeFrom({ ...codex, permissions: codex.activePermissionProfile.id })).toBe(mode);
+      expect(permissionSettings({ ...codex, permissions: codex.activePermissionProfile.id }, { permissionMode: "default" })).toEqual({ permissionMode: mode });
     }
-    expect(permissionModeFrom({ collaborationMode: { mode: "plan" }, approvalPolicy: "never" })).toBe("plan");
+  });
+
+  it("keeps the chat's permission mode unless Desktop sends permission fields; plan mode gives back the mode before it", () => {
+    const full = { permissionMode: "bypassPermissions" } as const;
+    // Desktop 26.924's turn/start: every permission field null, the collaboration mode always sent.
+    const turnStart = { approvalPolicy: null, approvalsReviewer: null, permissions: null, sandboxPolicy: null, collaborationMode: { mode: "default" } };
+    expect(permissionSettings(turnStart, full)).toEqual(full);
+    expect(permissionSettings({ approvalsReviewer: "user" }, full)).toEqual(full);
+    expect(permissionSettings({ approvalsReviewer: "user" }, { permissionMode: "auto" })).toEqual({ permissionMode: "default" });
+    const planned = permissionSettings({ ...turnStart, collaborationMode: { mode: "plan" } }, full);
+    expect(planned).toEqual({ permissionMode: "plan", planFrom: "bypassPermissions" });
+    expect(permissionSettings({ approvalPolicy: "on-request" }, planned)).toEqual({ permissionMode: "plan", planFrom: "default" });
+    expect(permissionSettings(turnStart, planned)).toEqual(full);
   });
 
   it("follows native /goal: set, goal_status updates, clear", () => {

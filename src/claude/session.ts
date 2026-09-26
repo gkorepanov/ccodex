@@ -18,7 +18,7 @@ import { ANSWER_CHARS, assistantBlockItemId, continuationTurnId } from "./native
 import { readTranscriptRecords, type UserRecord } from "./native/records.js";
 import { userText } from "./native/summary.js";
 import { normalizeClaudeModelIdentifier } from "./modelSelection.js";
-import { peerKey, peerMessageItem, peerOrigin, sentMessageItem, type Peers } from "./peers.js";
+import { peerKey, peerMessageItem, peerOrigin, sentMessageItem, subagentFiles, type Peers } from "./peers.js";
 import { baseOptions } from "./sdk.js";
 import { proposedChanges, startTool, updateToolInput, type ActiveTool } from "./toolMapper.js";
 import type { ClaudeThreads } from "./threads.js";
@@ -30,6 +30,8 @@ export interface SessionSettings {
   effort: string | null;
   fast: boolean;
   permissionMode: PermissionMode;
+  /** The mode plan mode gives back. */
+  planFrom?: PermissionMode;
 }
 
 interface ActiveTurn {
@@ -640,13 +642,8 @@ export class ClaudeSession {
     this.itemCompleted(item);
   }
 
-  /** The session's sub-agents are its transcripts under `<session>/subagents` (a resumed session's earlier ones too). */
   private get peers(): Peers {
-    const session = this.transcriptPath()?.replace(/\.jsonl$/u, "");
-    return {
-      directory: this.host.catalog,
-      children: { has: (agentId) => session !== undefined && /^[\w-]+$/u.test(agentId) && existsSync(join(session, "subagents", `agent-${agentId}.jsonl`)) },
-    };
+    return { directory: this.host.catalog, children: subagentFiles(this.transcriptPath()) };
   }
 
   /**

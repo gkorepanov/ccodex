@@ -9,7 +9,7 @@ import type { Gateway } from "../gateway/server.js";
 import type { Logger } from "../log.js";
 import { packageVersion } from "../management/commands.js";
 import { invalidParams, invalidRequest, requestedModel, type JsonObject, type Thread, type Turn } from "../protocol/codex.js";
-import { historyCursors, paginateItems, paginateTurns, startedTurn } from "../protocol/turnPagination.js";
+import { anchorCursor, historyCursors, paginateItems, paginateTurns, startedTurn } from "../protocol/turnPagination.js";
 import { normalizeUserInput } from "./inputMapper.js";
 import { claudeModelLabel, modelCatalogValue, normalizeClaudeModelIdentifier } from "./modelSelection.js";
 import { NativeSessionCatalog, type SessionSummary } from "./native/catalog.js";
@@ -17,7 +17,7 @@ import { nativeThread, type TranscriptProjection } from "./native/projector.js";
 import { projectSubagents, type ProjectedSubagent } from "./native/subagents.js";
 import { readTranscriptRecords } from "./native/records.js";
 import { summarizeTranscript, userText, type TranscriptHeader } from "./native/summary.js";
-import { codexPermissions, mapClaudeModel, mapSkill, permissionModeFrom, withProbeQuery } from "./sdk.js";
+import { codexPermissions, mapClaudeModel, mapSkill, permissionSettings, withProbeQuery } from "./sdk.js";
 import { killProcesses, sessionProcesses, type SessionProcess } from "./processes.js";
 import { ClaudeSession, type SessionSettings } from "./session.js";
 
@@ -409,6 +409,76 @@ export class ClaudeThreads {
     return { thread: this.decorate(thread), turns, usage: projection.tokenUsage };
   }
 
+  /** The thread without its history: the catalog's header, no transcript read. */
+  public async thread(threadId: string): Promise<Thread> {
+    const side = this.sides.get(threadId);
+    if (side) return this.sideThread(side);
+    if (!this.catalog.get(threadId)) await this.catalog.refresh();
+    if (!this.paged(threadId)) return (await this.read(threadId)).thread;
+    await this.models().catch(() => undefined);
+    return this.decorate(nativeThread(threadId, this.headerOf(this.catalog.get(threadId)!, this.sessions.get(threadId)), { status: this.status(threadId) }));
+  }
+
+  /** A main session with a transcript: its history is read page by page (a sub-agent's, a small file of one turn, whole). */
+  private paged(threadId: string): boolean {
+    return !threadId.startsWith("agent-") && !this.sides.has(threadId) && this.catalog.has(threadId);
+  }
+
+  private pages(threadId: string): ReturnType<NativeSessionCatalog["pages"]> {
+    return this.catalog.pages(threadId, this.gateway.meta.leaf(threadId));
+  }
+
+  /** History turns with the live turn as the session shows it. */
+  private withLive(threadId: string, history: readonly Turn[]): Turn[] {
+    let turns = [...history];
+    const live = this.sessions.get(threadId)?.liveTurn();
+    if (!live) return turns;
+    const index = turns.findIndex((turn) => turn.id === live.id);
+    if (index >= 0) turns = [...turns.slice(0, index), { ...turns[index]!, status: "inProgress", completedAt: null }];
+    else turns.push(live);
+    return turns;
+  }
+
+  /** The newest turns (at least `count` unless history is shorter). */
+  private async newestTurns(threadId: string, count: number): Promise<{ turns: Turn[]; usage?: TranscriptProjection["tokenUsage"] }> {
+    if (!this.catalog.get(threadId)) await this.catalog.refresh();
+    if (!this.paged(threadId)) return this.read(threadId);
+    const { pages, source } = this.pages(threadId);
+    const window = await pages.newest(source, count);
+    return { turns: this.withLive(threadId, window.turns), usage: window.projection.tokenUsage };
+  }
+
+  public async turnsPage(threadId: string, params: JsonObject): Promise<JsonObject> {
+    if (!this.catalog.get(threadId)) await this.catalog.refresh();
+    const anchor = params.cursor ? anchorCursor("turnId", params.cursor) : undefined;
+    const descending = (params.sortDirection ?? "desc") === "desc";
+    // Oldest first from the start: the one page that needs all of history.
+    if (!this.paged(threadId) || !descending && !anchor) return paginateTurns((await this.read(threadId)).turns, params);
+    const { pages, source } = this.pages(threadId);
+    const limit = Math.max(1, Math.min(params.limit ?? 25, 100));
+    const window = !anchor ? await pages.newest(source, limit + 1)
+      : descending ? await pages.around(source, anchor.anchor, limit + 1)
+        : await pages.since(source, anchor.anchor);
+    return paginateTurns(this.withLive(threadId, window.turns), params);
+  }
+
+  public async itemsPage(threadId: string, params: JsonObject): Promise<JsonObject> {
+    if (!this.catalog.get(threadId)) await this.catalog.refresh();
+    // Desktop always names the turn; items across the whole thread need all of it.
+    if (!this.paged(threadId) || !params.turnId) return paginateItems((await this.read(threadId)).turns, params);
+    const { pages, source } = this.pages(threadId);
+    const turn = this.withLive(threadId, (await pages.around(source, params.turnId, 0)).turns).find((candidate) => candidate.id === params.turnId)!;
+    const anchor = params.cursor ? anchorCursor("itemId", params.cursor)?.anchor : undefined;
+    if (!anchor || turn.items.some((item) => item.id === anchor)) return paginateItems([turn], params);
+    // Desktop pages an older turn from the thread's last item (the resume's backwards cursor): stock places the anchor
+    // in the whole thread, so it stands here in a marker turn on its side of this one.
+    const newest = (await this.newestTurns(threadId, 1)).turns;
+    const turnAt = newest.findIndex((candidate) => candidate.id === turn.id);
+    const anchorAt = newest.findIndex((candidate) => candidate.items.some((item) => item.id === anchor));
+    const marker: Turn = { ...turn, id: `${turn.id}:anchor`, items: [{ type: "agentMessage", id: anchor, text: "", phase: null, memoryCitation: null }] };
+    return paginateItems((anchorAt >= 0 ? anchorAt > turnAt : turnAt < 0) ? [turn, marker] : [marker, turn], params);
+  }
+
   public settings(threadId: string): SessionSettings {
     const session = this.sessions.get(threadId);
     if (session) return session.settings;
@@ -474,7 +544,7 @@ export class ClaudeThreads {
       model,
       effort: params.effort ?? params.collaborationMode?.settings?.reasoning_effort ?? current.effort,
       fast: tier === undefined ? current.fast : tier === "fast" || tier === "priority",
-      permissionMode: permissionModeFrom(params) ?? current.permissionMode,
+      ...permissionSettings(params, current),
     };
   }
 
@@ -667,12 +737,10 @@ export class ClaudeThreads {
     switch (method) {
       case "thread/start": return this.startThread(connection, params);
       case "thread/resume": return this.resume(connection, params);
-      case "thread/read": {
-        const { thread, turns } = await this.read(threadId);
-        return { thread: { ...thread, turns: params.includeTurns ? turns : [] } };
-      }
-      case "thread/turns/list": return paginateTurns((await this.read(threadId)).turns, params);
-      case "thread/items/list": return paginateItems((await this.read(threadId)).turns, params);
+      // All turns only when asked for them (deprecated for paginated threads; Desktop pages).
+      case "thread/read": return { thread: params.includeTurns ? await this.read(threadId).then(({ thread, turns }) => ({ ...thread, turns })) : await this.thread(threadId) };
+      case "thread/turns/list": return this.turnsPage(threadId, params);
+      case "thread/items/list": return this.itemsPage(threadId, params);
       case "turn/start": {
         this.gateway.subscribe(threadId, connection);
         return { turn: await this.session(threadId).startTurn(params) };
@@ -692,7 +760,7 @@ export class ClaudeThreads {
         const archived = method === "thread/archive";
         this.gateway.meta.setArchived(threadId, archived);
         this.gateway.emit(threadId, archived ? "thread/archived" : "thread/unarchived", { threadId });
-        return archived ? {} : { thread: (await this.read(threadId)).thread };
+        return archived ? {} : { thread: await this.thread(threadId) };
       }
       case "thread/delete": return this.delete(threadId);
       case "thread/fork": return this.fork(connection, params);
@@ -709,7 +777,14 @@ export class ClaudeThreads {
         }
         return {};
       }
-      case "thread/metadata/update": return { thread: (await this.read(threadId)).thread };
+      // Claude's settings have no per-turn scope: the running turn's change stays for the chat.
+      case "turn/settings/update": {
+        const session = this.sessions.get(threadId);
+        if (!session?.busy) return { status: "targetUnavailable" };
+        await session.updateSettings(params);
+        return { status: "applied" };
+      }
+      case "thread/metadata/update": return { thread: await this.thread(threadId) };
       case "thread/attachment/list": return { data: [], nextCursor: null };
       case "thread/inject_items": {
         await this.session(threadId).inject((params.items ?? []).map((item: JsonObject) => JSON.stringify(item)).join("\n"));
@@ -862,7 +937,8 @@ export class ClaudeThreads {
   private async resume(connection: Connection, params: JsonObject): Promise<JsonObject> {
     const threadId: string = params.threadId;
     this.gateway.subscribe(threadId, connection);
-    const { thread, turns, usage } = await this.read(threadId);
+    const thread = await this.thread(threadId);
+    const { turns, usage } = await this.newestTurns(threadId, 1);
     // Like stock, the context meter follows a resume (Desktop's /status reads it).
     if (usage?.last) {
       const modelContextWindow = this.contextWindows.get((thread.model ?? "").slice(this.config.modelPrefix.length)) ?? DEFAULT_CONTEXT_WINDOW;
@@ -877,7 +953,7 @@ export class ClaudeThreads {
       thread: { ...thread, turns: params.excludeTurns ? [] : turns },
       ...this.settingsResponse(settings),
       collaborationMode: null,
-      initialTurnsPage: params.initialTurnsPage ? paginateTurns(turns, params.initialTurnsPage) : null,
+      initialTurnsPage: params.initialTurnsPage ? await this.turnsPage(threadId, { ...params.initialTurnsPage, threadId }) : null,
       ...historyCursors(turns),
     };
     return response;
@@ -902,6 +978,7 @@ export class ClaudeThreads {
     this.sessions.delete(threadId);
     await this.catalog.refresh();
     if (this.catalog.get(threadId)) await deleteSession(threadId);
+    this.catalog.dropPages(threadId);
     this.gateway.meta.forget(threadId);
     await this.catalog.refresh();
   }
@@ -914,12 +991,10 @@ export class ClaudeThreads {
 
   /** Last transcript record of the turn before `turnId` (or of `turnId` itself when `inclusive`). */
   private async boundaryBefore(threadId: string, turnId: string, inclusive: boolean): Promise<string | null> {
-    const projection = await this.projection(threadId);
-    if (!projection) throw invalidParams(`thread not found: ${threadId}`);
-    const index = projection.turns.findIndex((turn) => turn.id === turnId);
-    if (index < 0) throw invalidParams(`turn not found: ${turnId}`);
-    const kept = projection.turns[inclusive ? index : index - 1];
-    return kept ? projection.turnBoundaries.find((boundary) => boundary.turnId === kept.id)?.messageUuid ?? null : null;
+    if (!this.catalog.get(threadId)) await this.catalog.refresh();
+    if (!this.catalog.get(threadId)) throw invalidParams(`thread not found: ${threadId}`);
+    const { pages, source } = this.pages(threadId);
+    return pages.boundary(source, turnId, inclusive).catch(() => { throw invalidParams(`turn not found: ${turnId}`); });
   }
 
   private async fork(connection: Connection, params: JsonObject): Promise<JsonObject> {
@@ -940,12 +1015,13 @@ export class ClaudeThreads {
     const { sessionId } = await forkSession(sourceId, { ...(upTo ? { upToMessageId: upTo } : {}) });
     await this.catalog.refresh();
     this.gateway.subscribe(sessionId, connection);
-    const { thread, turns } = await this.read(sessionId);
+    const thread = await this.thread(sessionId);
+    const turns = params.excludeTurns ? [] : (await this.newestTurns(sessionId, 25)).turns;
     const forked = { ...thread, forkedFromId: sourceId };
     this.gateway.emit(sessionId, "thread/started", { thread: forked });
     const settings = this.settingsFrom(params, this.settings(sourceId));
     this.sessions.set(sessionId, new ClaudeSession(this, sessionId, settings, { exists: true }));
-    return { thread: { ...forked, turns: params.excludeTurns ? [] : turns }, ...this.settingsResponse(settings) };
+    return { thread: { ...forked, turns }, ...this.settingsResponse(settings) };
   }
 
   private async truncate(threadId: string, leaf: string | null): Promise<void> {
@@ -962,6 +1038,7 @@ export class ClaudeThreads {
     // starts over under its id with its settings, and its name comes back with its first turn.
     const name = this.catalog.get(threadId)!.customTitle;
     await deleteSession(threadId);
+    this.catalog.dropPages(threadId);
     this.gateway.meta.setLeaf(threadId, null);
     await this.catalog.refresh();
     this.sessions.set(threadId, new ClaudeSession(this, threadId, settings, { exists: false }));
@@ -969,18 +1046,19 @@ export class ClaudeThreads {
   }
 
   private async rollback(threadId: string, numTurns: number): Promise<JsonObject> {
-    const projection = await this.projection(threadId);
-    if (!projection) throw invalidParams(`thread not found: ${threadId}`);
-    const keep = projection.turns.length - numTurns;
-    const leaf = keep > 0 ? projection.turnBoundaries.find((boundary) => boundary.turnId === projection.turns[keep - 1]!.id)?.messageUuid ?? null : null;
-    await this.truncate(threadId, leaf);
-    const { thread, turns } = await this.read(threadId);
-    return { thread: { ...thread, turns } };
+    if (!this.catalog.get(threadId)) await this.catalog.refresh();
+    if (!this.catalog.get(threadId)) throw invalidParams(`thread not found: ${threadId}`);
+    const { pages, source } = this.pages(threadId);
+    const { turns: history } = await pages.newest(source, numTurns + 1);
+    const kept = history.at(-numTurns - 1);
+    await this.truncate(threadId, kept ? await pages.boundary(source, kept.id, true) : null);
+    return { thread: { ...await this.thread(threadId), turns: (await this.newestTurns(threadId, 25)).turns } };
   }
 
   private async revert(threadId: string, beforeTurnId: string): Promise<JsonObject> {
     await this.truncate(threadId, await this.boundaryBefore(threadId, beforeTurnId, false));
-    const { thread, turns } = await this.read(threadId);
+    const thread = await this.thread(threadId);
+    const { turns } = await this.newestTurns(threadId, 1);
     this.gateway.emit(threadId, "thread/reverted", { threadId });
     return { thread, ...historyCursors(turns) };
   }

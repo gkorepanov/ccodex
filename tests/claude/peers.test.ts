@@ -99,7 +99,7 @@ describe("messages between Claude agents", () => {
     expect(projection.turns.map((turn) => [turn.id, turn.items.map((item) => item.type)])).toEqual([
       ["prompt", ["userMessage", "agentMessage"]],
       ["peer", ["userMessage", "agentMessage"]],
-      ["message-ack:0:continued", ["agentMessage"]],
+      ["ack:0:continued", ["agentMessage"]],
     ]);
   });
 
@@ -158,7 +158,7 @@ describe("messages between Claude agents", () => {
     });
   });
 
-  it("shows a SendMessage to a sub-agent the session started, from history", async () => {
+  it("shows a SendMessage to a sub-agent of the session (its transcript), from history", async () => {
     const records: TranscriptRecord[] = [
       human("prompt", null, "Start bob, then message him", 1, "p1"),
       reply("spawn", "prompt", "", 2, [{ type: "tool_use", id: "toolu-agent", name: "Agent", input: { description: "Sleep and report", prompt: "sleep" } }]),
@@ -168,7 +168,10 @@ describe("messages between Claude agents", () => {
       { type: "user", ...envelope("sent", "send", 5, "p1"), message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu-send", content: "queued" }] },
         toolUseResult: { success: true, pin: { id: "a0eb" } } },
     ];
-    const projection = await projectTranscript({ sessionId: "receiver", path: "/tmp/r.jsonl", records });
+    const root = mkdtempSync(join(tmpdir(), "ccodex-peers-"));
+    mkdirSync(join(root, "receiver", "subagents"), { recursive: true });
+    writeFileSync(join(root, "receiver", "subagents", "agent-a0eb.jsonl"), "");
+    const projection = await projectTranscript({ sessionId: "receiver", path: join(root, "receiver.jsonl"), records });
     expect(projection.turns[0]!.items.find((item) => item.id === "toolu-send")).toMatchObject({
       type: "collabAgentToolCall", tool: "sendInput", status: "completed", prompt: "KIWI", receiverThreadIds: ["agent-a0eb"],
     });

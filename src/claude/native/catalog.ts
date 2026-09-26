@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, watch as watchFileSystem, type FSWatcher } fro
 import { open, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import type { PeerDirectory } from "../peers.js";
+import { TranscriptPages, type PageSource } from "./pages.js";
 import { projectTranscript, type TranscriptProjection } from "./projector.js";
 import { readTranscriptRecords } from "./records.js";
 import {
@@ -51,6 +52,7 @@ export interface CatalogCache {
 const HEAD_BYTES = 4_096;
 const CACHE_WRITE_DELAY_MS = 1_000;
 const PROJECTION_CACHE_SIZE = 8;
+const PAGES_CACHE_SIZE = 16;
 const WATCH_DEBOUNCE_MS = 250;
 
 function ignored(error: unknown): boolean {
@@ -96,6 +98,7 @@ export class NativeSessionCatalog implements PeerDirectory {
   private bySessionId = new Map<string, SessionSummary>();
   private refreshInFlight: Promise<void> | undefined;
   private readonly projections = new Map<string, Promise<TranscriptProjection>>();
+  private readonly pagers = new Map<string, TranscriptPages>();
   private senders = new Map<string, string>();
   private receivers = new Map<string, string>();
   public bytesParsed = 0;
@@ -156,6 +159,27 @@ export class NativeSessionCatalog implements PeerDirectory {
     }
     void projection.catch(() => this.projections.delete(key));
     return projection;
+  }
+
+  /** Paged reads of a session's transcript (a page of history reads that page's part of the file), per history leaf. */
+  public pages(sessionId: string, leafUuid?: string): { pages: TranscriptPages; source: PageSource } {
+    const entry = this.entriesBySessionId.get(sessionId);
+    if (!entry) throw new Error(`Unknown native Claude session: ${sessionId}`);
+    const path = entry.summary.path;
+    const key = `${sessionId}\0${leafUuid ?? ""}`;
+    const pages = this.pagers.get(key) ?? new TranscriptPages();
+    this.pagers.delete(key);
+    this.pagers.set(key, pages);
+    while (this.pagers.size > PAGES_CACHE_SIZE) this.pagers.delete(this.pagers.keys().next().value!);
+    return {
+      pages,
+      source: { sessionId, path, header: entry.summary, peers: this, peersVersion: `${this.senders.size}:${this.receivers.size}`, ...(leafUuid ? { leafUuid } : {}) },
+    };
+  }
+
+  /** The session's transcript is deleted: one written anew under its id may take the same inode. */
+  public dropPages(sessionId: string): void {
+    for (const key of this.pagers.keys()) if (key.startsWith(`${sessionId}\0`)) this.pagers.delete(key);
   }
 
   public watch(onChange: () => void): () => void {

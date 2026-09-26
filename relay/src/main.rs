@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -35,8 +34,8 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Parse a shell script with the exact Codex command-action parser.
-    ParseCommand,
+    /// Parse shell scripts (a JSON array on stdin) with the exact Codex command-action parser: a JSON array of results.
+    ParseCommands,
 }
 
 /// A gateway command arriving on stdin: `{"id":1,"method":"remoteControl/pairing/start","params":{},"clientName":"codex-desktop"}`.
@@ -364,14 +363,19 @@ async fn run(args: Args) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    if matches!(args.command.as_ref(), Some(Command::ParseCommand)) {
-        let mut script = String::new();
-        std::io::stdin().read_to_string(&mut script)?;
-        let command = vec!["bash".to_string(), "-lc".to_string(), script];
-        println!(
-            "{}",
-            serde_json::to_string(&codex_shell_command::parse_command::parse_command(&command))?
-        );
+    if matches!(args.command.as_ref(), Some(Command::ParseCommands)) {
+        let scripts: Vec<String> = serde_json::from_reader(std::io::stdin())?;
+        let parsed: Vec<_> = scripts
+            .into_iter()
+            .map(|script| {
+                codex_shell_command::parse_command::parse_command(&[
+                    "bash".to_string(),
+                    "-lc".to_string(),
+                    script,
+                ])
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&parsed)?);
         return Ok(());
     }
     if !args

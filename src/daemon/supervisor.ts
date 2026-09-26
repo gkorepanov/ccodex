@@ -28,6 +28,8 @@ const LOCK_TIMEOUT_MS = 75_000;
 export interface PidRecord {
   readonly pid: number;
   readonly processStartTime: string;
+  /** Stock's native identity of a Linux daemon: it checks this before the start time (locale-free). */
+  readonly processIdentity?: { readonly bootId: string; readonly startTicks: number };
   readonly wrapperPath?: string;
 }
 
@@ -59,11 +61,10 @@ export function processExists(pid: number): boolean {
   }
 }
 
-function linuxStartTime(pid: number): string | undefined {
+function linuxStartTicks(pid: number): string | undefined {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/u);
-    return fields[19] ? `linux:${fields[19]}` : undefined;
+    return stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/u)[19];
   } catch {
     return undefined;
   }
@@ -71,10 +72,17 @@ function linuxStartTime(pid: number): string | undefined {
 
 export function processStartTime(pid: number): string | undefined {
   if (!processExists(pid)) return undefined;
-  if (process.platform === "linux") return linuxStartTime(pid);
+  if (process.platform === "linux") {
+    const ticks = linuxStartTicks(pid);
+    return ticks && `linux:${ticks}`;
+  }
+  // Stock's own start time (its record check compares `ps` start times where it has no native identity).
   const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" });
-  const value = result.status === 0 ? result.stdout.trim() : "";
-  return value ? `ps:${value}` : undefined;
+  return result.status === 0 && result.stdout.trim() || undefined;
+}
+
+function linuxIdentity(pid: number): PidRecord["processIdentity"] {
+  return { bootId: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(), startTicks: Number(linuxStartTicks(pid)) };
 }
 
 export function processMatches(record: PidRecord): boolean {
@@ -194,9 +202,11 @@ export async function publishDaemonChildRecord(): Promise<() => void> {
   }
   const startTime = processStartTime(process.pid);
   if (!startTime) throw new Error(`failed to record daemon child process ${process.pid} startup`);
+  // Stock reads the record too (a `codex` TUI finding the daemon): it rejects one it can't verify.
   const record = {
     pid: process.pid,
     processStartTime: startTime,
+    ...(process.platform === "linux" ? { processIdentity: linuxIdentity(process.pid) } : {}),
     ...(reservation.wrapperPath ? { wrapperPath: reservation.wrapperPath } : {}),
   };
   atomicWrite(pidFile, record);

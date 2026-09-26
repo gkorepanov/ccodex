@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { codexPermissions } from "../claude/sdk.js";
 import type { Provider, Segment } from "../meta.js";
 import { invalidRequest, requestedModel, type JsonObject, type Thread, type Turn } from "../protocol/codex.js";
-import { historyCursors, paginateItems, paginateTurns, startedTurn } from "../protocol/turnPagination.js";
+import { historyCursors, paginateItems, paginateTurns, startedTurn, turnCursor, turnView } from "../protocol/turnPagination.js";
 import type { Connection } from "./connection.js";
 import type { Gateway } from "./server.js";
 
@@ -37,6 +37,39 @@ function switchTurn(threadId: string, at: number | null): Turn {
   };
 }
 
+/** Where a stitched page goes on: a segment and its backend's cursor; `marker`: the segment's switch marker is next. */
+interface PagePosition {
+  readonly segment: number;
+  readonly cursor: string | null;
+  /** Its backend's turns before this one are newer than the page (a stock cursor can't name a turn). */
+  readonly skipTo?: { readonly turnId: string; readonly include: boolean };
+  readonly marker?: number | null;
+}
+
+/** A lineage's cursor names the segment of its anchor (a turn or an item there); segments page with their own. */
+function withSegment(cursor: string, segment: number): string {
+  return JSON.stringify({ ...JSON.parse(cursor), segment });
+}
+
+/** The cursor as the segment's backend wrote it. */
+function ownCursor(cursor: string): string {
+  try {
+    const { segment: _, ...own } = JSON.parse(cursor) as Record<string, unknown>;
+    return JSON.stringify(own);
+  } catch {
+    return cursor;
+  }
+}
+
+function cursorSegment(cursor: string): number | undefined {
+  try {
+    const segment = (JSON.parse(cursor) as { segment?: unknown }).segment;
+    return typeof segment === "number" ? segment : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Threads that switched provider. Each segment lives natively in its provider; meta.json keeps only the segment
  * list. History is stitched, everything else goes to the current segment's backend.
@@ -49,6 +82,8 @@ export class Lineages {
   private creatingBackends = 0;
   private readonly heldAnnouncements: Array<{ connection: Connection; threadId: string; text: string }> = [];
   private readonly newBackends = new Set<string>();
+  /** Where a stitched page found each turn: items pages of a turn go to its segment's backend. */
+  private readonly turnSegments = new Map<string, string>();
 
   public constructor(private readonly gateway: Gateway) {}
 
@@ -211,7 +246,7 @@ export class Lineages {
 
   private async thread(segment: Segment): Promise<Thread> {
     return segment.provider === "claude"
-      ? (await this.gateway.claude.read(segment.threadId)).thread
+      ? await this.gateway.claude.thread(segment.threadId)
       : (await this.gateway.stock.request("thread/read", { threadId: segment.threadId })).thread;
   }
 
@@ -232,23 +267,124 @@ export class Lineages {
   }
 
   private async history(connection: Connection, publicId: string, segments: Segment[], method: string, params: JsonObject): Promise<unknown> {
-    const turns = await this.stitchedTurns(segments);
-    if (method === "thread/turns/list") return paginateTurns(turns, params);
-    if (method === "thread/items/list") return paginateItems(turns, params);
+    const descending = (params.sortDirection ?? "desc") === "desc";
+    if (method === "thread/turns/list") return descending ? this.stitchedPage(segments, params) : paginateTurns(await this.stitchedTurns(segments), params);
+    if (method === "thread/items/list") return params.turnId ? this.stitchedItems(segments, params) : paginateItems(await this.stitchedTurns(segments), params);
     const current = segments.at(-1)!;
     const row = await this.thread(this.gateway.meta.row(publicId));
     if (method === "thread/read") {
       const { thread } = await this.forward(connection, current, method, { ...params, includeTurns: false });
-      return { thread: { ...this.merge(row, thread, publicId), turns: params.includeTurns ? turns : [] } };
+      return { thread: { ...this.merge(row, thread, publicId), turns: params.includeTurns ? await this.stitchedTurns(segments) : [] } };
     }
     // A client resumes with the row's rollout path; the current backend has its own.
     const response = await this.forward(connection, current, method, { ...params, path: null, excludeTurns: true, initialTurnsPage: null });
+    const newest = await this.stitchedPage(segments, { limit: 25, itemsView: "full" });
+    const turns = [...newest.data].reverse();
+    const cursors = historyCursors(turns);
+    const segment = newest.segments[0];
+    // The thread's last item is the current backend's: its items page by that backend's own cursor (stock's is opaque).
+    const itemsCursor: string | null = current.provider === "claude" ? cursors.itemsBackwardsCursor : response.itemsBackwardsCursor ?? null;
     return {
       ...response,
       thread: { ...this.merge(row, response.thread, publicId), turns: params.excludeTurns ? [] : turns },
-      initialTurnsPage: params.initialTurnsPage ? paginateTurns(turns, params.initialTurnsPage) : null,
-      ...historyCursors(turns),
+      initialTurnsPage: params.initialTurnsPage ? await this.stitchedPage(segments, params.initialTurnsPage) : null,
+      turnsBackwardsCursor: cursors.turnsBackwardsCursor && withSegment(cursors.turnsBackwardsCursor, segment!),
+      itemsBackwardsCursor: itemsCursor && withSegment(itemsCursor, segments.length - 1),
     };
+  }
+
+  /** One backend's turns page (a segment's own ids and cursors). */
+  private segmentPage(segment: Segment, params: JsonObject): Promise<JsonObject> {
+    const request = { ...params, threadId: segment.threadId };
+    return segment.provider === "claude" ? this.gateway.claude.turnsPage(segment.threadId, request) : this.gateway.stock.request("thread/turns/list", request);
+  }
+
+  /**
+   * A page of the stitched turns, newest first: each segment pages on its own backend from where the previous page
+   * stopped (the cursor names the segment), a Claude segment after a switch ending with its marker turn.
+   */
+  private async stitchedPage(segments: readonly Segment[], params: JsonObject): Promise<{ data: Turn[]; nextCursor: string | null; backwardsCursor: string | null; segments: number[] }> {
+    const limit = Math.max(1, Math.min(params.limit ?? 25, 100));
+    let at = params.cursor ? await this.pagePosition(segments, params.cursor) : this.segmentStart(segments, segments.length - 1);
+    const found: Array<{ turn: Turn; segment: number }> = [];
+    while (at.segment >= 0 && found.length < limit) {
+      const segment = segments[at.segment]!;
+      if (at.marker !== undefined) {
+        found.push({ turn: turnView(switchTurn(segment.threadId, at.marker), params.itemsView), segment: at.segment });
+        at = this.segmentStart(segments, at.segment - 1);
+        continue;
+      }
+      const page = await this.segmentPage(segment, { limit: limit - found.length, cursor: at.cursor, sortDirection: "desc", itemsView: params.itemsView ?? null });
+      let skipTo = at.skipTo;
+      for (const turn of page.data as Turn[]) {
+        this.turnSegments.set(turn.id, segment.threadId);
+        if (skipTo) {
+          if (turn.id !== skipTo.turnId) continue;
+          skipTo = undefined;
+          if (!at.skipTo!.include) continue;
+        }
+        found.push({ turn, segment: at.segment });
+      }
+      const oldest = found.at(-1)?.segment === at.segment ? found.at(-1)!.turn.startedAt : null;
+      at = page.nextCursor ? { segment: at.segment, cursor: page.nextCursor, ...(skipTo ? { skipTo: at.skipTo } : {}) }
+        : at.segment > 0 && segment.provider === "claude" ? { segment: at.segment, cursor: null, marker: oldest }
+        : this.segmentStart(segments, at.segment - 1);
+    }
+    return {
+      data: found.map(({ turn }) => turn),
+      nextCursor: at.segment >= 0 && found.length ? JSON.stringify(at) : null,
+      backwardsCursor: found.length ? withSegment(turnCursor(found[0]!.turn.id, true), found[0]!.segment) : null,
+      segments: found.map(({ segment }) => segment),
+    };
+  }
+
+  /**
+   * Where a segment's turns start, newest first. Stock pages by its own cursors (paginated history: rollout ordinals), so a
+   * stock segment ending before its backend does is paged from the backend's newest turn, skipping to its last one.
+   */
+  private segmentStart(segments: readonly Segment[], index: number): PagePosition {
+    const segment = segments[index];
+    if (!segment?.lastTurnId) return { segment: index, cursor: null };
+    return segment.provider === "claude" ? { segment: index, cursor: turnCursor(segment.lastTurnId, true) }
+      : { segment: index, cursor: null, skipTo: { turnId: segment.lastTurnId, include: true } };
+  }
+
+  /** A client's cursor: a page's position, or a turn anchor (`turnsBackwardsCursor`, `backwardsCursor`). */
+  private async pagePosition(segments: readonly Segment[], cursor: string): Promise<PagePosition> {
+    const parsed = JSON.parse(cursor) as PagePosition & { turnId?: string; includeAnchor?: boolean };
+    if (parsed.turnId === undefined) return parsed;
+    const anchor = { turnId: parsed.turnId, include: parsed.includeAnchor === true };
+    const segment = parsed.segment ?? await this.segmentOf(segments, anchor.turnId);
+    if (anchor.turnId.startsWith("switch:")) return anchor.include ? { segment, cursor: null, marker: null } : this.segmentStart(segments, segment - 1);
+    return segments[segment]!.provider === "claude" ? { segment, cursor: turnCursor(anchor.turnId, anchor.include) }
+      : { segment, cursor: null, skipTo: anchor };
+  }
+
+  /** The segment holding a turn: where a page found it, else paging back until one does. */
+  private async segmentOf(segments: readonly Segment[], turnId: string): Promise<number> {
+    const locate = () => segments.findIndex((segment) => turnId === `switch:${segment.threadId.replaceAll("-", "")}` || this.turnSegments.get(turnId) === segment.threadId);
+    let cursor: string | null = null;
+    while (locate() < 0) {
+      const page: { nextCursor: string | null } = await this.stitchedPage(segments, { limit: 100, cursor, itemsView: "notLoaded" });
+      if (!page.nextCursor) throw invalidRequest(`turn not found: ${turnId}`);
+      cursor = page.nextCursor;
+    }
+    return locate();
+  }
+
+  /** A turn's items page from its segment's backend; an anchor in another segment only says which side the turn is on. */
+  private async stitchedItems(segments: readonly Segment[], params: JsonObject): Promise<unknown> {
+    const index = await this.segmentOf(segments, params.turnId);
+    const segment = segments[index]!;
+    if (params.turnId.startsWith("switch:")) return paginateItems([switchTurn(segment.threadId, null)], params);
+    const anchorSegment = params.cursor ? cursorSegment(params.cursor) : undefined;
+    let cursor = params.cursor ? ownCursor(params.cursor) : null;
+    if (anchorSegment !== undefined && anchorSegment !== index) {
+      if (anchorSegment > index !== ((params.sortDirection ?? "asc") === "desc")) return { data: [], nextCursor: null, backwardsCursor: null };
+      cursor = null;
+    }
+    const request = { ...params, threadId: segment.threadId, cursor };
+    return segment.provider === "claude" ? this.gateway.claude.itemsPage(segment.threadId, request) : this.gateway.stock.request("thread/items/list", request);
   }
 
   // ---- fork and rollback across segments ----

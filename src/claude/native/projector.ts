@@ -1,9 +1,10 @@
 /** Owns pure projection of selected Claude transcript history into Codex protocol objects. */
 import { isAbsolute, resolve } from "node:path";
 import type { JsonValue, Thread, ThreadItem, TokenUsageBreakdown, Turn, UserInput } from "../../protocol/codex.js";
+import { parseCommands } from "../commandActions.js";
 import { CODEX_MCP_TOOLS, codexMcpItems } from "../codexRollout.js";
 import { normalizeClaudeModelIdentifier } from "../modelSelection.js";
-import { NO_PEERS, peerMessageItem, peerOrigin, sentMessageItem, type PeerDirectory, type Peers } from "../peers.js";
+import { NO_PEERS, peerMessageItem, peerOrigin, sentMessageItem, subagentFiles, type PeerDirectory, type Peers } from "../peers.js";
 import {
   projectToolCompletion,
   startTool,
@@ -46,12 +47,19 @@ export interface ProjectTranscriptInput {
     readonly nickname: string;
     readonly depth: number;
   };
+  /** The records end where a later turn starts (a page of history): their last turn is not the thread's last. */
+  readonly continues?: boolean;
+  /** The leaf lies past a later compaction: see `selectHistory`. */
+  readonly physical?: boolean;
 }
 
-/** Last chain record of a projected turn; the native rollback anchor. */
+/** Chain records bounding a projected turn: `messageUuid` is the native rollback anchor. */
 export interface TurnProviderBoundary {
   readonly turnId: string;
   readonly messageUuid: string;
+  readonly firstUuid: string;
+  /** The turn's last record: a trailing compaction included, unless the `/compact` turn next takes it. */
+  readonly lastUuid: string;
 }
 
 export interface TranscriptProjection {
@@ -64,6 +72,11 @@ export interface TranscriptProjection {
   readonly turnBoundaries: readonly TurnProviderBoundary[];
   readonly selectedLeafUuid: string | null;
   readonly selectedRecordUuids: ReadonlySet<string>;
+  /** Projected from a window of the transcript whose history goes on before it. */
+  readonly truncated: boolean;
+  /** A compaction in it keeps messages from before the window. */
+  readonly partialCompaction: boolean;
+  readonly physicalFrom: string | null;
 }
 
 /** Claude's token use over a history, and of its last request (Desktop's context meter). */
@@ -321,7 +334,17 @@ function responseHasTools(records: readonly TranscriptChainRecord[]): ReadonlySe
 interface ResponseBlock {
   readonly record: AssistantRecord;
   readonly block: Record<string, unknown>;
-  readonly apiBlockIndex: number;
+  readonly index: number;
+  readonly id: string;
+}
+
+/**
+ * A block's item id: its API message and block index. A record without the index (older Claude Code; 0.4's restored
+ * turns, whose messages all share one id) is named by its own uuid, a synthetic reply by its message id as live names it.
+ */
+function blockItemId(record: AssistantRecord, position: number): string {
+  if (record.apiBlockIndex !== undefined) return assistantBlockItemId(record.message.id!, record.apiBlockIndex + position);
+  return assistantBlockItemId(record.message.model === "<synthetic>" ? record.message.id! : record.uuid, position);
 }
 
 function responseBlocks(records: readonly AssistantRecord[]): ResponseBlock[] {
@@ -329,14 +352,8 @@ function responseBlocks(records: readonly AssistantRecord[]): ResponseBlock[] {
     .map((record, order) => ({ record, order }))
     .sort((left, right) =>
       (left.record.apiBlockIndex ?? left.order) - (right.record.apiBlockIndex ?? right.order));
-  let fallbackIndex = 0;
-  return ordered.flatMap(({ record }) => assistantBlocks(record).map((block, blockIndex) => {
-    const apiBlockIndex = record.apiBlockIndex === undefined
-      ? fallbackIndex
-      : record.apiBlockIndex + blockIndex;
-    fallbackIndex = Math.max(fallbackIndex, apiBlockIndex + 1);
-    return { record, block, apiBlockIndex };
-  }));
+  return ordered.flatMap(({ record }) => assistantBlocks(record).map((block, position) =>
+    ({ record, block, index: (record.apiBlockIndex ?? 0) + position, id: blockItemId(record, position) })));
 }
 
 function assistantItems(
@@ -349,10 +366,9 @@ function assistantItems(
   peers: Peers,
 ): ThreadItem[] {
   let reasoning: Extract<ThreadItem, { type: "reasoning" }> | undefined;
-  return responseBlocks(records).flatMap(({ record, block, apiBlockIndex }): ThreadItem[] => {
-    const messageId = record.message.id!;
+  return responseBlocks(records).flatMap(({ record, block, index, id }): ThreadItem[] => {
     if (block.type === "text" && typeof block.text === "string") return [{
-      type: "agentMessage", id: assistantBlockItemId(messageId, apiBlockIndex), text: block.text,
+      type: "agentMessage", id, text: block.text,
       phase: record.message.id && toolResponses.has(record.message.id) ? "commentary" : "final_answer",
       memoryCitation: null, delivery: null, questions: null,
     }];
@@ -362,14 +378,14 @@ function assistantItems(
         return [];
       }
       const item: Extract<ThreadItem, { type: "reasoning" }> = {
-        type: "reasoning", id: assistantBlockItemId(messageId, apiBlockIndex), summary: [block.thinking], content: [],
+        type: "reasoning", id, summary: [block.thinking], content: [],
       };
       reasoning = item;
       return [item];
     }
     if (["tool_use", "server_tool_use", "mcp_tool_use"].includes(String(block.type))
       && typeof block.id === "string" && typeof block.name === "string") {
-      const item = projectTool(block as unknown as ToolUseBlock, apiBlockIndex, record, cwd, threadId, completions, peers);
+      const item = projectTool(block as unknown as ToolUseBlock, index, record, cwd, threadId, completions, peers);
       if (!CODEX_MCP_TOOLS.has(block.name)) return [item];
       const result = completions.get(block.id)?.block.content;
       return [item, ...codexMcpItems(block.id, object(block.input) ?? {}, result === undefined ? undefined : outputText(result), codexCalls)];
@@ -465,7 +481,7 @@ function turnStarts(records: readonly TranscriptChainRecord[], subagentPromptUui
     if (record.type === "assistant" && starts.length && !subagentPromptUuid) {
       assistantBlocks(record).forEach((block, position) => {
         if (answer) goOn(index);
-        lastBlock = assistantBlockItemId(record.message.id!, (record.apiBlockIndex ?? 0) + position);
+        lastBlock = blockItemId(record, position);
         answer = block.type === "text" && typeof block.text === "string" && block.text.length >= ANSWER_CHARS;
       });
     }
@@ -488,11 +504,6 @@ function turnStarts(records: readonly TranscriptChainRecord[], subagentPromptUui
   return starts;
 }
 
-/** The session's sub-agents, from the results of the calls that started them. */
-function subagentIds(completions: ReadonlyMap<string, ToolCompletion>): Set<string> {
-  return new Set([...completions.values()].flatMap(({ record }) => string(record.toolUseResult?.agentId) ?? []));
-}
-
 function projectTurns(
   records: readonly TranscriptChainRecord[],
   cwd: string,
@@ -500,10 +511,13 @@ function projectTurns(
   subagentPromptUuid: string | undefined,
   steered: ReadonlySet<string>,
   directory: PeerDirectory,
+  continues: boolean,
+  path: string,
 ): Turn[] {
   const starts = turnStarts(records, subagentPromptUuid, steered);
   const completions = toolCompletions(records);
-  const peers: Peers = { directory, children: subagentIds(completions) };
+  // As live: a window of history lacks the calls that started earlier sub-agents.
+  const peers: Peers = { directory, children: subagentFiles(path) };
   const toolResponses = responseHasTools(records);
   const codexCalls = new Map<string, number>();
   const turns = starts.map(({ index: start, id, prompt }, turnIndex) => {
@@ -555,11 +569,11 @@ function projectTurns(
         }
       }
     }
-    const status = turnStatus(turnRecords, turnIndex + 1 < starts.length);
+    const status = turnStatus(turnRecords, continues || turnIndex + 1 < starts.length);
     const startedAt = timestampSeconds(turnRecords[0]!.timestamp);
-    // A later local command (a model switch) trails the turn in the transcript without extending it.
-    const last = turnRecords.findLast((record) => record.type !== "user" || record === turnRecords[0]
-      || record.isMeta !== true && !/^<(?:command-name|local-command-)/u.test(userText(record)));
+    // A later local command (a model switch) or compaction trails the turn in the transcript without extending it.
+    const last = turnRecords.findLast((record) => record === turnRecords[0] || !isCompactBoundary(record) && (record.type !== "user"
+      || record.isMeta !== true && record.isCompactSummary !== true && !/^<(?:command-name|local-command-)/u.test(userText(record))));
     const completedAt = status === "inProgress" ? null : timestampSeconds(last?.timestamp);
     return {
       id,
@@ -587,6 +601,7 @@ function projectTurnBoundaries(
   records: readonly TranscriptChainRecord[],
   subagentPromptUuid: string | undefined,
   steered: ReadonlySet<string>,
+  turns: readonly Turn[],
 ): TurnProviderBoundary[] {
   const starts = turnStarts(records, subagentPromptUuid, steered);
   return starts.map(({ index: start, id }, turnIndex) => {
@@ -594,7 +609,9 @@ function projectTurnBoundaries(
     // A compaction that ends the turn (the next turn is the `/compact`) is not part of it: forks stay uncompacted.
     const compaction = range.findLastIndex((record) => isCompactBoundary(record));
     const kept = compaction >= 0 && !range.slice(compaction).some((record) => record.type === "assistant") ? range.slice(0, compaction) : range;
-    return { turnId: id, messageUuid: (kept.at(-1) ?? records[start]!).uuid };
+    // A `/compact` turn next took the compaction (see `projectTurns`): this turn's records end before it.
+    const last = compaction >= 0 && turns[turnIndex + 1]?.items[0]?.id === range[compaction]!.uuid ? kept : range;
+    return { turnId: id, messageUuid: (kept.at(-1) ?? records[start]!).uuid, firstUuid: records[start]!.uuid, lastUuid: (last.at(-1) ?? records[start]!).uuid };
   });
 }
 
@@ -661,11 +678,14 @@ export async function projectTranscript(input: ProjectTranscriptInput): Promise<
     skippedLines = reader.skippedLines;
     rawRecords = loaded;
   }
-  const history = input.history ?? selectHistory(rawRecords, input.leafUuid);
+  const history = input.history ?? selectHistory(rawRecords, input.leafUuid, input.physical);
   const selected = history.records;
+  parseCommands(selected.flatMap((record) => record.type === "assistant"
+    ? assistantBlocks(record).flatMap((block) => block.type === "tool_use" && block.name === "Bash" ? string(object(block.input)?.command) ?? [] : [])
+    : []));
   const header = input.header ?? summarizeTranscript(rawRecords, input.subagent?.promptRecordUuid);
   const steered = steeredPrompts(rawRecords);
-  const turns = projectTurns(selected, header.cwd, input.sessionId, input.subagent?.promptRecordUuid, steered, input.peers ?? NO_PEERS.directory);
+  const turns = projectTurns(selected, header.cwd, input.sessionId, input.subagent?.promptRecordUuid, steered, input.peers ?? NO_PEERS.directory, input.continues ?? false, input.path);
   const nickname = input.subagent?.nickname ?? null;
   const parentThreadId = input.parentThreadId ?? null;
   const status: Thread["status"] = turns.at(-1)?.status === "inProgress"
@@ -684,8 +704,11 @@ export async function projectTranscript(input: ProjectTranscriptInput): Promise<
     tokenUsage: projectedUsage(selected),
     skippedLines,
     compactionBoundaries: history.compactionBoundaries,
-    turnBoundaries: projectTurnBoundaries(selected, input.subagent?.promptRecordUuid, steered),
+    turnBoundaries: projectTurnBoundaries(selected, input.subagent?.promptRecordUuid, steered, turns),
     selectedLeafUuid: history.leafUuid,
     selectedRecordUuids: new Set(selected.map((record) => record.uuid)),
+    truncated: history.truncated,
+    partialCompaction: history.partialCompaction,
+    physicalFrom: history.physicalFrom,
   };
 }

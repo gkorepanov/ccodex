@@ -70,13 +70,13 @@ for (const thread of state.prepare(`select id, claude_session_id, cwd, claude_co
   };
   for (const row of state.prepare("select turn_json, last_claude_message_uuid last from turns where thread_id = ? order by ordinal").all(thread.id)) {
     const turn = JSON.parse(row.turn_json);
-    const messageId = `msg_${randomUUID().replaceAll("-", "")}`;
     const start = lines.length;
     for (const item of turn.items) {
       if (item.type === "userMessage") {
         add({ type: "user", message: { role: "user", content: item.content.map((part) => part.text).join("\n") } }, turn.startedAt);
       } else if (item.type === "agentMessage" && item.text) {
-        add({ type: "assistant", message: { id: messageId, type: "message", role: "assistant", model: thread.model,
+        // Each message its own API message: one shared id would group them across the turn's steers.
+        add({ type: "assistant", message: { id: `msg_${randomUUID().replaceAll("-", "")}`, type: "message", role: "assistant", model: thread.model,
           content: [{ type: "text", text: item.text }], stop_reason: "end_turn", usage: { input_tokens: 0, output_tokens: 0 } } }, turn.completedAt ?? turn.startedAt);
       }
     }

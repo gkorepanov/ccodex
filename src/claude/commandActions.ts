@@ -9,35 +9,51 @@ type ParsedCommand =
   | { type: "search"; cmd: string; query: string | null; path: string | null }
   | { type: "unknown"; cmd: string };
 
-const cache = new Map<string, readonly ParsedCommand[]>();
-const maxCacheEntries = 512;
+/** Each command's parse, a failed one too (history projects the same commands page after page). */
+const cache = new Map<string, readonly ParsedCommand[] | undefined>();
+const maxCacheEntries = 16_384;
+let binary: string | null | undefined;
 
-function parsed(command: string): readonly ParsedCommand[] | undefined {
-  let binary: string;
+function parserBinary(): string | null {
+  if (binary !== undefined) return binary;
   try {
-    binary = process.env.CCODEX_COMMAND_PARSER ?? relayBinary();
+    return binary = process.env.CCODEX_COMMAND_PARSER ?? relayBinary();
   } catch {
-    return undefined;
+    return binary = null;
   }
-  const key = `${binary}\0${command}`;
-  const cached = cache.get(key);
-  if (cached) return cached;
-  const result = spawnSync(binary, ["parse-command"], {
-    input: command,
+}
+
+function parse(parser: string, commands: readonly string[]): readonly (readonly ParsedCommand[])[] | undefined {
+  const result = spawnSync(parser, ["parse-commands"], {
+    input: JSON.stringify(commands),
     encoding: "utf8",
-    timeout: 2_000,
-    maxBuffer: 1_048_576,
+    timeout: 10_000,
+    maxBuffer: 64 << 20,
   });
   if (result.error || result.status !== 0) return undefined;
   try {
-    const value = JSON.parse(result.stdout) as ParsedCommand[];
-    if (!Array.isArray(value)) return undefined;
-    if (cache.size >= maxCacheEntries) cache.delete(cache.keys().next().value!);
-    cache.set(key, value);
-    return value;
+    const value = JSON.parse(result.stdout) as ParsedCommand[][];
+    return Array.isArray(value) && value.length === commands.length ? value : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** Parses the commands not parsed yet in one run of the parser (a page of history has hundreds). */
+export function parseCommands(commands: readonly string[]): void {
+  const parser = parserBinary();
+  const fresh = [...new Set(commands)].filter((command) => command && !cache.has(command));
+  if (!parser || !fresh.length) return;
+  const values = parse(parser, fresh);
+  fresh.forEach((command, index) => {
+    if (cache.size >= maxCacheEntries) cache.delete(cache.keys().next().value!);
+    cache.set(command, values?.[index]);
+  });
+}
+
+function parsed(command: string): readonly ParsedCommand[] | undefined {
+  parseCommands([command]);
+  return cache.get(command);
 }
 
 export function bashCommandActions(command: string, cwd: string): CommandAction[] {

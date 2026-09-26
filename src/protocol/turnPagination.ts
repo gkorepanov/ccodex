@@ -23,7 +23,7 @@ export function itemCursor(itemId: string, includeAnchor: boolean): string {
   return encodeCursor("itemId", itemId, includeAnchor);
 }
 
-function anchorCursor(key: CursorKey, cursor: string): AnchorCursor | undefined {
+export function anchorCursor(key: CursorKey, cursor: string): AnchorCursor | undefined {
   try {
     const parsed = JSON.parse(cursor) as Record<string, unknown>;
     if (typeof parsed[key] === "string" && typeof parsed.includeAnchor === "boolean") {
@@ -107,15 +107,13 @@ export function paginateTurns(
   legacyPrefixes: readonly string[] = [],
 ): Page<Turn> {
   const page = paginate(turns, "turnId", (turn) => turn.id, params, legacyPrefixes, "desc");
-  const itemsView = params.itemsView ?? "summary";
-  return {
-    ...page,
-    data: page.data.map((turn) => ({
-      ...turn,
-      itemsView,
-      items: itemsView === "notLoaded" ? [] : itemsView === "summary" ? summaryItems(turn) : turn.items,
-    })),
-  };
+  return { ...page, data: page.data.map((turn) => turnView(turn, params.itemsView)) };
+}
+
+/** The turn as a turns page shows it (`itemsView`, default summary). */
+export function turnView(turn: Turn, itemsView: TurnsListParams["itemsView"]): Turn {
+  const view = itemsView ?? "summary";
+  return { ...turn, itemsView: view, items: view === "notLoaded" ? [] : view === "summary" ? summaryItems(turn) : turn.items };
 }
 
 export function paginateItems(

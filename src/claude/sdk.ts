@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { query, type ModelInfo, type Options, type PermissionMode, type Query, type SDKUserMessage, type SlashCommand } from "@anthropic-ai/claude-agent-sdk";
 import type { Config } from "../config.js";
 import type { JsonObject } from "../protocol/codex.js";
+import type { SessionSettings } from "./session.js";
 import { modelCatalogValue, normalizeClaudeModelIdentifier } from "./modelSelection.js";
 import { claudeSkillFile } from "./toolMapper.js";
 
@@ -30,17 +31,29 @@ export interface CodexPermissions {
   readonly activePermissionProfile: { id: string; extends: null };
 }
 
-/** Codex permission settings (thread/start, turn/start, settings/update) → Claude permission mode; undefined = unchanged. */
-export function permissionModeFrom(params: JsonObject): PermissionMode | undefined {
-  if (params.collaborationMode?.mode === "plan") return "plan";
+/** Codex permission fields (thread/start, turn/start, settings/update) → Claude permission mode; undefined = none sent. */
+function chosenPermissionMode(params: JsonObject, current: PermissionMode): PermissionMode | undefined {
   const sandbox = params.sandboxPolicy?.type ?? params.sandbox ?? params.permissions;
   const fullAccess = sandbox === "dangerFullAccess" || sandbox === "danger-full-access" || sandbox === ":danger-full-access";
   if (params.approvalsReviewer && params.approvalsReviewer !== "user") return "auto";
   if (params.approvalPolicy === "never") return fullAccess ? "bypassPermissions" : "dontAsk";
   if (params.approvalPolicy !== undefined && params.approvalPolicy !== null) return "default";
   if (fullAccess) return "bypassPermissions";
-  if (params.collaborationMode?.mode === "default" || params.approvalsReviewer === "user") return "default";
+  if (params.approvalsReviewer === "user" && current === "auto") return "default";
   return undefined;
+}
+
+/**
+ * The chat's permission mode after a Codex settings change: it changes only with the permission fields Desktop sends
+ * (Desktop sends them as null to keep them); plan mode follows the collaboration mode and, left, gives back the mode
+ * the chat had before it.
+ */
+export function permissionSettings(params: JsonObject, current: Pick<SessionSettings, "permissionMode" | "planFrom">): Pick<SessionSettings, "permissionMode" | "planFrom"> {
+  const planned = current.permissionMode === "plan";
+  const kept = planned ? current.planFrom ?? "default" : current.permissionMode;
+  const base = chosenPermissionMode(params, kept) ?? kept;
+  const collaboration = params.collaborationMode?.mode;
+  return (collaboration ? collaboration === "plan" : planned) ? { permissionMode: "plan", planFrom: base } : { permissionMode: base };
 }
 
 export function codexPermissions(mode: string | null, cwd: string): CodexPermissions {

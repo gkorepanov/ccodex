@@ -3,7 +3,7 @@
  * messages between threads. Best effort throughout: when Claude does not tell where a message came from or went (or
  * tells it differently in a later version), the message shows without its thread; it never breaks the chat.
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { claudeHome } from "../config.js";
 import type { ThreadItem } from "../protocol/codex.js";
@@ -21,6 +21,12 @@ export interface Peers {
   /** Agent ids of the session's sub-agents. */
   readonly children: { has(agentId: string): boolean };
   readonly home?: string;
+}
+
+/** A session's sub-agents are its transcripts under `<session>/subagents` (a resumed session's earlier ones too). */
+export function subagentFiles(transcriptPath: string | undefined): Peers["children"] {
+  const session = transcriptPath?.replace(/\.jsonl$/u, "");
+  return { has: (agentId) => session !== undefined && /^[\w-]+$/u.test(agentId) && existsSync(join(session, "subagents", `agent-${agentId}.jsonl`)) };
 }
 
 export const NO_PEERS: Peers = {

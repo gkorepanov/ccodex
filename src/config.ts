@@ -49,10 +49,14 @@ const CLAUDE_PACKAGES: Readonly<Record<string, string>> = {
   "linux-x64-musl": "@anthropic-ai/claude-agent-sdk-linux-x64-musl",
 };
 
+let platformKey: string | undefined;
+
+/** Read once: the process report that tells glibc from musl takes tens of milliseconds. */
 export function runtimePlatformKey(): string {
-  if (process.platform !== "linux") return `${process.platform}-${process.arch}`;
+  if (platformKey) return platformKey;
+  if (process.platform !== "linux") return platformKey = `${process.platform}-${process.arch}`;
   const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined;
-  return `linux-${process.arch}-${report?.header?.glibcVersionRuntime ? "gnu" : "musl"}`;
+  return platformKey = `linux-${process.arch}-${report?.header?.glibcVersionRuntime ? "gnu" : "musl"}`;
 }
 
 export function bundledClaudeExecutable(): string {

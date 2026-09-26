@@ -15,7 +15,7 @@ const processStartTime = (pid) => {
     return `linux:${stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/u)[19]}`;
   }
   const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" });
-  return `ps:${result.stdout.trim()}`;
+  return result.stdout.trim();
 };
 
 const reservation = JSON.parse(readFileSync(pidFile, "utf8"));

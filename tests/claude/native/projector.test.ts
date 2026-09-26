@@ -82,7 +82,7 @@ describe("native Claude transcript projector", () => {
       ["next", ["user:next", "agentMessage"]],
     ]);
     // A fork at the steered turn keeps all of it.
-    expect(projection.turnBoundaries[0]).toEqual({ turnId: "story", messageUuid: "queued-text" });
+    expect(projection.turnBoundaries[0]).toEqual({ turnId: "story", messageUuid: "queued-text", firstUuid: "story", lastUuid: "queued-text" });
   });
 
   it("projects deterministic protocol ids and current tool shapes", async () => {
@@ -96,10 +96,10 @@ describe("native Claude transcript projector", () => {
     expect(turn.status).toBe("completed");
     expect(turn.items.map((item) => [item.type, item.id])).toEqual([
       ["userMessage", "prompt-1"],
-      ["reasoning", "message-1:0"],
-      ["agentMessage", "message-1:1"],
+      ["reasoning", "thinking-1:0"],
+      ["agentMessage", "text-1:0"],
       ["commandExecution", "toolu-bash"],
-      ["agentMessage", "message-2:0"],
+      ["agentMessage", "final-1:0"],
     ]);
     expect(turn.items[1]).toMatchObject({ type: "reasoning", summary: ["Inspect first"], content: [] });
     expect(JSON.stringify(turn.items)).not.toContain("secret-signature");
@@ -129,7 +129,7 @@ describe("native Claude transcript projector", () => {
     expect(after.thread.updatedAt).toBe(1_789_693_207);
   });
 
-  it("uses content positions for a legacy multi-block record without apiBlockIndex", async () => {
+  it("names the blocks of a legacy record without apiBlockIndex by its uuid and content position", async () => {
     const user = prompt("prompt", null, "Question", 1);
     const multi = assistant("answer", user.uuid, "message", [
       { type: "thinking", thinking: "Reason", signature: "hidden" },
@@ -138,7 +138,7 @@ describe("native Claude transcript projector", () => {
     const projection = await projectTranscript({
       sessionId: "session", path: "/tmp/session.jsonl", records: [user, multi],
     });
-    expect(projection.turns[0]!.items.map((item) => item.id)).toEqual(["prompt", "message:0", "message:1"]);
+    expect(projection.turns[0]!.items.map((item) => item.id)).toEqual(["prompt", "answer:0", "answer:1"]);
   });
 
   it("orders an indexed text, tool, and thinking fixture response by API block index", async () => {
