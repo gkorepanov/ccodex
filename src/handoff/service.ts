@@ -835,7 +835,7 @@ export class CrossProviderForks {
     if (method === "thread/queue/list") {
       return { provider: "claude", result: this.claude.listQueue(params as unknown as ThreadQueueListParams) };
     }
-    if (method === "app/list" || method === "mcpServerStatus/list") {
+    if (method === "app/list" || method === "mcpServerStatus/list" || method === "thread/attachment/list") {
       return { provider: "claude", result: { data: [], nextCursor: null } };
     }
     if (method === "app/installed") return { provider: "claude", result: { apps: [] } };

@@ -80,7 +80,7 @@ import { projectRpcToPublicThread } from "./logicalThreadProjection.js";
 import { isUserSideFork, normalizeUserSideFork } from "./sideFork.js";
 
 /** Stock RPC failures the App handles itself; a chat banner would only add noise (e.g. app/list 403 from Cloudflare). */
-const BANNERLESS_STOCK_ERRORS = new Set(["thread/read", "turn/steer", "app/list", "app/installed", "mcpServerStatus/list"]);
+const BANNERLESS_STOCK_ERRORS = new Set(["thread/read", "turn/steer", "app/list", "app/installed", "mcpServerStatus/list", "thread/attachment/list"]);
 
 type ForegroundProvider = "codex" | "claude";
 type FastSettings = Pick<ThreadSettings, "model" | "serviceTier">;
@@ -1515,8 +1515,10 @@ export function attachClientConnection(
             sendResult(message.id, claude.listQueue((message.params ?? {}) as ThreadQueueListParams));
             return;
           }
-          if (message.method === "app/list" || message.method === "mcpServerStatus/list") {
-            // Codex apps and MCP servers never apply to a Claude runtime.
+          if (message.method === "app/list" || message.method === "mcpServerStatus/list"
+            || message.method === "thread/attachment/list") {
+            // Codex apps, MCP servers and thread attachments never apply to a Claude runtime;
+            // stock Codex answers the same empty page for a thread without attachments.
             sendResult(message.id, { data: [], nextCursor: null });
             return;
           }
