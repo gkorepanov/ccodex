@@ -42,10 +42,17 @@ function check(id: string, valid: boolean, detected: string, expected: string, r
 }
 
 /** Pinned binaries must match exactly; an operator override may differ and is reported as a warning. */
-function versionCheck(id: string, detected: string, pinned: string, source: BinarySource | undefined, repair: string): DoctorCheck {
+export function versionCheck(id: string, detected: string, pinned: string, source: BinarySource | undefined, repair: string): DoctorCheck {
   if (hasVersion(detected, pinned)) return check(id, true, detected, pinned);
   if (source !== "override") return check(id, false, detected, pinned, repair);
-  return { id, status: "warning", detected, expected: `${pinned} (pinned; override accepted)` };
+  const key = id === "codex-version" ? "app_server_codex" : "claude_binary";
+  return {
+    id,
+    status: "warning",
+    detected,
+    expected: `${pinned} (pinned; override accepted)`,
+    repair: `Override in use. Remove ${key} from ~/.ccodex/config.toml (or its CCODEX_* variable) to return to the pinned ${pinned}.`,
+  };
 }
 
 function availabilityCheck(id: string, availability: ProviderAvailability): DoctorCheck {
