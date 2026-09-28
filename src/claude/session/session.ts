@@ -2106,6 +2106,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         input_tokens: number;
         output_tokens: number;
         cache_creation_input_tokens?: number | null;
+        cache_read_input_tokens?: number | null;
       } }).usage;
       if (activeTurnId && usage) {
         await this.submitProviderProjection(runtimeGeneration, {
@@ -2170,6 +2171,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         : [];
       if (activeTurnId) {
         await this.providerLinkItems(runtimeGeneration, message.uuid, this.threadId, itemIds);
+        if (usage) await this.publishProviderLiveUsage(runtimeGeneration, activeTurnId, usage);
       }
       return "projected";
     }
@@ -3454,6 +3456,41 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
       last,
       modelContextWindow,
     });
+  }
+
+  /**
+   * Stock app-server publishes thread/tokenUsage/updated after every item, so
+   * the App's context ring moves while a turn runs. Claude usage was only
+   * probed after the result, which left the ring empty for the whole turn.
+   * Every main-thread assistant message carries the API usage of the request
+   * that produced it, i.e. the resident context at that point, so publish it
+   * against the last known window; the turn-end probe still refines it.
+   * A fresh thread learns its window from the first result, so its first turn
+   * stays quiet until then.
+   */
+  private async publishProviderLiveUsage(
+    runtimeGeneration: number,
+    turnId: string,
+    usage: {
+      input_tokens: number;
+      output_tokens: number;
+      cache_creation_input_tokens?: number | null;
+      cache_read_input_tokens?: number | null;
+    },
+  ): Promise<void> {
+    const breakdown = usageBreakdown({
+      input_tokens: usage.input_tokens,
+      output_tokens: usage.output_tokens,
+      cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
+      cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
+    });
+    if (breakdown.totalTokens <= 0) return;
+    const inspection = await this.submitProviderProjection<RuntimeInspection>(runtimeGeneration, {
+      type: "inspectRuntime",
+      runtimeGeneration,
+    });
+    if (inspection.modelContextWindow === null) return;
+    await this.publishProviderUsage(runtimeGeneration, turnId, breakdown, inspection.modelContextWindow);
   }
 
   private async accountProviderUsage(

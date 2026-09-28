@@ -496,6 +496,69 @@ describe("Claude context usage", () => {
     await service.close();
   });
 
+  it("publishes live usage from each assistant message once the window is known", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ccodex-context-live-"));
+    directories.push(directory);
+    const database = join(directory, "state.sqlite");
+    const liveAssistant = (): SDKMessage => ({
+      type: "assistant",
+      message: {
+        role: "assistant", content: [{ type: "text", text: "working" }],
+        usage: { input_tokens: 12, cache_creation_input_tokens: 1_000, cache_read_input_tokens: 200_000, output_tokens: 300 },
+      },
+      parent_tool_use_id: null, uuid: randomUUID(), session_id: "session",
+    } as unknown as SDKMessage);
+
+    // A fresh thread has no window until its first result: only the probe publishes.
+    const firstFake = new FakeClaudeQuery(
+      undefined, undefined, [], false, undefined, capturedResult(), undefined, [liveAssistant()],
+    );
+    firstFake.contextUsage = { totalTokens: 298_078, maxTokens: 1_000_000 };
+    const firstHub = new SubscriptionHub();
+    const first = new ClaudeService(
+      config(directory), firstHub, new Logger("error"), new SqliteHybridStore(database), firstFake.factory,
+    );
+    const started = await first.startThread({ model: "claude:claude-fable-5", cwd: directory });
+    const firstEvents: Array<{ method: string; params: unknown }> = [];
+    firstHub.subscribe(started.thread.id, "test", (method, params) => firstEvents.push({ method, params }));
+    await runTurn(first, started.thread.id);
+    await waitFor(() => usageEvents(firstEvents).length === 1);
+    expect(firstEvents.findIndex((event) => event.method === "thread/tokenUsage/updated"))
+      .toBeGreaterThan(firstEvents.findIndex((event) => event.method === "turn/completed"));
+    await first.close();
+
+    // With the window persisted, the assistant message publishes before turn/completed.
+    const secondFake = new FakeClaudeQuery(
+      undefined, undefined, [], false, undefined, capturedResult(), undefined, [liveAssistant()],
+    );
+    secondFake.contextUsage = { totalTokens: 298_078, maxTokens: 1_000_000 };
+    const hub = new SubscriptionHub();
+    const service = new ClaudeService(
+      config(directory), hub, new Logger("error"), new SqliteHybridStore(database), secondFake.factory,
+    );
+    await service.resumeThread(started.thread.id);
+    const events: Array<{ method: string; params: unknown }> = [];
+    hub.subscribe(started.thread.id, "test", (method, params) => events.push({ method, params }));
+    await runTurn(service, started.thread.id, "again");
+    await waitFor(() => usageEvents(events).length === 2);
+    expect(events.findIndex((event) => event.method === "thread/tokenUsage/updated"))
+      .toBeLessThan(events.findIndex((event) => event.method === "turn/completed"));
+    expect(usageEvents(events)[0]?.params).toMatchObject({
+      turnId: service.readThread(started.thread.id, true).thread.turns.at(-1)?.id,
+      tokenUsage: {
+        last: {
+          totalTokens: 201_312, inputTokens: 201_012, cachedInputTokens: 200_000,
+          cacheWriteInputTokens: 1_000, outputTokens: 300,
+        },
+        modelContextWindow: 1_000_000,
+      },
+    });
+    expect(usageEvents(events)[1]?.params).toMatchObject({
+      tokenUsage: { last: { totalTokens: 298_078 }, modelContextWindow: 1_000_000 },
+    });
+    await service.close();
+  });
+
   it("replays the same persisted 298k snapshot on reconnect and gateway restart", async () => {
     const directory = mkdtempSync(join(tmpdir(), "ccodex-context-restart-"));
     directories.push(directory);
