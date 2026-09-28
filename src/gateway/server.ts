@@ -8,6 +8,7 @@ import { ClaudeSkillCatalog } from "../claude/skillCatalog.js";
 import { ClaudeService } from "../claude/service.js";
 import { DEFAULT_FEATURES, type HybridConfig } from "../config/config.js";
 import { startStockProcess } from "../codex/stockProcess.js";
+import { APP_TOOLS_PIPE_HEADER } from "../codex/appToolsPipe.js";
 import type { Logger } from "../observability/logger.js";
 import { attachClientConnection } from "./clientConnection.js";
 import { acquireSocketStartupLock, prepareUnixSocket } from "./socket.js";
@@ -202,6 +203,14 @@ async function startGatewayOwner(
     if (request.url !== "/rpc") {
       socket.destroy();
       return;
+    }
+    const appToolsPipe = request.headers[APP_TOOLS_PIPE_HEADER];
+    if (typeof appToolsPipe === "string" && appToolsPipe.length > 0) {
+      try {
+        stock.setAppToolsPipe(appToolsPipe);
+      } catch (error) {
+        logger.warn("stock.app-tools-pipe.failed", { target: appToolsPipe, error: String(error) });
+      }
     }
     webSockets.handleUpgrade(request, socket, head, (client) => {
       const connection = attachClientConnection(

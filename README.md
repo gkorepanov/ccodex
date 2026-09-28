@@ -145,6 +145,11 @@ keep working):
   newline-delimited JSON to the existing app-server-control socket, lazily starts the
   gateway when cold, and reconnects after gateway restarts. Provider state and lifecycle
   remain exclusively inside the existing gateway.
+- The App hands the app-server it launches an **app-tools socket**
+  (`CODEX_APP_TOOLS_PIPE_PATH`, behind the in-app browser / Computer tools). The
+  frontend forwards that path on every gateway connection and the gateway repoints
+  a stable symlink at it, so the long-lived stock app-server keeps its `codex_app`
+  MCP server working across App relaunches and gateway starts from a terminal.
 - There is **no extra macOS gateway service**. The same PID-managed gateway used over SSH
   starts lazily when the App connects and stops through the existing daemon contract.
   Setup/update/rollback only switch files and ask you to reconnect; they never restart a

@@ -3,10 +3,17 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { HybridConfig } from "../config/config.js";
 import type { Logger } from "../observability/logger.js";
+import { retargetAppToolsLink } from "./appToolsPipe.js";
+
+export const APP_TOOLS_PIPE_ENV = "CODEX_APP_TOOLS_PIPE_PATH";
 
 export interface StockProcess {
   readonly child: ChildProcess;
   readonly socketPath: string;
+  /** Stable symlink handed to stock as its app-tools socket. */
+  readonly appToolsLink: string;
+  /** Repoint the app-tools symlink at an App instance's socket; true when it changed. */
+  setAppToolsPipe(target: string): boolean;
   stop(): Promise<void>;
 }
 
@@ -47,12 +54,17 @@ export async function startStockProcess(
   mkdirSync(runDir, { recursive: true, mode: 0o700 });
   rmSync(socketPath, { force: true });
 
+  const appToolsLink = join(runDir, "app-tools.sock");
+  const inherited = process.env[APP_TOOLS_PIPE_ENV];
+  if (inherited) retargetAppToolsLink(appToolsLink, inherited);
+
   const args = [...baseArgs, "--listen", `unix://${socketPath}`];
   const child = spawn(config.realCodex, args, {
     env: {
       ...process.env,
       CODEX_CLI_PATH: undefined,
       CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED: "1",
+      [APP_TOOLS_PIPE_ENV]: appToolsLink,
     },
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -83,11 +95,17 @@ export async function startStockProcess(
     throw error;
   }
 
-  logger.info("stock.started", { pid: child.pid, socketPath });
+  logger.info("stock.started", { pid: child.pid, socketPath, appToolsLink, appToolsPipe: inherited ?? null });
 
   return {
     child,
     socketPath,
+    appToolsLink,
+    setAppToolsPipe(target: string): boolean {
+      const changed = retargetAppToolsLink(appToolsLink, target);
+      if (changed) logger.info("stock.app-tools-pipe.updated", { target });
+      return changed;
+    },
     async stop(): Promise<void> {
       stopping = true;
       if (child.exitCode === null) {

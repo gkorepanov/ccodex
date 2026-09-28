@@ -47,14 +47,16 @@ async function startFakeGateway(
   path: string,
   respond = true,
   initializeError = false,
-): Promise<{ received: string[]; close: () => Promise<void> }> {
+): Promise<{ received: string[]; headers: Array<Record<string, string | string[] | undefined>>; close: () => Promise<void> }> {
   if (existsSync(path)) rmSync(path, { force: true });
   const received: string[] = [];
+  const headers: Array<Record<string, string | string[] | undefined>> = [];
   const sockets = new WebSocketServer({ noServer: true });
   const server = createServer();
   webSockets.push(sockets);
   servers.push(server);
   server.on("upgrade", (request, socket, head) => {
+    headers.push({ ...request.headers });
     sockets.handleUpgrade(request, socket, head, (client) => {
       client.on("message", (bytes) => {
         const line = bytes.toString();
@@ -73,6 +75,7 @@ async function startFakeGateway(
   await new Promise<void>((resolve) => server.listen(path, () => resolve()));
   return {
     received,
+    headers,
     close: async () => {
       for (const client of sockets.clients) client.terminate();
       await new Promise<void>((resolve) => sockets.close(() => resolve()));
@@ -105,6 +108,36 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<voi
 }
 
 describe("desktop stdio frontend", () => {
+  it("forwards the App's app-tools socket path on every gateway connection", async () => {
+    const path = socketPath();
+    const gateway = await startFakeGateway(path);
+    const input = new PassThrough();
+    const { output, text } = collector();
+    const done = runStdioFrontend(config, path, {
+      input, output, kick: async () => undefined, initialConnectDeadlineMs: 5_000, retryDelayMs: 20,
+      appToolsPipePath: "/tmp/codex-browser-use/app.sock",
+    });
+    input.write('{"id":1,"method":"initialize"}\n');
+    await waitFor(() => text().includes('{"id":1,"result":{}}\n'));
+    expect(gateway.headers[0]?.["x-ccodex-app-tools-pipe"]).toBe("/tmp/codex-browser-use/app.sock");
+    input.end();
+    expect(await done).toBe(0);
+
+    const quiet = socketPath();
+    const quietGateway = await startFakeGateway(quiet);
+    const quietInput = new PassThrough();
+    const quietOutput = collector();
+    const quietDone = runStdioFrontend(config, quiet, {
+      input: quietInput, output: quietOutput.output, kick: async () => undefined,
+      initialConnectDeadlineMs: 5_000, retryDelayMs: 20, appToolsPipePath: "",
+    });
+    quietInput.write('{"id":1,"method":"initialize"}\n');
+    await waitFor(() => quietOutput.text().includes('{"id":1,"result":{}}\n'));
+    expect(quietGateway.headers[0]?.["x-ccodex-app-tools-pipe"]).toBeUndefined();
+    quietInput.end();
+    expect(await quietDone).toBe(0);
+  });
+
   it("relays newline-delimited JSON in both directions and honors output backpressure", async () => {
     const path = socketPath();
     const gateway = await startFakeGateway(path);
