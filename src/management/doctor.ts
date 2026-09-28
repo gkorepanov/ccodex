@@ -1,4 +1,4 @@
-import { constants, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -181,6 +181,8 @@ async function deepChecks(config: HybridConfig): Promise<DoctorCheck[]> {
     checks.push(check("merged-models", false, String(error), "both provider catalogs", "codex app-server daemon restart"));
   }
 
+  checks.push(await modelCoverage(config));
+
   const layout = installLayout();
   try {
     const { stdout } = await execute(process.env.SHELL ?? "/bin/sh", ["-lc", "command -v codex"], { timeout: 10_000, maxBuffer: 64 * 1024 });
@@ -209,6 +211,70 @@ async function deepChecks(config: HybridConfig): Promise<DoctorCheck[]> {
     "codex app-server daemon restart",
   ));
   return checks;
+}
+
+/** Known Codex desktop bundles on macOS; each ships its own Codex CLI. */
+const DESKTOP_CODEX_BUNDLES = [
+  "/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex",
+  "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+];
+
+/** Model slugs a Codex build lists in its picker, from `codex debug models`. */
+export async function visibleModelSlugs(codex: string): Promise<string[]> {
+  const { stdout } = await execute(codex, ["debug", "models"], { timeout: 20_000, maxBuffer: 8 * 1024 * 1024 });
+  const parsed = JSON.parse(stdout) as { models?: Array<{ slug?: unknown; visibility?: unknown }> };
+  return (parsed.models ?? [])
+    .filter((model) => model.visibility === "list" && typeof model.slug === "string")
+    .map((model) => model.slug as string);
+}
+
+export interface HostCodexCatalog {
+  readonly path: string;
+  readonly slugs: readonly string[];
+}
+
+/**
+ * The app-server Codex answers every model the App offers. When the host (the
+ * delegated global Codex or a desktop bundle) lists models the app-server build
+ * does not, those models fail at turn time with "model is not supported".
+ */
+export function modelCoverageCheck(appServerSlugs: readonly string[], hosts: readonly HostCodexCatalog[]): DoctorCheck {
+  const known = new Set(appServerSlugs);
+  const missing = new Map<string, string>();
+  for (const host of hosts) {
+    for (const slug of host.slugs) if (!known.has(slug) && !missing.has(slug)) missing.set(slug, host.path);
+  }
+  if (hosts.length === 0) return { id: "model-coverage", status: "ok", detected: "no other Codex to compare against", expected: "app-server Codex lists every model the host Codex does" };
+  if (missing.size === 0) {
+    return { id: "model-coverage", status: "ok", detected: `${appServerSlugs.length} models, none missing`, expected: "app-server Codex lists every model the host Codex does" };
+  }
+  const byHost = new Map<string, string[]>();
+  for (const [slug, path] of missing) byHost.set(path, [...(byHost.get(path) ?? []), slug]);
+  const detail = [...byHost].map(([path, slugs]) => `${slugs.join(", ")} (known to ${path})`).join("; ");
+  const newest = [...byHost.keys()][0]!;
+  return {
+    id: "model-coverage",
+    status: "warning",
+    detected: `missing from app-server Codex: ${detail}`,
+    expected: "app-server Codex lists every model the host Codex does",
+    repair: `Set app_server_codex = "${newest}" in ~/.ccodex/config.toml, then: codex app-server daemon restart`,
+  };
+}
+
+async function modelCoverage(config: HybridConfig): Promise<DoctorCheck> {
+  try {
+    const own = realpathSync(config.realCodex);
+    const candidates = [config.delegateCodex, ...DESKTOP_CODEX_BUNDLES]
+      .filter((path): path is string => typeof path === "string" && existsSync(path))
+      .filter((path) => { try { return realpathSync(path) !== own; } catch { return false; } });
+    const hosts: HostCodexCatalog[] = [];
+    for (const path of [...new Set(candidates)]) {
+      try { hosts.push({ path, slugs: await visibleModelSlugs(path) }); } catch { /* an unreadable host is not a finding */ }
+    }
+    return modelCoverageCheck(await visibleModelSlugs(config.realCodex), hosts);
+  } catch (error) {
+    return { id: "model-coverage", status: "warning", detected: String(error), expected: "app-server Codex lists every model the host Codex does" };
+  }
 }
 
 export async function runDoctor(config: HybridConfig, deep = false): Promise<DoctorCheck[]> {
