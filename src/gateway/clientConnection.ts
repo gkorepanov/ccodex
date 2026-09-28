@@ -80,6 +80,17 @@ import { projectRpcToPublicThread } from "./logicalThreadProjection.js";
 import { isUserSideFork, normalizeUserSideFork } from "./sideFork.js";
 
 /** Stock RPC failures the App handles itself; a chat banner would only add noise (e.g. app/list 403 from Cloudflare). */
+/**
+ * Thread-scoped requests the App sends without first resuming the thread. A
+ * gateway restart drops stock's loaded threads while the App keeps them open,
+ * so stock answers "thread not found"/"thread not loaded". The gateway resumes
+ * the thread on stock and replays the frame once instead of failing the turn.
+ */
+const RESUMABLE_STOCK_METHODS = new Set([
+  "turn/start", "turn/steer", "thread/queue/list", "thread/queue/add", "thread/queue/start",
+  "thread/turns/list", "thread/items/list", "thread/attachment/list", "thread/read",
+]);
+const STOCK_THREAD_UNLOADED = /thread not (?:found|loaded)/i;
 const BANNERLESS_STOCK_ERRORS = new Set(["thread/read", "turn/steer", "app/list", "app/installed", "mcpServerStatus/list", "thread/attachment/list"]);
 
 type ForegroundProvider = "codex" | "claude";
@@ -153,6 +164,10 @@ export function attachClientConnection(
     foreground?: ForegroundProvider;
     clearForeground?: boolean;
     remoteCatalog?: boolean;
+    /** Exact frame sent to stock, kept for thread-scoped methods so it can be replayed after a resume. */
+    replay?: string;
+    /** Set once a resume-and-replay has been attempted for this request. */
+    resumed?: boolean;
   }>();
   const recentSystemErrors = new Map<string, number>();
   const serverRequestIds = new ServerRequestIds();
@@ -164,7 +179,7 @@ export function attachClientConnection(
     requestStarted.delete(key);
     metrics.observeLatency(provider, performance.now() - started);
   };
-  const trackForwardedRequest = (message: ReturnType<typeof parseRpcMessage>) => {
+  const trackForwardedRequest = (message: ReturnType<typeof parseRpcMessage>, payload?: string) => {
     if (!message || !isRequest(message)) return;
     const params = message.params && typeof message.params === "object"
       ? message.params as {
@@ -188,6 +203,9 @@ export function attachClientConnection(
     forwardedRequests.set(requestKey(message.id), {
       method: message.method,
       ...(typeof params?.threadId === "string" ? { threadId: params.threadId } : {}),
+      ...(payload !== undefined && typeof params?.threadId === "string" && RESUMABLE_STOCK_METHODS.has(message.method)
+        ? { replay: payload }
+        : {}),
       ...(systemEphemeral
         ? { systemEphemeral: message.params as ThreadStartParams | ThreadForkParams }
         : {}),
@@ -1676,11 +1694,12 @@ export function attachClientConnection(
       forwarded = await stockSideThreads.prepareRequest(connectionId, forwarded, stockRpc);
     }
     if (forwarded) stockState.observeRequest(connectionId, forwarded);
-    trackForwardedRequest(forwarded);
+    const payload = forwarded === message ? data.toString() : JSON.stringify(forwarded);
+    trackForwardedRequest(forwarded, isBinary ? undefined : payload);
     if (stock.readyState === WebSocketState.OPEN) {
-      stock.send(forwarded === message ? data : JSON.stringify(forwarded), { binary: isBinary });
+      stock.send(forwarded === message ? data : payload, { binary: isBinary });
     } else {
-      queued.push({ data: forwarded === message ? data : Buffer.from(JSON.stringify(forwarded)), isBinary });
+      queued.push({ data: forwarded === message ? data : Buffer.from(payload), isBinary });
     }
   });
 
@@ -1724,6 +1743,26 @@ export function attachClientConnection(
           if (typeof result?.thread?.id === "string") {
             handoffs.registerForwardedEphemeralCandidate(connectionId, result.thread.id, forwarded.systemEphemeral);
           }
+        }
+        if (forwarded?.replay && forwarded.threadId && !forwarded.resumed && "error" in message
+          && STOCK_THREAD_UNLOADED.test(String(message.error.message))) {
+          const key = requestKey(message.id);
+          const { replay, threadId } = forwarded;
+          forwardedRequests.set(key, { ...forwarded, resumed: true });
+          requestStarted.set(key, performance.now());
+          void stockRpc.request("thread/resume", { threadId, excludeTurns: true })
+            .then(() => {
+              logger.info("stock.thread.resumed-for-replay", { connectionId, threadId, method: forwarded.method });
+              stock.send(replay);
+            })
+            .catch((error: unknown) => {
+              logger.warn("stock.thread.resume-failed", { connectionId, threadId, method: forwarded.method, error: String(error) });
+              forwardedRequests.delete(key);
+              requestStarted.delete(key);
+              if (isUuid(threadId) && !BANNERLESS_STOCK_ERRORS.has(forwarded.method)) emitSystemError(threadId, message.error.message);
+              sendJson(message);
+            });
+          return;
         }
         if (forwarded?.threadId && isUuid(forwarded.threadId) && "error" in message
           && !BANNERLESS_STOCK_ERRORS.has(forwarded.method)) {
