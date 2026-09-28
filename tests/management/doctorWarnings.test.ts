@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { printDoctor, versionCheck, type DoctorCheck } from "../../src/management/doctor.js";
+import { daemonVersionCheck, printDoctor, versionCheck, type DoctorCheck } from "../../src/management/doctor.js";
 
 describe("doctor provider warnings", () => {
   it("does not fail structural setup validation for an unavailable provider", () => {
@@ -48,5 +48,22 @@ describe("doctor version checks", () => {
     const claude = versionCheck("claude-version", "2.1.283 (Claude Code)", "2.1.261", "override", "reinstall");
     expect(claude).toMatchObject({ status: "warning" });
     expect(claude.repair).toContain("claude_binary");
+  });
+});
+
+describe("daemon version check", () => {
+  it("expects the pinned version when no override is configured", () => {
+    expect(daemonVersionCheck("0.153.3", "0.153.3", undefined)).toMatchObject({ status: "ok", expected: "0.153.3" });
+    expect(daemonVersionCheck("0.158.0-alpha.2.1", "0.153.3", undefined)).toMatchObject({ status: "error" });
+  });
+
+  it("expects the overridden binary's version when app_server_codex is set", () => {
+    expect(daemonVersionCheck("0.158.0-alpha.2.1", "0.153.3", "codex-cli 0.158.0-alpha.2.1"))
+      .toMatchObject({ status: "ok", expected: "0.158.0-alpha.2.1 (app_server_codex override)" });
+  });
+
+  it("flags a stale daemon still running the pin after the override changed", () => {
+    expect(daemonVersionCheck("0.153.3", "0.153.3", "codex-cli 0.158.0-alpha.2.1"))
+      .toMatchObject({ status: "error", repair: "codex app-server daemon restart" });
   });
 });

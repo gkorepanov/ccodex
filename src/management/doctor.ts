@@ -168,7 +168,10 @@ async function deepChecks(config: HybridConfig): Promise<DoctorCheck[]> {
   const expected = compatibilityManifest();
   try {
     const info = await probeAppServer(config.publicSocket);
-    checks.push(check("daemon-ready", hasVersion(info.appServerVersion, expected.codexCli), info.appServerVersion, expected.codexCli, "codex app-server daemon restart"));
+    const configured = config.realCodexSource === "override"
+      ? await executableVersion(config.realCodex).catch(() => undefined)
+      : undefined;
+    checks.push(daemonVersionCheck(info.appServerVersion, expected.codexCli, configured));
   } catch (error) {
     checks.push(check("daemon-ready", false, String(error), "managed gateway responding", "codex app-server daemon start"));
   }
@@ -259,6 +262,18 @@ export function modelCoverageCheck(appServerSlugs: readonly string[], hosts: rea
     expected: "app-server Codex lists every model the host Codex does",
     repair: `Set app_server_codex = "${newest}" in ~/.ccodex/config.toml, then: codex app-server daemon restart`,
   };
+}
+
+/**
+ * The running gateway must be the Codex the operator configured: the pin by
+ * default, or the overridden binary's version. A stale daemon left over from
+ * before a config change is the failure this catches.
+ */
+export function daemonVersionCheck(appServerVersion: string, pinned: string, configuredVersionOutput: string | undefined): DoctorCheck {
+  const configured = configuredVersionOutput && /(\d+\.\d+\.\d+[0-9A-Za-z.-]*)/.exec(configuredVersionOutput)?.[1];
+  const wanted = configured ?? pinned;
+  const detail = configured ? `${wanted} (app_server_codex override)` : wanted;
+  return check("daemon-ready", hasVersion(appServerVersion, wanted), appServerVersion, detail, "codex app-server daemon restart");
 }
 
 async function modelCoverage(config: HybridConfig): Promise<DoctorCheck> {
