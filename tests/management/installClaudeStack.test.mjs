@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
@@ -23,7 +23,18 @@ fs.writeFileSync(path, JSON.stringify(config));
 
 afterEach(() => rmSync(directory, { recursive: true, force: true }));
 
+// A codex whose help lists `mcp-server`, like the pinned 0.153.3. Codex 0.154 removed it.
+function fakeCodex(subcommands) {
+  writeFileSync(join(directory, "codex"), `#!/bin/sh
+case "$1" in
+  --version) echo "codex-cli 0.0.0-test" ;;
+  --help) printf 'Commands:\n%s' '${subcommands}' ;;
+esac
+`, { mode: 0o755 });
+}
+
 function install() {
+  if (!existsSync(join(directory, "codex"))) fakeCodex("  exec  Run\n  mcp-server  Start Codex as an MCP server (stdio)\n");
   execFileSync("sh", [resolve("scripts/install-claude-stack.sh")], {
     env: {
       ...process.env,
@@ -71,4 +82,15 @@ it("updates Claude's legacy config path when present", () => {
   configPath = join(directory, ".config.json");
   writeFileSync(configPath, JSON.stringify({ mcpServers: { codex: { command: "codex" } } }));
   expect(install().mcpServers.codex.timeout).toBe(86_400_000);
+});
+
+it("installs nothing when the codex on PATH has no mcp-server subcommand", () => {
+  fakeCodex("  exec  Run\n  mcp  Manage external MCP servers for Codex\n");
+  const result = execFileSync("sh", [resolve("scripts/install-claude-stack.sh")], {
+    env: { ...process.env, CLAUDE_DIR: join(directory, "agents-and-skills"), CLAUDE_CONFIG_DIR: directory, PATH: `${directory}:${process.env.PATH}` },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  expect(String(result)).toBe("");
+  expect(existsSync(configPath)).toBe(false);
+  expect(existsSync(join(directory, "agents-and-skills/agents/codex-wrapper.md"))).toBe(false);
 });

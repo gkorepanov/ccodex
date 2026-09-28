@@ -35,6 +35,8 @@ export interface HybridConfig {
   readonly renamePrompt?: string;
   /** Optional UX conveniences. Missing values remain enabled for backwards compatibility. */
   readonly features?: FeatureConfig;
+  /** Whether setup installs the Claude -> Codex delegation stack into Claude Code. Defaults to true. */
+  readonly installClaudeStack?: boolean;
 }
 
 export interface FeatureConfig {
@@ -64,6 +66,7 @@ interface ConfigFile {
   rpc_capture_include_content?: unknown;
   rpc_capture_max_bytes?: unknown;
   rename_prompt?: unknown;
+  install_claude_stack?: unknown;
   features?: unknown;
 }
 
@@ -331,5 +334,8 @@ export function loadConfig(): HybridConfig {
     ),
     ...(renamePrompt ? { renamePrompt } : {}),
     features: featureConfig(file.features),
+    installClaudeStack: environmentBoolean(
+      "CCODEX_INSTALL_CLAUDE_STACK", "CODEX_HYBRID_INSTALL_CLAUDE_STACK", booleanValue(file.install_claude_stack, true),
+    ),
   };
 }

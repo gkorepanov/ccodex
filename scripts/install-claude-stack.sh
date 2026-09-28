@@ -6,6 +6,19 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 CLAUDE_DIR=${CLAUDE_DIR:-"$HOME/.claude"}
 
+# The stack is only useful when the codex Claude Code will spawn can act as an
+# MCP server. Codex 0.154 removed `codex mcp-server`; installing the agent, skills
+# and server entry against such a build leaves Claude Code with a server that
+# exits on "stdin is not a terminal" and an agent that cannot work.
+if ! command -v codex >/dev/null 2>&1; then
+  echo "Claude delegation stack: skipped (no codex on PATH)" >&2
+  exit 0
+fi
+if ! codex --help 2>/dev/null | grep -q '^[[:space:]]*mcp-server[[:space:]]'; then
+  echo "Claude delegation stack: skipped ($(codex --version 2>/dev/null || echo codex) has no 'mcp-server' subcommand)" >&2
+  exit 0
+fi
+
 mkdir -p "$CLAUDE_DIR/agents" "$CLAUDE_DIR/skills"
 
 cp "$ROOT/agents/codex-wrapper.md" "$CLAUDE_DIR/agents/codex-wrapper.md"

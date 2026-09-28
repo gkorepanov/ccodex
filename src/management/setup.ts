@@ -362,7 +362,8 @@ export async function setup(args: readonly string[]): Promise<number> {
   migrateLegacyState(layout);
   const discoveredDelegate = delegatedCodexExecutable(layout.home, pinnedCodexExecutable());
   let delegateCodex = discoveredDelegate ? stableDelegate(discoveredDelegate) : undefined;
-  const publicSocket = loadConfig().publicSocket;
+  const config = loadConfig();
+  const publicSocket = config.publicSocket;
   await stagedDoctor(staged, layout);
   await startupSmoke(staged, layout);
 
@@ -457,7 +458,11 @@ export async function setup(args: readonly string[]): Promise<number> {
     else rmSync(layout.manifest, { force: true });
     throw error;
   }
-  await installClaudeStack(join(versionPath, "node_modules", "@gkorepanov", "ccodex"));
+  if (config.installClaudeStack ?? true) {
+    await installClaudeStack(join(versionPath, "node_modules", "@gkorepanov", "ccodex"));
+  } else {
+    process.stdout.write("Claude delegation stack: skipped (install_claude_stack = false).\n");
+  }
   process.stdout.write(
     `CCodex ${requestedVersion} activated. Open a new shell or run: export PATH="${layout.bin}:$PATH"`
     + `${process.platform === "darwin" ? "\nReconnect Codex App to use this version." : ""}\n`,

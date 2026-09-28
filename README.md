@@ -177,6 +177,9 @@ Keep the complete title, including emoji, within 36 characters.
 Return only the title.
 """
 
+# false leaves Claude Code alone: no codex-wrapper agent, workforce skill, or codex MCP entry.
+install_claude_stack = true
+
 [features]
 status_command = false # forward /ccstatus and /ccstate to the provider as plain messages
 optimistic_side_startup = true # open `/side` immediately while provider context is prepared

@@ -11,6 +11,12 @@
 # claude_binary = "/absolute/path/to/claude"
 # data_dir = "~/.ccodex/state"
 
+# Setup also installs a Claude -> Codex delegation stack into Claude Code (the
+# codex-wrapper agent, the workforce skill, and a `codex mcp-server` entry in
+# ~/.claude.json). Set false to leave Claude Code untouched. The installer also
+# skips itself when the codex on PATH has no `mcp-server` subcommand (Codex >= 0.154).
+install_claude_stack = true
+
 idle_timeout_seconds = 900
 model_cache_seconds = 300
 log_level = "info"
