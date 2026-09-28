@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 import WebSocket from "ws";
-import type { HybridConfig } from "../config/config.js";
+import type { BinarySource, HybridConfig } from "../config/config.js";
 import {
   claudeAgentSdkVersion, compatibilityManifest, executableVersion,
 } from "../compatibility/probe.js";
@@ -39,6 +39,13 @@ export interface DoctorCheck {
 
 function check(id: string, valid: boolean, detected: string, expected: string, repair?: string): DoctorCheck {
   return { id, status: valid ? "ok" : "error", detected, expected, ...(!valid && repair ? { repair } : {}) };
+}
+
+/** Pinned binaries must match exactly; an operator override may differ and is reported as a warning. */
+function versionCheck(id: string, detected: string, pinned: string, source: BinarySource | undefined, repair: string): DoctorCheck {
+  if (hasVersion(detected, pinned)) return check(id, true, detected, pinned);
+  if (source !== "override") return check(id, false, detected, pinned, repair);
+  return { id, status: "warning", detected, expected: `${pinned} (pinned; override accepted)` };
 }
 
 function availabilityCheck(id: string, availability: ProviderAvailability): DoctorCheck {
@@ -236,7 +243,7 @@ export async function runDoctor(config: HybridConfig, deep = false): Promise<Doc
   }
   try {
     const detected = await executableVersion(config.realCodex);
-    checks.push(check("codex-version", hasVersion(detected, expected.codexCli), detected, expected.codexCli, "npm install -g @gkorepanov/ccodex"));
+    checks.push(versionCheck("codex-version", detected, expected.codexCli, config.realCodexSource, "npm install -g @gkorepanov/ccodex"));
   } catch (error) {
     checks.push(check("codex-version", false, String(error), expected.codexCli, "npm install -g @gkorepanov/ccodex"));
   }
@@ -249,7 +256,7 @@ export async function runDoctor(config: HybridConfig, deep = false): Promise<Doc
   }
   try {
     const detected = await executableVersion(config.claudeBinary);
-    checks.push(check("claude-version", hasVersion(detected, expected.claudeCode), detected, expected.claudeCode, "npm install -g @gkorepanov/ccodex --include=optional"));
+    checks.push(versionCheck("claude-version", detected, expected.claudeCode, config.claudeBinarySource, "npm install -g @gkorepanov/ccodex --include=optional"));
   } catch (error) {
     checks.push({
       id: "claude-version",

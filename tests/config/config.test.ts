@@ -71,6 +71,24 @@ describe("opinionated feature configuration", () => {
     return loadConfig();
   }
 
+  it("records that app_server_codex and claude_binary are operator overrides", () => {
+    const { root, home, appServer, upstream } = fixture();
+    const claude = executable(join(root, "claude", "claude"));
+    const configPath = join(root, "config.toml");
+    writeFileSync(configPath, `app_server_codex = "${appServer}"\nclaude_binary = "${claude}"\n`);
+    process.env.CCODEX_HOME = home;
+    process.env.CCODEX_CONFIG = configPath;
+    process.env.PATH = join(upstream, "..");
+    const loaded = loadConfig();
+    expect(loaded.realCodexSource).toBe("override");
+    expect(loaded.claudeBinary).toBe(claude);
+    expect(loaded.claudeBinarySource).toBe("override");
+  });
+
+  it("treats a blank claude_binary as the bundled runtime", () => {
+    expect(configured('claude_binary = ""\n').claudeBinarySource).toBe("pinned");
+  });
+
   it("enables UX overrides when [features] or individual keys are absent", () => {
     expect(configured().features).toEqual({
       statusCommand: true,

@@ -1,8 +1,12 @@
 # Packaged installs normally use their pinned Codex/Claude binaries and ~/.ccodex/state.
-# Override only when deliberately testing another executable or state location.
+# Override when you need a newer runtime than the pin, for example so models the
+# pinned Codex does not know (a freshly released gpt-* slug) or the newest Claude
+# models stay selectable. An overridden binary may differ from the pin: the
+# gateway logs `compatibility.*-override` and `ccodex doctor` reports a warning
+# instead of refusing to start. Protocol drift between versions is not validated.
 # On macOS the local Codex App reaches ccodex via CODEX_CLI_PATH=~/.ccodex/bin/codex
 # (installed by `ccodex setup`); no config key is required for it.
-# app_server_codex = "/absolute/path/to/codex"
+# app_server_codex = "/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex"
 # delegate_codex = "/absolute/path/to/stock/codex"
 # claude_binary = "/absolute/path/to/claude"
 # data_dir = "~/.ccodex/state"

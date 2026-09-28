@@ -5,12 +5,19 @@ import { parse } from "smol-toml";
 import { DEFAULT_CLAUDE_MODEL_ALIASES } from "../claude/modelSelection.js";
 import { bundledClaudeExecutable, pinnedCodexExecutable } from "../runtime/dependencies.js";
 
+/** Whether a runtime binary is the version CCodex ships or one the operator chose. */
+export type BinarySource = "pinned" | "override";
+
 export interface HybridConfig {
   /** Exact Codex dependency used for app-server, daemon, and proxy operations. */
   readonly realCodex: string;
+  /** `override` when CCODEX_APP_SERVER_CODEX or `app_server_codex` replaced the pinned Codex. */
+  readonly realCodexSource?: BinarySource;
   /** Optional external Codex used only for ordinary CLI delegation. */
   readonly delegateCodex?: string;
   readonly claudeBinary: string;
+  /** `override` when CCODEX_CLAUDE_BINARY or `claude_binary` replaced the bundled Claude. */
+  readonly claudeBinarySource?: BinarySource;
   readonly dataDir: string;
   readonly publicSocket: string;
   readonly modelPrefix: string;
@@ -95,6 +102,11 @@ function expandHome(value: string): string {
 
 function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+/** A configured executable override, or undefined when the key is absent or blank. */
+function overrideValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function numberValue(value: unknown, fallback: number): number {
@@ -271,10 +283,12 @@ export function loadConfig(): HybridConfig {
   const dataDir = expandHome(
     environment("CCODEX_DATA_DIR", "CODEX_HYBRID_DATA_DIR") ?? stringValue(file.data_dir, defaultDataDir),
   );
-  const realCodexOverride = process.env.CCODEX_APP_SERVER_CODEX ?? process.env.CODEX_HYBRID_REAL_CODEX;
-  const configuredAppServerCodex = realCodexOverride ??
-    stringValue(file.app_server_codex, stringValue(file.real_codex, pinnedCodexExecutable()));
-  const realCodex = resolveExecutable(configuredAppServerCodex, "App-server Codex");
+  const realCodexOverride = process.env.CCODEX_APP_SERVER_CODEX ?? process.env.CODEX_HYBRID_REAL_CODEX ??
+    overrideValue(file.app_server_codex) ?? overrideValue(file.real_codex);
+  const realCodex = resolveExecutable(realCodexOverride ?? pinnedCodexExecutable(), "App-server Codex");
+  const realCodexSource: BinarySource = realCodexOverride === undefined ? "pinned" : "override";
+  const claudeBinaryOverride = process.env.CCODEX_CLAUDE_BINARY ?? process.env.CODEX_HYBRID_CLAUDE_BINARY ??
+    overrideValue(file.claude_binary);
   const logLevel = stringValue(file.log_level, environment("CCODEX_LOG_LEVEL", "CODEX_HYBRID_LOG_LEVEL") ?? "info");
   if (!(["debug", "info", "warn", "error"] as const).includes(logLevel as HybridConfig["logLevel"])) {
     throw new Error(`Invalid log level '${logLevel}'.`);
@@ -284,10 +298,10 @@ export function loadConfig(): HybridConfig {
 
   return {
     realCodex,
+    realCodexSource,
     ...(delegateCodex ? { delegateCodex } : {}),
-    claudeBinary:
-      process.env.CCODEX_CLAUDE_BINARY ?? process.env.CODEX_HYBRID_CLAUDE_BINARY ??
-        stringValue(file.claude_binary, bundledClaudeExecutable()),
+    claudeBinary: claudeBinaryOverride ?? bundledClaudeExecutable(),
+    claudeBinarySource: claudeBinaryOverride === undefined ? "pinned" : "override",
     dataDir,
     publicSocket: expandHome(
       environment("CCODEX_SOCKET", "CODEX_HYBRID_SOCKET") ??

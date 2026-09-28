@@ -106,8 +106,12 @@ CCodex owns the SSH-side `codex app-server` command and preserves the Codex App'
 full thread / turn / tool / approval lifecycle, while delegating ordinary Codex CLI
 commands to your global Codex installation:
 
-- `codex app-server`, `proxy`, and `daemon ...` always run on CCodex's **pinned**
-  runtime; everything else goes to your external Codex CLI.
+- `codex app-server`, `proxy`, and `daemon ...` run on CCodex's **pinned**
+  runtime by default; everything else goes to your external Codex CLI. When a
+  newly released model is only known to a newer Codex (or Claude Code) than the
+  pin, point `app_server_codex` / `claude_binary` in `~/.ccodex/config.toml` at
+  that binary: an explicit override is accepted with a logged warning instead of
+  refusing to start, and `ccodex doctor` reports it as a warning.
 - Native `gpt-*` models remain completely stock; `claude:*` entries run on Claude Code.
   Claude effort and fast mode map from Codex reasoning / priority settings.
 - Switching providers on the next message creates a compact context handoff behind
@@ -155,7 +159,7 @@ keep working):
 | | |
 |---|---|
 | **CCodex** | `0.4.8` |
-| **Embedded Codex CLI** | `0.153.3` (pinned; a newer global Codex never replaces it) |
+| **Embedded Codex CLI** | `0.153.3` (pinned; a newer global Codex never replaces it unless you set `app_server_codex`) |
 | **Claude Agent SDK / Claude Code** | `0.3.261` / `2.1.261` |
 | **Runtime** | Node.js `>=22.13 <27`, npm `>=10` |
 | **Platforms** | macOS 11+ (arm64) · Linux arm64 & x64, glibc ≥2.31 (Ubuntu 22.04+, Debian 11+, Fedora/RHEL equivalents). Alpine/musl not supported |

@@ -63,10 +63,28 @@ export async function probeHostCompatibility(config: HybridConfig, logger: Logge
   });
   const sdkVersion = claudeAgentSdkVersion();
   if (!exactVersion(codexVersion, expected.codexCli)) {
-    throw new Error(`Unsupported pinned Codex: expected ${expected.codexCli}, found '${codexVersion}'. Reinstall @gkorepanov/ccodex.`);
+    if (config.realCodexSource !== "override") {
+      throw new Error(`Unsupported pinned Codex: expected ${expected.codexCli}, found '${codexVersion}'. Reinstall @gkorepanov/ccodex.`);
+    }
+    // An operator-selected Codex (for example the Codex App's own bundled CLI) may be
+    // newer than the pin so that models the pinned build does not know stay usable.
+    logger.warn("compatibility.codex-override", {
+      codexVersion,
+      pinned: expected.codexCli,
+      executable: config.realCodex,
+      note: "app-server Codex differs from the pinned build; protocol drift is not validated",
+    });
   }
   if (claudeVersion && !exactVersion(claudeVersion, expected.claudeCode)) {
-    throw new Error(`Unsupported bundled Claude: expected ${expected.claudeCode}, found '${claudeVersion}'. Reinstall @gkorepanov/ccodex.`);
+    if (config.claudeBinarySource !== "override") {
+      throw new Error(`Unsupported bundled Claude: expected ${expected.claudeCode}, found '${claudeVersion}'. Reinstall @gkorepanov/ccodex.`);
+    }
+    logger.warn("compatibility.claude-override", {
+      claudeVersion,
+      pinned: expected.claudeCode,
+      executable: config.claudeBinary,
+      note: "Claude binary differs from the bundled build; its model catalog is used as reported",
+    });
   }
   if (sdkVersion !== expected.claudeAgentSdk) {
     throw new Error(`Unsupported Claude Agent SDK: expected ${expected.claudeAgentSdk}, found ${sdkVersion}. Reinstall @gkorepanov/ccodex.`);
