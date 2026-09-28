@@ -108,7 +108,7 @@ export class ClaudeSkillCatalog {
           abortController: abort,
           allowedTools: [],
           settingSources: ["user", "project", "local"],
-          env: claudeEnvironment(),
+          env: claudeEnvironment(process.env, this.config.claudeEnv),
           stderr: (line) => this.logger.debug("claude.skills.stderr", { cwd, output: line }),
         },
       });

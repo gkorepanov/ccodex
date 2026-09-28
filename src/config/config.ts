@@ -37,6 +37,8 @@ export interface HybridConfig {
   readonly features?: FeatureConfig;
   /** Whether setup installs the Claude -> Codex delegation stack into Claude Code. Defaults to true. */
   readonly installClaudeStack?: boolean;
+  /** Environment variables added to every Claude runtime CCodex starts (`[claude_env]`). */
+  readonly claudeEnv?: Readonly<Record<string, string>>;
 }
 
 export interface FeatureConfig {
@@ -67,6 +69,7 @@ interface ConfigFile {
   rpc_capture_max_bytes?: unknown;
   rename_prompt?: unknown;
   install_claude_stack?: unknown;
+  claude_env?: unknown;
   features?: unknown;
 }
 
@@ -128,12 +131,12 @@ function optionalString(value: unknown, key: string): string | undefined {
   return value.trim();
 }
 
-function stringMap(value: unknown, fallback: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
+function stringMap(value: unknown, fallback: Readonly<Record<string, string>>, key = "model_aliases"): Readonly<Record<string, string>> {
   if (value === undefined) return fallback;
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("model_aliases must be a TOML table.");
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${key} must be a TOML table.`);
   const entries = Object.entries(value);
   if (entries.some(([, target]) => typeof target !== "string" || target.length === 0)) {
-    throw new Error("model_aliases values must be non-empty strings.");
+    throw new Error(`${key} values must be non-empty strings.`);
   }
   return Object.fromEntries(entries) as Record<string, string>;
 }
@@ -337,5 +340,6 @@ export function loadConfig(): HybridConfig {
     installClaudeStack: environmentBoolean(
       "CCODEX_INSTALL_CLAUDE_STACK", "CODEX_HYBRID_INSTALL_CLAUDE_STACK", booleanValue(file.install_claude_stack, true),
     ),
+    claudeEnv: stringMap(file.claude_env, {}, "claude_env"),
   };
 }

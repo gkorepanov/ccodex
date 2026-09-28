@@ -479,6 +479,7 @@ export class ClaudeService {
         undefined,
         {
           claudeBinary: this.config.claudeBinary,
+          ...(this.config.claudeEnv ? { claudeEnv: this.config.claudeEnv } : {}),
           logger: this.logger,
           queryFactory: this.queryFactory,
           transcripts: this.transcripts,
@@ -2438,7 +2439,7 @@ export class ClaudeService {
         abortController: abort,
         allowedTools: [],
         settingSources: ["user", "project", "local"],
-        env: claudeEnvironment(),
+        env: claudeEnvironment(process.env, this.config.claudeEnv),
         stderr: (line) => this.logger.debug("claude.usage-probe.stderr", { output: line }),
       },
     });

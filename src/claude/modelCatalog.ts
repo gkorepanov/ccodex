@@ -157,7 +157,7 @@ export class ClaudeModelCatalog {
         abortController: abort,
         allowedTools: [],
         settingSources: ["user", "project", "local"],
-        env: claudeEnvironment(),
+        env: claudeEnvironment(process.env, this.config.claudeEnv),
         stderr: (line) => this.logger.debug("claude.model-probe.stderr", { output: line }),
       },
     });

@@ -85,6 +85,13 @@ describe("opinionated feature configuration", () => {
     expect(loaded.claudeBinarySource).toBe("override");
   });
 
+  it("parses [claude_env] as string overrides for Claude runtimes", () => {
+    expect(configured('[claude_env]\nCLAUDE_AUTOCOMPACT_PCT_OVERRIDE = "65"\n').claudeEnv)
+      .toEqual({ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "65" });
+    expect(configured().claudeEnv).toEqual({});
+    expect(() => configured('[claude_env]\nX = 1\n')).toThrow("claude_env values must be non-empty strings.");
+  });
+
   it("treats a blank claude_binary as the bundled runtime", () => {
     expect(configured('claude_binary = ""\n').claudeBinarySource).toBe("pinned");
   });

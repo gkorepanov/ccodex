@@ -39,6 +39,12 @@ Keep the complete title, including emoji, within 36 characters.
 Return only the title.
 """
 
+# Environment added to every Claude runtime CCodex starts (catalog probes and
+# threads). Keeps a Claude Code setting in force here even if its user settings
+# are not loaded. Values must be strings.
+# [claude_env]
+# CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = "65"
+
 # Optional status command interception. This does not affect provider routing or lifecycle.
 [features]
 status_command = true # intercept `/ccstatus`, `/ccstate`, and legacy status aliases without a model turn

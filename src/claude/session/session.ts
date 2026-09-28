@@ -271,6 +271,7 @@ interface TurnLifecycle {
 
 export interface ClaudeSessionRuntimeDependencies {
   readonly claudeBinary: string;
+  readonly claudeEnv?: Readonly<Record<string, string>>;
   readonly logger: Logger;
   readonly queryFactory: ClaudeQueryFactory;
   readonly transcripts: TranscriptBrancher;
@@ -1081,6 +1082,7 @@ export class ClaudeSession implements ClaudeSessionHandle<ClaudeSessionCommand> 
         && record.thread.threadSource === "user"
       ),
       claudeBinary: this.runtimeDependencies!.claudeBinary,
+      ...(this.runtimeDependencies!.claudeEnv ? { claudeEnv: this.runtimeDependencies!.claudeEnv } : {}),
       model: record.claudeModelValue,
       settingsGeneration: settingsGeneration(record),
       lastCompletedTurnId: record.lastCompletedTurnId,

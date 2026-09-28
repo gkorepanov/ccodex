@@ -128,6 +128,7 @@ export interface RuntimeStartup {
   readonly ephemeral: boolean;
   readonly persistSession: boolean;
   readonly claudeBinary: string;
+  readonly claudeEnv?: Readonly<Record<string, string>>;
   readonly model: string;
   readonly settingsGeneration: number;
   readonly lastCompletedTurnId: string | null;
@@ -226,7 +227,7 @@ export function createProviderRuntime(
         ...(outputSchema
           ? { outputFormat: { type: "json_schema", schema: outputSchema } as const }
           : {}),
-        env: claudeEnvironment(),
+        env: claudeEnvironment(process.env, startup.claudeEnv),
         stderr: (line) => logger.debug("claude.stderr", { threadId: startup.threadId, output: line }),
     },
     queryFactory,
