@@ -2,6 +2,50 @@
 
 Back to the [README](../README.md).
 
+## Features in detail
+
+- **Claude models in the model picker**, next to `gpt-*` (ids `claude:…`), with Claude's
+  effort levels and Fast mode. Codex's `ultra` effort runs Claude at `max` and has it
+  delegate to sub-agents proactively, as stock does for GPT.
+- **Switch providers mid-chat.** Pick a GPT model in a Claude chat (or the other way
+  round) and the conversation is compacted into a summary that the other provider
+  continues from. The App keeps showing one chat with one history; edits and forks across
+  the switch work.
+- **Codex App features on Claude chats**: approvals, Plan mode, `/goal`, `/compact`, fork,
+  message edits, steering and queued messages, Stop, side chats (`/side`, served by
+  Claude's `/btw`), images, Claude's questions as the App's question prompts, its task
+  list as the turn's to-do list, and thinking as reasoning summaries.
+- **Sub-agents and background commands like stock's**: Claude sub-agents open as their
+  own threads, background shell commands show as background terminals, and messages
+  between Claude chats show as the App's messages between tasks.
+- **Claude skills in the `$` picker**, beside Codex skills, in Claude and GPT chats.
+- **Search**: the sidebar search and find-in-chat cover Claude chats too.
+- **Phone**: turn on remote control in the Codex App (or
+  `codex app-server daemon enable-remote-control` on the host) and pair the ChatGPT
+  mobile app as usual; it drives Claude chats like GPT ones.
+- **Your `claude` CLI sessions show up** in the App, and chats from the App resume in
+  `claude --resume <id>` (a Claude chat's id is its Claude session id). While another live
+  Claude process has a chat open, the App can't start a turn in it.
+- **Claude can delegate to Codex** through the `codex-wrapper` agent that setup installs;
+  what Codex does streams into the Claude chat.
+- **`/cc` status card** (also `/ccstatus`, `/ccodex`, `/ccstate`, with or without the
+  slash, or *CCodex status* in the `/` menu): the chat's model, effort, permission mode,
+  context use, session state, and Claude and Codex plan limits. Sent while a turn runs,
+  it answers at once and never reaches the model.
+- **Emoji thread titles** from a small GPT model and an editable prompt; Claude chats get
+  a ` ✳️` suffix.
+
+## App controls in Claude chats
+
+Claude chats follow the App's own controls:
+
+| Codex App | Claude Code |
+|---|---|
+| *Full Access* / *Ask for approval* / *Approve for me* | permission mode `bypassPermissions` / `default` / `auto` |
+| Plan mode | permission mode `plan` |
+| Reasoning effort | effort (`ultra` = `max` + proactive sub-agents) |
+| Fast | Claude fast mode |
+
 ## How it works
 
 CCodex is a thin gateway in front of your installed `codex app-server`: the App starts
@@ -77,3 +121,17 @@ Claude's 30-day cleanup deleted come back as text. The 0.4 databases move to
 - On a Mac, the App's browser works only for processes the running App launched, so the App
   replaces a gateway started from a terminal (or by an earlier, now closed App launch) with
   its own; chats running in the old one stop.
+
+## Development
+
+```sh
+npm ci --ignore-scripts
+npm run check
+npm test                  # unit and black-box gateway tests, relay tests
+scripts/e2e/run.sh        # rootless podman, real models, copies of your credentials
+```
+
+## License
+
+MIT — see [`LICENSE`](../LICENSE). Third-party licenses and notices:
+[`legal/LICENSES.md`](../legal/LICENSES.md), [`legal/THIRD_PARTY_NOTICES.md`](../legal/THIRD_PARTY_NOTICES.md).
