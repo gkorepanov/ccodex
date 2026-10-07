@@ -1289,6 +1289,16 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(models.data.map((model: any) => model.id)).toContain(CLAUDE);
   });
 
+  it("lists every model Claude lists, though Claude refuses to switch to one of them", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "ccodex-state-"));
+    await gateway.stop();
+    fakeClaude.refusedModel = "claude-haiku-4-5-20251001";
+    gateway = await startTestGateway({ dataDir });
+    client = await gateway.connect();
+    const models = await client.request("model/list", {});
+    expect(models.data.map((model: any) => model.id)).toEqual(expect.arrayContaining([CLAUDE, "claude:claude-haiku-4-5-20251001"]));
+  });
+
   it("asks Claude again after an update: the list another version reported is stale (a new model)", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "ccodex-state-"));
     const stale = [{ value: "stale-model", resolvedModel: "claude-stale-1", displayName: "Stale 1", description: "" }];

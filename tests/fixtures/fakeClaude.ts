@@ -13,7 +13,7 @@ export interface FakeClaudeLog {
   readonly calls: Array<{ method: string; args: unknown[] }>;
 }
 
-export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string; spawnError: string | null; compactError: string | null; hold: Promise<void> | null; goalHold: Promise<void> | null; backgroundMs: number; modelsHold: Promise<void> | null; usageDown: boolean; fastOff: boolean } = {
+export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string; spawnError: string | null; compactError: string | null; hold: Promise<void> | null; goalHold: Promise<void> | null; backgroundMs: number; modelsHold: Promise<void> | null; refusedModel: string | null; usageDown: boolean; fastOff: boolean } = {
   prompts: [],
   options: [],
   calls: [],
@@ -30,6 +30,8 @@ export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) 
   backgroundMs: 500,
   /** Set: the models probe answers only once it settles. */
   modelsHold: null,
+  /** Set: Claude lists this model but refuses to switch to it (the account or organization may not use it). */
+  refusedModel: null,
   /** Set: claude.ai's usage endpoint fails, Claude's `/usage` data has no windows. */
   usageDown: false,
   /** Set: fast mode is off for the account (no usage credits). */
@@ -45,6 +47,7 @@ export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) 
     this.goalHold = null;
     this.backgroundMs = 500;
     this.modelsHold = null;
+    this.refusedModel = null;
     this.usageDown = false;
     this.fastOff = false;
     stopEarly = false;
@@ -545,6 +548,7 @@ export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<Message>;
     // Like Claude with CLAUDE_CODE_AUTO_COMPACT_WINDOW=400000: Haiku's own window is smaller.
     getContextUsage: () => Promise.resolve({ maxTokens: String(options.model).includes("haiku") ? 200_000 : 400_000 }),
     setModel: (model: string) => {
+      if (model === fakeClaude.refusedModel) return Promise.reject(new Error(`Model '${model}' is restricted by your organization's settings.`));
       options.model = model;
       if (options.persistSession === false) return record("setModel")(model);
       // Like the CLI: the switch lands in the transcript as a local `/model` command.

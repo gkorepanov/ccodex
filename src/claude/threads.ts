@@ -792,9 +792,12 @@ export class ClaudeThreads {
     const models = await withProbeQuery(this.config, undefined, async (probe) => {
       const models: ClaudeModel[] = await probe.supportedModels();
       // Claude's own context budget per model: its window, capped by settings such as CLAUDE_CODE_AUTO_COMPACT_WINDOW.
+      // A model Claude lists but does not switch to here (an account or organization restriction, a failed check)
+      // stays listed as Claude lists it, with the default window.
       for (const model of models) {
-        await probe.setModel(model.value);
-        model.contextWindow = (await probe.getContextUsage({ detail: "summary" })).maxTokens;
+        model.contextWindow = await probe.setModel(model.value)
+          .then(() => probe.getContextUsage({ detail: "summary" }))
+          .then((usage) => usage.maxTokens, () => undefined);
       }
       return models;
     });
