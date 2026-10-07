@@ -34,6 +34,15 @@ Codex unchanged. No CCodex servers, no telemetry; MIT-licensed.
 > [!WARNING]
 > CCodex is young. Expect bugs — and please [report them](https://github.com/gkorepanov/ccodex/issues).
 
+## How it works
+
+<p align="center">
+  <img src="docs/how-it-works.png" width="90%" alt="CCodex on your computer and on a remote server, between the Codex App and Claude Code or Codex" />
+</p>
+
+Install CCodex where your chats run: on your computer for the local Codex App, and on a
+server you open over SSH. Technical details: [`docs/details.md`](docs/details.md).
+
 ## What you get
 
 - **Claude models in the model picker**, next to `gpt-*` (ids `claude:…`), with Claude's
@@ -120,23 +129,7 @@ codex app-server daemon restart
 - **Local Codex App on Linux:** setup doesn't configure it; start the App with
   `CODEX_CLI_PATH=~/.ccodex/bin/codex` in its environment.
 
-### What setup changes
-
-- Installs the version under `~/.ccodex/versions/` and the `codex` / `ccodex` shims in
-  `~/.ccodex/bin`, which a managed block (`# >>> ccodex >>>`) puts first on `PATH` in your
-  Bash, Zsh and Fish startup files.
-- Links `~/.local/bin/codex` to the shim; a `codex` found there moves to
-  `~/.ccodex/backups/remote-codex` and stays the Codex CCodex runs.
-- macOS: sets `CODEX_CLI_PATH` for the local App (`launchctl setenv` plus a login
-  LaunchAgent `dev.ccodex.codex-cli-path`), so the App starts CCodex instead of its bundled
-  `codex`. The signed `.app` is never touched, so its auto-updates keep working.
-- Claude Code: sets `cleanupPeriodDays: 36500` in `~/.claude/settings.json` when unset
-  (Claude deletes transcripts older than 30 days by default, and with them your Claude
-  chats), and installs the `codex-wrapper` agent and the `codex` MCP server (user scope).
-- Never restarts a running gateway: a new version takes over after
-  `codex app-server daemon restart`.
-
-## Update, upgrade from 0.4, uninstall
+## Update, uninstall
 
 ```sh
 ccodex update             # to npm latest; --check only reports, --next takes the pre-release
@@ -145,18 +138,8 @@ ccodex uninstall          # keeps ~/.ccodex/config.toml and ~/.ccodex/state
 ccodex uninstall --purge --yes   # also deletes ~/.ccodex
 ```
 
-Uninstall stops CCodex's gateway and undoes the `PATH`, `~/.local/bin/codex` and
-`CODEX_CLI_PATH` changes; what setup added to `~/.claude` stays. If `ccodex` is gone from
-`PATH`, use the release's `uninstall.sh` (`… | sh -s -- --purge` to purge):
-`curl -fsSL https://github.com/gkorepanov/ccodex/releases/latest/download/uninstall.sh | sh`
-
-**From 0.4:** run `ccodex update` (or reinstall), then `codex app-server daemon restart`.
-0.5 keeps no databases of its own; setup migrates 0.4's state once before it activates
-0.5 (a failed migration activates nothing). Provider-switch history, archive flags,
-sections and names carry over. Claude chats get their Claude session ids (links to 0.4
-thread ids stop working), 0.4's side chats are archived, and chats whose transcripts
-Claude's 30-day cleanup deleted come back as text. The 0.4 databases move to
-`~/.ccodex.0.4-backup`.
+What setup changes, what uninstall undoes and upgrading from 0.4:
+[`docs/details.md`](docs/details.md).
 
 ## Settings
 
@@ -169,47 +152,14 @@ Claude chats follow the App's own controls:
 | Reasoning effort | effort (`ultra` = `max` + proactive sub-agents) |
 | Fast | Claude fast mode |
 
-`~/.ccodex/config.toml` (every key optional; all of them are in
-[`examples/config.toml`](examples/config.toml)):
-
-- `rename_prompt` — the title prompt; remove it for stock Codex titles (manual names
-  always win). `title_model` — the model that writes them.
-- `improve_models_formatting_for_codex_app` (default `true`) — adds
-  [`instructions/ccodex_extra_common_instructions.md`](instructions/ccodex_extra_common_instructions.md)
-  (formulas and plots the App renders) to the App's instructions for Codex models and to
-  Claude's; Claude also gets
-  [`instructions/ccodex_extra_claude_instructions.md`](instructions/ccodex_extra_claude_instructions.md)
-  (what the App shows beyond a terminal).
-- `log_level` — `debug`, `info` (default), `warn`, `error`.
-- `codex_binary`, `delegate_codex`, `claude_binary` — use a specific `codex` or `claude`.
+Options of `~/.ccodex/config.toml` (title prompt, log level, specific `codex` or `claude`
+binaries): [`docs/details.md`](docs/details.md#config-file).
 
 ## Troubleshooting
 
-- `ccodex doctor` checks Node, Codex and Claude and their logins, the prebuilt native
-  relay (`@gkorepanov/ccodex-relay-*`), the gateway and the install, and says what to run.
+- `ccodex doctor` checks the install and logins and says what to run.
 - `codex app-server daemon restart` restarts the gateway (chats running in it stop).
-- The gateway's log is `~/.codex/app-server-daemon/app-server.stderr.log`, rewritten at
-  each gateway start; set `log_level = "debug"` for more.
-- For a bug report, `rpc_capture = true` records every App message to
-  `~/.ccodex/state/rpc.jsonl` (mode `0600`, capped at 1 GiB, prompts and outputs
-  included). Off by default; it never leaves your disk.
-- The App's built-in `/status` differs by client (Desktop may show only its OpenAI account);
-  `/cc` shows the same in every client.
-- A gateway restart (`codex app-server daemon restart`, an update) stops running chats; the
-  App reconnects and reopens its chats, as with a stock app-server restart.
-- On a Mac, the App's browser works only for processes the running App launched, so the App
-  replaces a gateway started from a terminal (or by an earlier, now closed App launch) with
-  its own; chats running in the old one stop.
-
-## How it works
-
-CCodex is a thin gateway in front of your installed `codex app-server`: the App starts
-CCodex's `codex`, one stock app-server serves every GPT chat unchanged, and `claude:*`
-chats run on the Claude Agent SDK with Claude's transcripts in `~/.claude/projects` as
-their only source of truth. The only state CCodex adds is an optional
-`~/.ccodex/state/meta.json` (provider-switch history, archive flags and sections of Claude
-chats). Plain `codex …` commands (TUI, `exec`, `login`) run your installed Codex; `codex
-mcp-server`, removed from Codex in `0.154`, is served by CCodex on top of `codex exec`.
+- Logs, bug-report captures and known quirks: [`docs/details.md`](docs/details.md#troubleshooting).
 
 ## Development
 

@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 const files = execFileSync("git", ["ls-files"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
 const allowedMarkdown = new Set([
   "README.md",
+  "docs/details.md",
   "legal/LICENSES.md",
   "legal/THIRD_PARTY_NOTICES.md",
 ]);

@@ -26,6 +26,7 @@ lab/apple-container/.build/
 # Public documentation is intentionally tiny. Internal plans and audits stay private.
 *.md
 !README.md
+!docs/details.md
 !legal/LICENSES.md
 !legal/THIRD_PARTY_NOTICES.md
 !agents/*.md
