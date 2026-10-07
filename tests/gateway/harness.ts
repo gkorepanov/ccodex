@@ -16,6 +16,8 @@ type Message = Record<string, any>;
 /** A JSON-RPC client over the gateway socket, like Desktop's stdio frontend. */
 export class Client {
   public readonly messages: Message[] = [];
+  /** What stock answered the client's `initialize`. */
+  public initialized: Message = {};
   public onRequest: (message: Message) => unknown = () => ({ decision: "accept" });
   private nextId = 0;
   private readonly pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
@@ -40,7 +42,7 @@ export class Client {
     const socket = new WebSocket("ws://ccodex/rpc", { createConnection: () => createConnection(socketPath), perMessageDeflate: false });
     await new Promise((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
     const client = new Client(socket);
-    await client.request("initialize", { clientInfo: { name, title: "Test", version: "1" }, capabilities: { experimentalApi: true } });
+    client.initialized = await client.request("initialize", { clientInfo: { name, title: "Test", version: "1" }, capabilities: { experimentalApi: true } });
     client.socket.send(JSON.stringify({ method: "initialized" }));
     return client;
   }

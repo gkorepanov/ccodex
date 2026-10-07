@@ -1289,6 +1289,10 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(models.data.map((model: any) => model.id)).toContain(CLAUDE);
   });
 
+  it("leaves the App's name on GPT requests to OpenAI, as with a stock app-server the App runs itself", async () => {
+    expect(client.initialized.userAgent).toMatch(/^codex_desktop\//u);
+  });
+
   it("lists every model Claude lists, though Claude refuses to switch to one of them", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "ccodex-state-"));
     await gateway.stop();

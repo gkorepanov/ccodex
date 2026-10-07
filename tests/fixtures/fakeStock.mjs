@@ -101,8 +101,14 @@ function stockPage(list, params) {
 }
 
 const config = { model: "gpt-6-luna" };
+let originator;
 const handlers = {
-  initialize: (connection) => { connection.initialized = true; return { userAgent: "fake-stock/0.156.0", codexHome: "/fake", platformFamily: "unix", platformOs: "linux" }; },
+  // Like stock: the first client that is no internal one names every request to OpenAI (its originator).
+  initialize: (connection, params) => {
+    connection.initialized = true;
+    if (!["codex_app_server_daemon", "codex-backend"].includes(params.clientInfo?.name)) originator ??= params.clientInfo?.name;
+    return { userAgent: `${originator ?? "codex_cli_rs"}/0.156.0`, codexHome: "/fake", platformFamily: "unix", platformOs: "linux" };
+  },
   "thread/start": (connection, params) => {
     const thread = newThread(params);
     thread.subscribers = new Set([connection]);

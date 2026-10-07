@@ -131,10 +131,12 @@ export class StockClient {
     });
   }
 
-  public static async connect(socketPath: string, clientName = "ccodex"): Promise<StockClient> {
+  /** CCodex's own connection, named as stock's daemon names its own: stock then names its requests to OpenAI after the
+   *  first client that connects (the App), as when the App runs it directly. */
+  public static async connect(socketPath: string): Promise<StockClient> {
     const client = new StockClient(openStockSocket(socketPath));
     await client.request("initialize", {
-      clientInfo: { name: clientName, title: "CCodex", version: "0.5.0" },
+      clientInfo: { name: "codex_app_server_daemon", title: "CCodex", version: "0.5.0" },
       capabilities: { experimentalApi: true },
     });
     client.notify("initialized");

@@ -71,7 +71,7 @@ export class Gateway {
 
   public async start(stockArgs: readonly string[], remoteControl: boolean): Promise<void> {
     this.stockProcess = await startStockProcess(this.config, stockArgs, this.logger);
-    this.stock = await StockClient.connect(this.stockProcess.socketPath, "ccodex-internal");
+    this.stock = await StockClient.connect(this.stockProcess.socketPath);
     this.stock.onFrame = (text) => this.internalFrame(text);
     this.claude = new ClaudeThreads(this.config, this, this.logger);
     this.catalog = new Catalog(this);
