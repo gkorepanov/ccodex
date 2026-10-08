@@ -30,8 +30,6 @@ interface PendingServerRequest {
 /** Codex config keys the App writes with the picked model; kept out of config.toml while that model is Claude's. */
 const CLAUDE_DEFAULT_KEYS = new Set(["model", "model_reasoning_effort", "service_tier"]);
 
-const NO_ROLLOUT = /"message":"no rollout found for thread id ([0-9a-f-]{36})"/u;
-
 /** Thread notifications stock broadcasts to every initialized connection. */
 const GLOBAL_NOTIFICATIONS = new Set([
   "thread/started", "thread/status/changed", "thread/name/updated", "thread/archived", "thread/unarchived",
@@ -240,10 +238,6 @@ export class Gateway {
       if (thread.ephemeral === true) return connection.ephemeralRequests.size ? text : undefined;
       if (this.lineages.holdAnnouncement(connection, thread.id, text)) return undefined;
     }
-    // Stock has nothing of a thread a client asked about: its row goes too (Desktop's catalog keeps a remote host's
-    // rows until told they are deleted; the error alone drops a row only until the next restart).
-    const missing = text.startsWith("{\"error\"") ? NO_ROLLOUT.exec(text) : null;
-    if (missing) connection.send(JSON.stringify({ method: "thread/deleted", params: { threadId: missing[1] } }), true);
     if (text.startsWith("{\"method\":\"remoteControl/status/changed\"")) {
       this.remote.intercept(connection, (JSON.parse(text) as JsonObject).params);
       return undefined;

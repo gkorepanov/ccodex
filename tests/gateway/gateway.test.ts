@@ -1472,12 +1472,10 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(client.notifications("item/completed", threadId).some((message) => message.params.item.text === "gpt: third")).toBe(true);
   });
 
-  it("tells a client a thread stock has nothing of is deleted (Desktop's catalog keeps a remote row until told)", async () => {
-    const other = await gateway.connect();
+  it("passes stock's answer for a thread stock has nothing of, and only it (a side chat after a reconnect)", async () => {
     const gone = "01a0ceaa-ef3d-7019-80b2-19d560371ee6";
     await expect(client.request("thread/resume", { threadId: gone })).rejects.toThrow(`no rollout found for thread id ${gone}`);
-    expect(client.notifications("thread/deleted").map((message) => message.params)).toEqual([{ threadId: gone }]);
-    expect(other.notifications("thread/deleted")).toEqual([]);
+    expect(client.notifications("thread/deleted")).toEqual([]);
   });
 
   it("lists a new Claude chat only once a turn starts in it (before that it is Desktop's new-chat draft)", async () => {
