@@ -63,7 +63,8 @@ export class Titles {
       void this.gateway.stock.request("thread/unsubscribe", { threadId: thread.id }).catch(() => undefined);
     }
     title = collapse(title.split("\n").find((line) => line.trim()) ?? "").replace(/^["'`*_]+|["'`*_]+$/gu, "");
-    if (!title) return;
+    // The user named the thread meanwhile.
+    if (!title || !this.generating.has(threadId)) return;
     if (this.gateway.claude.owns(threadId)) await this.gateway.claude.rename(threadId, `${title} ✳️`);
     else await this.gateway.stock.request("thread/name/set", { threadId, name: title });
   }
@@ -85,11 +86,13 @@ export class Titles {
     return { turn: startedTurn(turn) };
   }
 
-  /** Desktop's provisional name is a prefix of the first prompt; manual renames pass through. */
+  /** Desktop's provisional name is a prefix of the first prompt; manual renames pass through (and win). */
   public async nameSet(connection: Connection, params: JsonObject): Promise<unknown> {
     const name = collapse(String(params.name ?? "")).replace(/…$/u, "").trim();
     const prompt = this.prompts.get(params.threadId);
     if (prompt && name && prompt.startsWith(name)) return {};
+    // A name the user gives wins over the title still being written.
+    this.generating.delete(params.threadId);
     return this.gateway.threadRequest(connection, "thread/name/set", params);
   }
 }

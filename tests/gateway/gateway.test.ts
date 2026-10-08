@@ -1665,6 +1665,16 @@ describe("titles (rename_prompt)", () => {
     expect(client.notifications("thread/name/updated").map((message) => message.params.threadName)).not.toContain("SECOND");
   });
 
+  it("keeps a name the user gives while CCodex's title is still being written", async () => {
+    const threads = [await stockThread(), await claudeThread()];
+    for (const threadId of threads) {
+      await client.turn(threadId, "a slow title");
+      await client.request("thread/name/set", { threadId, name: "Mine" });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    for (const threadId of threads) expect((await client.request("thread/read", { threadId })).thread.name).toBe("Mine");
+  });
+
   it("keeps Claude's own title of a session unseen while CCodex names it", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "a slow title");
