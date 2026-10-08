@@ -160,7 +160,8 @@ export class TranscriptSummarizer {
       if (typeof sent === "string") this.state.sentMessages = [...this.state.sentMessages, sent];
       const received = record.origin?.kind === "peer" ? record.origin.msg_id : undefined;
       if (typeof received === "string") this.state.receivedMessages = [...this.state.receivedMessages, received];
-    } else if (record.type === "assistant") {
+    } else if (record.type === "assistant" && record.message.model !== "<synthetic>") {
+      // Claude's own replies (its errors, "<synthetic>") tell nothing of the model it runs.
       if (record.message.model !== undefined) this.state.model = record.message.model;
       if (record.effort !== undefined) this.state.reasoningEffort = record.effort;
       if (record.message.stop_reason !== null && record.message.stop_reason !== undefined) {

@@ -54,6 +54,23 @@ describe("native Claude sub-agent projection", () => {
     }
   });
 
+  it("keeps the model it ran on in its name when it stopped on Claude's own error reply", async () => {
+    const sessionDirectory = await mkdtemp(join(tmpdir(), "ccodex-native-subagents-"));
+    const directory = join(sessionDirectory, "subagents");
+    await mkdir(directory);
+    const [prompt, answer] = transcript("worker");
+    const failed = { ...answer, uuid: "failed", parentUuid: answer!.uuid, isApiErrorMessage: true, error: "authentication_failed",
+      message: { id: "failed-message", role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "Failed to authenticate" }], stop_reason: "stop_sequence" } };
+    await writeFile(join(directory, "agent-worker.meta.json"), `${JSON.stringify({ agentType: "Explore", description: "Inspect code", toolUseId: "tool-worker", spawnDepth: 1 })}\n`);
+    await writeFile(join(directory, "agent-worker.jsonl"), `${[prompt, answer, failed].map((record) => JSON.stringify(record)).join("\n")}\n`);
+    try {
+      const { projection } = (await projectSubagents(sessionDirectory, "root-thread"))[0]!;
+      expect(projection.thread).toMatchObject({ name: "Inspect code [Sonnet 5]", agentNickname: "Inspect code [Sonnet 5]" });
+    } finally {
+      await rm(sessionDirectory, { recursive: true });
+    }
+  });
+
   it("shows its coordinator's message in the running turn as the message alone, like stock's to a running sub-agent", async () => {
     const sessionDirectory = await mkdtemp(join(tmpdir(), "ccodex-native-subagents-"));
     const directory = join(sessionDirectory, "subagents");

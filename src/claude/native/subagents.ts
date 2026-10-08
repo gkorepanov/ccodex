@@ -59,7 +59,8 @@ export async function projectSubagents(
     for await (const record of reader) records.push(asVisibleSidechain(record));
     const prompt = taskPrompt(records, meta.toolUseId);
     const assistants = records.filter((record) => record.type === "assistant");
-    const resolvedModel = assistants.flatMap((record) => record.message.model ? [record.message.model] : []).at(-1)
+    // Claude's own error replies carry the model "<synthetic>".
+    const resolvedModel = assistants.flatMap((record) => record.message.model && record.message.model !== "<synthetic>" ? [record.message.model] : []).at(-1)
       ?? meta.model ?? "Claude";
     const description = meta.description.replace(/\s+/gu, " ").trim();
     const nickname = `${description} [${claudeModelLabel(resolvedModel)}]`;

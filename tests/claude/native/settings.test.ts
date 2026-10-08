@@ -57,6 +57,12 @@ describe("native Claude thread settings", () => {
       type: "assistant",
       message: { model: "claude-second", stop_reason: "end_turn", content: [], usage: { service_tier: "default" } },
     })]).serviceTier).toBeNull();
+ 
+    // Claude's own error reply after it keeps what the chat ran with.
+    expect(summarizeTranscript([
+      record({ type: "assistant", effort: "high", message: { model: "claude-first", stop_reason: "end_turn", content: [], usage: { service_tier: "standard", speed: "fast" } } }),
+      record({ type: "assistant", isApiErrorMessage: true, message: { model: "<synthetic>", stop_reason: "stop_sequence", content: [{ type: "text", text: "Failed to authenticate" }], usage: { input_tokens: 0 } } }),
+    ])).toMatchObject({ model: "claude-first", reasoningEffort: "high", serviceTier: "fast" });
   });
 
   it("round-trips Claude permission modes through the Codex settings Desktop sends back", () => {
