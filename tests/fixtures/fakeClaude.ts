@@ -13,6 +13,9 @@ export interface FakeClaudeLog {
   readonly calls: Array<{ method: string; args: unknown[] }>;
 }
 
+/** A signature with the block kind Claude's server gives a narration (the rest of a real one is encrypted). */
+const NARRATION_SIGNATURE = Buffer.from("\x08\x04\x12\x11\x0a\x0f\x42\x09narration", "latin1").toString("base64");
+
 export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string; spawnError: string | null; compactError: string | null; hold: Promise<void> | null; goalHold: Promise<void> | null; backgroundMs: number; modelsHold: Promise<void> | null; refusedModel: string | null; usageDown: boolean; fastOff: boolean } = {
   prompts: [],
   options: [],
@@ -275,6 +278,28 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     yield* toolResult(call, "");
     reply = "checked";
   }
+  // Like Claude 5: thinking, then what it tells the user before a tool call, which its server sends as a thinking block
+  // tagged "narration" in the signature. Each block's text comes before its signature.
+  const narrated = /^narrate: (.+)$/u.exec(text);
+  if (narrated) {
+    const messageId = `msg_${randomUUID().slice(0, 8)}`;
+    yield base(sessionId, { type: "stream_event", event: { type: "message_start", message: { id: messageId } } });
+    for (const [index, thinking, signature] of [[0, "weighing it", "sig"], [1, `${narrated[1]}\n\n`, NARRATION_SIGNATURE]] as const) {
+      yield base(sessionId, { type: "stream_event", event: { type: "content_block_start", index, content_block: { type: "thinking", thinking: "", signature: "" } } });
+      yield base(sessionId, { type: "stream_event", event: { type: "content_block_delta", index, delta: { type: "thinking_delta", thinking } } });
+      yield base(sessionId, { type: "stream_event", event: { type: "content_block_delta", index, delta: { type: "signature_delta", signature } } });
+      const block = { type: "assistant", message: { id: messageId, role: "assistant", model: "claude-opus-5-5", content: [{ type: "thinking", thinking, signature }], stop_reason: null, usage: { input_tokens: 10, output_tokens: 3 } }, apiBlockIndex: index };
+      transcript.write(block);
+      yield base(sessionId, block);
+    }
+    const call = tool(messageId, 2, "Bash", { command: "ls" });
+    yield base(sessionId, { type: "stream_event", event: { type: "content_block_start", index: 2, content_block: { type: "tool_use", id: call.message.content[0].id, name: "Bash", input: {} } } });
+    transcript.write(call);
+    yield base(sessionId, call);
+    yield base(sessionId, { type: "stream_event", event: { type: "message_stop" } });
+    yield* toolResult(call, "a.txt");
+    reply = "listed";
+  }
   // Like Claude: a command in the background, whose end wakes Claude up after its answer (`fakeClaude.backgroundMs` later),
   // or which Claude stops itself (TaskStop).
   const background = /^watch in background: (.+)$/u.exec(text) ?? /^stop in background: (.+)$/u.exec(text);
@@ -479,6 +504,7 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   if (thought !== undefined) {
     yield base(sessionId, { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } } });
     if (thought) yield base(sessionId, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: thought } } });
+    yield base(sessionId, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig" } } });
     const thinking = { type: "assistant", message: { id: messageId, role: "assistant", model, content: [{ type: "thinking", thinking: thought, signature: "sig" }], stop_reason: null, usage: { input_tokens: 10, output_tokens: 3 } } };
     transcript.write({ ...thinking, apiBlockIndex: 0 });
     yield base(sessionId, thinking);

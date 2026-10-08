@@ -411,6 +411,21 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(summaries(thread.turns[0].items)).toEqual(["pondering the answer"]);
   });
 
+  it("shows what Claude tells the user between tool calls as its message, though it comes as thinking, live and in history", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "narrate: Checking the files.");
+    const shown = (items: any[]) => items.filter((item) => item.type !== "userMessage")
+      .map((item) => [item.type, item.text ?? item.summary?.join("") ?? "", item.phase ?? null]);
+    const live = client.notifications("item/completed", threadId).map((message) => message.params.item);
+    const expected = [
+      ["agentMessage", "Checking the files.", "commentary"], ["reasoning", "weighing it", null], ["commandExecution", "", null], ["agentMessage", "listed", "final_answer"],
+    ];
+    expect(shown(live)).toEqual(expected);
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(shown(thread.turns[0].items)).toEqual([expected[1], expected[0], expected[2], expected[3]]);
+    expect(thread.turns[0].items.map((item: any) => item.id)).toEqual(expect.arrayContaining(live.map((item) => item.id)));
+  });
+
   it("shows Claude's task list as the turn's to-do list, like stock's plan updates", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "track tasks: Count files|Report|Clean up");

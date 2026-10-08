@@ -10,6 +10,26 @@ export interface ToolResultBlock {
   readonly is_error?: boolean;
 }
 export interface ThinkingBlock { readonly type: "thinking"; readonly thinking: string; readonly signature?: string }
+
+const NARRATION = Buffer.from("\x42\x09narration", "latin1");
+
+/**
+ * What Claude tells the user between tool calls may come as a thinking block its server tags "narration" (the block
+ * kind in the signature, which Claude Code reads too): Claude Code shows it as Claude's message, not as thinking.
+ */
+export function isNarration(signature: unknown): boolean {
+  return typeof signature === "string" && Buffer.from(signature, "base64").includes(NARRATION);
+}
+
+/** What a block shows as Claude's message: a text block's text, or a narration's. */
+export function messageText(block: Record<string, unknown>): string | undefined {
+  if (block.type === "text" && typeof block.text === "string") return block.text;
+  if (block.type === "thinking" && typeof block.thinking === "string" && isNarration(block.signature)) {
+    return block.thinking.trimEnd() || undefined;
+  }
+  return undefined;
+}
+
 export interface ToolUseBlock {
   readonly type: "tool_use" | "server_tool_use" | "mcp_tool_use";
   readonly id: string;

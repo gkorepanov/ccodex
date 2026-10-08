@@ -20,6 +20,8 @@ import { selectHistory, type SelectedHistory } from "./history.js";
 import { ANSWER_CHARS, assistantBlockItemId, continuationTurnId } from "./ids.js";
 import {
   isCompactBoundary,
+  isNarration,
+  messageText,
   readTranscriptRecords,
   type AssistantRecord,
   type SystemRecord,
@@ -423,12 +425,13 @@ function assistantItems(
 ): ThreadItem[] {
   let reasoning: Extract<ThreadItem, { type: "reasoning" }> | undefined;
   return responseBlocks(records).flatMap(({ record, block, index, id }): ThreadItem[] => {
-    if (block.type === "text" && typeof block.text === "string") return [{
-      type: "agentMessage", id, text: block.text,
+    const text = messageText(block);
+    if (text !== undefined) return [{
+      type: "agentMessage", id, text,
       phase: record.message.id && toolResponses.has(record.message.id) ? "commentary" : "final_answer",
       memoryCitation: null, delivery: null, questions: null,
     }];
-    if (block.type === "thinking" && typeof block.thinking === "string") {
+    if (block.type === "thinking" && typeof block.thinking === "string" && !isNarration(block.signature)) {
       if (reasoning) {
         reasoning.summary.push(block.thinking);
         return [];
@@ -542,7 +545,7 @@ function turnStarts(records: readonly TranscriptChainRecord[], subagentPromptUui
       assistantBlocks(record).forEach((block, position) => {
         if (answer) goOn(index);
         lastBlock = blockItemId(record, position);
-        answer = block.type === "text" && typeof block.text === "string" && block.text.length >= ANSWER_CHARS;
+        answer = (messageText(block)?.length ?? 0) >= ANSWER_CHARS;
       });
     }
     if (record.type !== "user") return;

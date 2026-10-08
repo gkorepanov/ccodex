@@ -16,7 +16,7 @@ import {
 import { claudeContent, inputText, normalizeUserInput, userMessage } from "./inputMapper.js";
 import { completedToolItem } from "./native/projector.js";
 import { ANSWER_CHARS, assistantBlockItemId, continuationTurnId } from "./native/ids.js";
-import { readTranscriptRecords, type UserRecord } from "./native/records.js";
+import { isNarration, messageText, readTranscriptRecords, type UserRecord } from "./native/records.js";
 import { userText } from "./native/summary.js";
 import { claudeEffort, DELEGATION_OFF, DELEGATION_ON, ULTRA } from "./delegation.js";
 import { foreignOwner, peerKey, peerMessageItem, peerOrigin, sentMessageItem, subagentFiles, type Peers } from "./peers.js";
@@ -51,7 +51,15 @@ interface Response {
   readonly texts: Map<number, ThreadItem & { type: "agentMessage" }>;
   reasoning?: ThreadItem & { type: "reasoning" };
   readonly blockKinds: Map<number, { kind: "text" | "thinking" | "tool"; summaryIndex?: number }>;
+  /** The thinking block not shown yet: a narration or thinking, as its signature tells. */
+  held?: { readonly index: number; text: string; readonly timer: NodeJS.Timeout };
 }
+
+/**
+ * How long a thinking block waits for its signature before it shows as thinking: a narration (what Claude tells the
+ * user between tool calls) comes whole with its signature at once, thinking streams for seconds before its own.
+ */
+const NARRATION_WAIT_MS = 500;
 
 interface Tool {
   readonly state: ActiveTool;
@@ -945,27 +953,15 @@ export class ClaudeSession {
       this.response = { id, hasTool, texts: new Map(), blockKinds: new Map() };
     }
     const response = this.response;
+    this.showThinking(response);
     this.lastBlock = { id: assistantBlockItemId(response.id, index) };
     if (block.type === "text") {
-      const item = { type: "agentMessage" as const, id: assistantBlockItemId(response.id, index), text: "", phase: null, memoryCitation: null };
-      response.texts.set(index, item);
-      response.blockKinds.set(index, { kind: "text" });
-      this.lastBlock.text = item;
-      this.streamed.add(item.id);
-      this.itemStarted(item);
-    } else if (block.type === "thinking" || block.type === "redacted_thinking") {
-      if (response.reasoning) {
-        response.reasoning.summary.push("");
-        const summaryIndex = response.reasoning.summary.length - 1;
-        response.blockKinds.set(index, { kind: "thinking", summaryIndex });
-        this.emit("item/reasoning/summaryPartAdded", { threadId: this.threadId, turnId: this.turn?.id, itemId: response.reasoning.id, summaryIndex });
-      } else {
-        const item = { type: "reasoning" as const, id: assistantBlockItemId(response.id, index), summary: [""], content: [] };
-        response.reasoning = item;
-        response.blockKinds.set(index, { kind: "thinking", summaryIndex: 0 });
-        this.streamed.add(item.id);
-        this.itemStarted({ ...item, summary: [] });
-      }
+      this.textStarted(response, index);
+    } else if (block.type === "thinking") {
+      response.blockKinds.set(index, { kind: "thinking" });
+      response.held = { index, text: "", timer: setTimeout(() => this.showThinking(response), NARRATION_WAIT_MS) };
+    } else if (block.type === "redacted_thinking") {
+      this.reasoningPart(response, index);
     } else if (tool) {
       response.hasTool = true;
       response.blockKinds.set(index, { kind: "tool" });
@@ -976,21 +972,76 @@ export class ClaudeSession {
     const response = this.response;
     const kind = response?.blockKinds.get(index);
     if (!response || !kind || !this.turn) return;
+    const held = response.held?.index === index ? response.held : undefined;
     if (delta.type === "text_delta" && kind.kind === "text") {
-      const item = response.texts.get(index)!;
-      item.text += delta.text;
-      this.emit("item/agentMessage/delta", { threadId: this.threadId, turnId: this.turn.id, itemId: item.id, delta: delta.text });
+      this.textDelta(response.texts.get(index)!, delta.text);
+    } else if (delta.type === "thinking_delta" && held) {
+      held.text += delta.thinking;
     } else if (delta.type === "thinking_delta" && kind.kind === "thinking" && response.reasoning) {
-      response.reasoning.summary[kind.summaryIndex!] += delta.thinking;
-      this.emit("item/reasoning/summaryTextDelta", {
-        threadId: this.threadId, turnId: this.turn.id, itemId: response.reasoning.id, delta: delta.thinking, summaryIndex: kind.summaryIndex,
-      });
+      this.thinkingDelta(response, kind.summaryIndex!, delta.thinking);
+    } else if (delta.type === "signature_delta" && held) {
+      if (!isNarration(delta.signature)) return this.showThinking(response);
+      // Claude Code shows a narration as Claude's message: so does the chat.
+      clearTimeout(held.timer);
+      response.held = undefined;
+      const text = held.text.trimEnd();
+      if (text) this.textDelta(this.textStarted(response, index), text);
     }
+  }
+
+  private textStarted(response: Response, index: number): ThreadItem & { type: "agentMessage" } {
+    const item = { type: "agentMessage" as const, id: assistantBlockItemId(response.id, index), text: "", phase: null, memoryCitation: null };
+    response.texts.set(index, item);
+    response.blockKinds.set(index, { kind: "text" });
+    this.lastBlock = { id: item.id, text: item };
+    this.streamed.add(item.id);
+    this.itemStarted(item);
+    return item;
+  }
+
+  private textDelta(item: ThreadItem & { type: "agentMessage" }, delta: string): void {
+    item.text += delta;
+    this.emit("item/agentMessage/delta", { threadId: this.threadId, turnId: this.turn!.id, itemId: item.id, delta });
+  }
+
+  /** A thinking block is a part of its response's one reasoning item. */
+  private reasoningPart(response: Response, index: number): number {
+    let summaryIndex = 0;
+    if (response.reasoning) {
+      response.reasoning.summary.push("");
+      summaryIndex = response.reasoning.summary.length - 1;
+      this.emit("item/reasoning/summaryPartAdded", { threadId: this.threadId, turnId: this.turn?.id, itemId: response.reasoning.id, summaryIndex });
+    } else {
+      const item = { type: "reasoning" as const, id: assistantBlockItemId(response.id, index), summary: [""], content: [] };
+      response.reasoning = item;
+      this.streamed.add(item.id);
+      this.itemStarted({ ...item, summary: [] });
+    }
+    response.blockKinds.set(index, { kind: "thinking", summaryIndex });
+    return summaryIndex;
+  }
+
+  private thinkingDelta(response: Response, summaryIndex: number, delta: string): void {
+    response.reasoning!.summary[summaryIndex] += delta;
+    this.emit("item/reasoning/summaryTextDelta", {
+      threadId: this.threadId, turnId: this.turn!.id, itemId: response.reasoning!.id, delta, summaryIndex,
+    });
+  }
+
+  /** The held thinking block is no narration (or its signature is late): it shows as thinking, as it came so far. */
+  private showThinking(response: Response): void {
+    const held = response.held;
+    if (!held || response !== this.response) return;
+    clearTimeout(held.timer);
+    response.held = undefined;
+    const summaryIndex = this.reasoningPart(response, held.index);
+    if (held.text) this.thinkingDelta(response, summaryIndex, held.text);
   }
 
   private flushResponse(): void {
     const response = this.response;
     if (!response) return;
+    this.showThinking(response);
     this.response = undefined;
     for (const item of response.texts.values()) {
       this.itemCompleted({ ...item, phase: response.hasTool ? "commentary" : "final_answer" });
@@ -1012,11 +1063,13 @@ export class ClaudeSession {
     blocks.forEach((block, position) => {
       if (block.type === "tool_use" || block.type === "server_tool_use" || block.type === "mcp_tool_use") {
         this.toolStarted(block, position);
-      } else if (block.type === "text" && typeof block.text === "string") {
+      } else {
+        const text = messageText(block);
+        if (text === undefined) return;
         const id = assistantBlockItemId(message.id, m.apiBlockIndex ?? position);
         if (this.streamed.has(id) || this.response?.id === message.id) return;
         this.streamed.add(id);
-        const item: ThreadItem = { type: "agentMessage", id, text: block.text, phase: "final_answer", memoryCitation: null };
+        const item: ThreadItem = { type: "agentMessage", id, text, phase: "final_answer", memoryCitation: null };
         this.itemStarted(item);
         this.itemCompleted(item);
       }
