@@ -1679,3 +1679,27 @@ describe("titles (rename_prompt)", () => {
     expect(client.notifications("thread/name/updated", threadId).map((message) => message.params.threadName)).not.toContain("Claude's own title");
   });
 });
+
+describe("rpc_limit_mb", () => {
+  beforeEach(async () => {
+    gateway = await startTestGateway({ rpcLimitBytes: 100_000 });
+    client = await gateway.connect();
+  });
+  afterEach(async () => { await gateway.stop(); });
+
+  it("fails an answer over the limit and drops a notification over it; smaller ones pass", async () => {
+    await expect(client.request("test/big", { bytes: 200_000 })).rejects.toThrow("CCodex held back this 0.2 MB answer: over rpc_limit_mb (0.1 MB) in ~/.ccodex/config.toml.");
+    expect(client.notifications("test/bigNotification")).toEqual([]);
+    expect((await client.request("test/big", { bytes: 50_000 })).data).toHaveLength(50_000);
+    expect(client.notifications("test/bigNotification")).toHaveLength(1);
+  });
+
+  it("caps the output of a command a client runs uncapped (a file Desktop shows from a remote host), not a terminal's", async () => {
+    const cap = async (params: object) => JSON.parse((await client.request("process/spawn", { command: ["cat", "/video.mp4"], processHandle: "p", cwd: "/", ...params })).raw).params.outputBytesCap;
+    expect(await cap({ outputBytesCap: null })).toBe(100_000);
+    expect(await cap({ outputBytesCap: 5_000_000 })).toBe(100_000);
+    expect(await cap({ outputBytesCap: 1_000 })).toBe(1_000);
+    expect(await cap({})).toBeUndefined();
+    expect(await cap({ tty: true, outputBytesCap: null })).toBeNull();
+  });
+});

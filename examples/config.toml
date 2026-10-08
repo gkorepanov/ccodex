@@ -20,6 +20,11 @@ improve_models_formatting_for_codex_app = true
 # data_dir = "~/.ccodex/state"
 # model_prefix = "claude:"
 
+# The most CCodex sends the App in one message, or as the output of one command the App runs here (it shows a remote
+# host's image or video that way), in MB: a bigger answer fails, a bigger notification is dropped, a command's output
+# stops there. Over SSH or on the phone, one huge message holds up every chat. 0: no limit.
+rpc_limit_mb = 10
+
 log_level = "info"
 # Codex App RPC capture under data_dir (rpc.jsonl, mode 0600, rolling; holds prompts and outputs). Off by default.
 rpc_capture = false

@@ -56,8 +56,26 @@ export class Connection {
   public send(text: string, raw = false): void {
     if (this.closed || this.client.readyState !== WebSocket.OPEN) return;
     if (!raw) text = this.gateway.lineages.rewrite(text);
+    const limit = this.gateway.config.rpcLimitBytes;
+    if (limit && Buffer.byteLength(text) > limit) {
+      const held = this.overLimit(text, limit);
+      if (held === undefined) return;
+      text = held;
+    }
     this.gateway.recorder.frame(this.id, "gateway_to_client", text);
     this.client.send(text);
+  }
+
+  /**
+   * A message over `rpc_limit_mb` holds up everything else on the client's one connection (over SSH, the phone's) or
+   * breaks it: an answer the client waits for fails instead, anything else is dropped.
+   */
+  private overLimit(text: string, limit: number): string | undefined {
+    const message = JSON.parse(text) as JsonObject;
+    const size = `${(Buffer.byteLength(text) / 1_000_000).toFixed(1)} MB`;
+    this.gateway.logger.warn("rpc.over-limit", { method: message.method, id: message.id, size });
+    if (message.method !== undefined || message.id === undefined) return undefined;
+    return JSON.stringify({ id: message.id, error: { code: -32603, message: `CCodex held back this ${size} answer: over rpc_limit_mb (${limit / 1_000_000} MB) in ~/.ccodex/config.toml.` } });
   }
 
   public notify(method: string, params: unknown): void {
@@ -107,6 +125,14 @@ export class Connection {
         text = JSON.stringify(message);
       }
       this.developerInstructions = message.params.developerInstructions;
+    }
+    // Desktop shows a remote host's file by an uncapped `cat` (a video: hundreds of MB on the connection every chat
+    // shares): stock's own output cap stops it at the limit. A terminal (tty) streams on.
+    const limit = this.gateway.config.rpcLimitBytes;
+    if (message.method === "process/spawn" && limit && !message.params.tty
+      && (message.params.outputBytesCap === null || message.params.outputBytesCap > limit)) {
+      message.params.outputBytesCap = limit;
+      text = JSON.stringify(message);
     }
     if ((message.method === "thread/start" || message.method === "thread/fork") && message.params?.ephemeral === true) {
       this.ephemeralRequests.add(message.id);

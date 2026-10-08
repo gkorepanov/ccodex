@@ -223,6 +223,11 @@ const handlers = {
   "test/config": () => ({ config: { ...config } }),
   // Test hooks.
   "test/threads": () => ({ threads: [...threads.values()].map((thread) => ({ ...thread, subscribers: thread.subscribers.size })) }),
+  // A notification and an answer of the given size (a diff of a huge repository, a big file read).
+  "test/big": (connection, params) => {
+    connection.notify("test/bigNotification", { data: "x".repeat(params.bytes) });
+    return { data: "x".repeat(params.bytes) };
+  },
   "test/approval": async (connection) => ({ decision: await connection.ask("item/commandExecution/requestApproval", { threadId: "stock-thread", command: "ls" }) }),
 };
 

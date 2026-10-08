@@ -13,6 +13,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     logLevel: "warn",
     rpcCapture: false,
     rpcCaptureMaxBytes: 1_048_576,
+    rpcLimitBytes: 10_000_000,
     improveModelsFormatting: true,
     ...overrides,
   };
