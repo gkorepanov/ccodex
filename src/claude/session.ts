@@ -518,6 +518,11 @@ export class ClaudeSession {
     }
   }
 
+  /** Claude takes the chat's new title itself (`rename_session`, as an IDE renames its session). */
+  public async rename(title: string): Promise<void> {
+    await (this.sdk as Query & { renameSession(title: string, sessionId: string): Promise<void> }).renameSession(title, this.threadId);
+  }
+
   public async stopTask(taskId: string): Promise<void> {
     await this.sdk?.stopTask(taskId);
     this.endBackground(taskId, { status: "stopped", summary: "", atMs: Date.now() });

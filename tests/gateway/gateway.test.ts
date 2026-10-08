@@ -1231,6 +1231,20 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect([thread.name, thread.cwd]).toEqual(["Named", "/work"]);
   });
 
+  it("keeps a new name of a Claude chat whose running process holds the old one, through a long turn", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "one");
+    await client.turn(threadId, "two");
+    await client.request("thread/name/set", { threadId, name: "Old" });
+    // A new process for the chat: it reads the name as it starts.
+    await client.request("thread/rollback", { threadId, numTurns: 1 });
+    await client.turn(threadId, "two, again");
+    await client.request("thread/name/set", { threadId, name: "New" });
+    // Over the 64 KB Claude reads back before it writes the chat's name again: the rename is out of it.
+    await client.turn(threadId, "x".repeat(70_000));
+    expect((await client.request("thread/read", { threadId })).thread.name).toBe("New");
+  });
+
   it("keeps a Claude thread's name through an edit of its only message", async () => {
     const threadId = await claudeThread();
     const { turn } = await client.turn(threadId, "one");

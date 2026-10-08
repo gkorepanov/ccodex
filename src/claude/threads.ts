@@ -1175,7 +1175,12 @@ export class ClaudeThreads {
     const summary = this.catalog.get(threadId);
     // A brand-new session has no transcript until its first message is written; its name waits for that turn.
     if (summary) {
-      await renameSession(threadId, name, { dir: summary.cwd });
+      // Claude holds the title it read and writes it again as its transcript grows, taking a newer one only from the
+      // transcript's last 64 KB: a running Claude gets the new title itself, and one started ahead with the old goes.
+      const session = this.sessions.get(threadId);
+      session?.discardWarm();
+      if (session?.loaded) await session.rename(name);
+      else await renameSession(threadId, name, { dir: summary.cwd });
       this.pendingNames.delete(threadId);
     } else this.pendingNames.set(threadId, name);
     await this.catalog.refresh();

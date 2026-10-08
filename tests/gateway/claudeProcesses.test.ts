@@ -87,6 +87,21 @@ describe("Claude processes: started ahead of a prompt, gone when nobody uses the
     expect(commands.killed).toContainEqual([4242]);
   });
 
+  it("keeps a new name of a chat whose process started ahead with the old one", async () => {
+    const threadId = await leftChat();
+    await client.request("thread/name/set", { threadId, name: "Old" });
+    await client.waitFor("thread/closed", (params) => params.threadId === threadId, 3_000);
+    await client.request("thread/resume", { threadId });
+    for (let waited = 0; !fakeClaude.calls.some((call) => call.method === "startup" && call.args[0] === threadId); waited += 50) {
+      expect(waited).toBeLessThan(3_000);
+      await sleep(50);
+    }
+    await client.request("thread/name/set", { threadId, name: "New" });
+    // Over the 64 KB Claude reads back before it writes the chat's name again: the rename is out of it.
+    await client.turn(threadId, "x".repeat(70_000));
+    expect((await client.request("thread/read", { threadId })).thread.name).toBe("New");
+  });
+
   it("closes only the process of a quiet chat a client still has open: it stays loaded and the next prompt resumes it", async () => {
     const { thread } = await client.request("thread/start", { model: "claude:claude-opus-5-5", cwd: "/work" });
     await client.turn(thread.id, "hello");

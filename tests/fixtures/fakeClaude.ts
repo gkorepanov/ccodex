@@ -67,23 +67,48 @@ const textOf = (content: unknown) => typeof content === "string"
 class Transcript {
   public last: string | null = null;
   public readonly path: string;
+  /** The chat's title as this process holds it: read when it starts, then only from the transcript's final 64 KB. */
+  public title?: string;
+  private sinceMetadata = 0;
 
   public constructor(private readonly sessionId: string, public cwd: string, path?: string) {
     const directory = join(process.env.CLAUDE_CONFIG_DIR!, "projects", cwd.replace(/[^a-zA-Z0-9]/gu, "-"));
     mkdirSync(directory, { recursive: true });
     this.path = path ?? join(directory, `${sessionId}.jsonl`);
     // A resumed session continues the chain.
-    if (existsSync(this.path)) this.last = JSON.parse(readFileSync(this.path, "utf8").trim().split("\n").at(-1)!).uuid;
+    if (!existsSync(this.path)) return;
+    const records = readFileSync(this.path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    this.last = records.findLast((record) => record.uuid)?.uuid;
+    this.title = records.findLast((record) => record.type === "custom-title")?.customTitle;
   }
 
   public write(record: Message, chain = true): string {
     const uuid = record.uuid ?? randomUUID();
-    appendFileSync(this.path, `${JSON.stringify({
+    const line = `${JSON.stringify({
       parentUuid: chain ? this.last : null, isSidechain: false, sessionId: this.sessionId, cwd: this.cwd,
       version: "2.1.280", gitBranch: "main", timestamp: new Date().toISOString(), ...record, uuid,
-    })}\n`);
+    })}\n`;
+    appendFileSync(this.path, line);
     this.last = uuid;
+    this.sinceMetadata += line.length;
+    if (this.sinceMetadata >= 32_768) this.writeMetadata();
     return uuid;
+  }
+
+  public rename(title: string): void {
+    this.title = title;
+    appendFileSync(this.path, `${JSON.stringify({ type: "custom-title", customTitle: title, sessionId: this.sessionId })}\n`);
+  }
+
+  /** Like Claude every 32 KB of records: its title again, the last one in the transcript's final 64 KB if there is one. */
+  private writeMetadata(): void {
+    this.sinceMetadata = 0;
+    const file = readFileSync(this.path);
+    const lines = file.subarray(-65_536).toString("utf8").split("\n");
+    if (file.length > 65_536) lines.shift();
+    const named = lines.findLast((line) => line.includes("\"type\":\"custom-title\""));
+    if (named) this.title = JSON.parse(named).customTitle;
+    if (this.title) this.rename(this.title);
   }
 
   /** Claude compacts only a session with a message of the user's since its last compaction. */
@@ -494,16 +519,18 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
 /** The SDK's prewarm: the process it starts runs the fake once it gets its prompt. */
 export async function fakeStartup({ options }: { options: Message }): Promise<any> {
   fakeClaude.calls.push({ method: "startup", args: [options.resume ?? options.sessionId] });
-  return { query: (prompt: AsyncIterable<Message>) => fakeQuery({ prompt, options }), close: () => undefined };
+  // Like the CLI: a resumed session's transcript is read as the process starts, not when the prompt comes.
+  const transcript = options.resume ? new Transcript(options.resume, options.cwd ?? process.cwd()) : undefined;
+  return { query: (prompt: AsyncIterable<Message>) => fakeQuery({ prompt, options }, transcript), close: () => undefined };
 }
 
-export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<Message>; options: Message }): any {
+export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<Message>; options: Message }, started?: Transcript): any {
   fakeClaude.options.push(options);
   // Like the CLI: auto mode is unavailable on Haiku and falls back to default (and stays there after a model switch).
   const settle = (mode: string) => mode === "auto" && String(options.model).includes("haiku") ? "default" : mode;
   options.permissionMode = settle(options.permissionMode);
   const sessionId: string = options.sessionId ?? options.resume ?? randomUUID();
-  const transcript = new Transcript(sessionId, options.cwd ?? process.cwd());
+  const transcript = started ?? new Transcript(sessionId, options.cwd ?? process.cwd());
   if (options.resumeSessionAt) transcript.last = options.resumeSessionAt;
   let closed = false;
   const record = (method: string) => (...args: unknown[]) => {
@@ -564,6 +591,7 @@ export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<Message>;
       return record("applyFlagSettings")(settings);
     },
     stopTask: record("stopTask"),
+    renameSession: (title: string, id: string) => { transcript.rename(title); return record("renameSession")(title, id); },
     close: () => { closed = true; fakeClaude.calls.push({ method: "close", args: [sessionId] }); void iterator.return(undefined); },
   });
 }
