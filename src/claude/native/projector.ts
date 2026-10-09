@@ -265,7 +265,8 @@ function completeFileItem(
   const result = completion.record.toolUseResult;
   const candidate = filePath(name, input, result);
   const path = candidate ? (isAbsolute(candidate) ? candidate : resolve(cwd, candidate)) : undefined;
-  const diff = structuredDiff(result);
+  // A file Claude creates comes whole (no patch): its change is its content, as stock's for an added file.
+  const diff = result?.type === "create" ? string(result.content) ?? "" : structuredDiff(result);
   const kind = result?.type === "create" ? { type: "add" as const }
     : result?.type === "delete" ? { type: "delete" as const }
       : { type: "update" as const, move_path: null };

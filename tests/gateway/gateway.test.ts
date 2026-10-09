@@ -268,6 +268,17 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     });
   });
 
+  it("shows a file Claude created with its content as the change, like stock's added file (Desktop counts its lines), live and in history", async () => {
+    const threadId = await claudeThread();
+    client.onRequest = () => ({ decision: "accept" });
+    await client.turn(threadId, "this needs file approval");
+    const change = [{ path: "/work/notes.txt", kind: { type: "add" }, diff: "fruit=kiwi\n" }];
+    const live = client.notifications("item/completed", threadId).map((message) => message.params.item).find((item) => item.type === "fileChange");
+    expect(live).toMatchObject({ status: "completed", changes: change });
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(thread.turns[0].items.find((item: any) => item.type === "fileChange")).toMatchObject({ id: live.id, changes: change });
+  });
+
   it("reports Claude token usage (Desktop's context meter)", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "first");

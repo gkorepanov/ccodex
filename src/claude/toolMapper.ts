@@ -300,14 +300,6 @@ export function projectToolCompletion(
   };
 }
 
-function resultDiff(result: Record<string, unknown> | undefined) {
-  const diff = text(result?.diff) || text(result?.patch);
-  const path = text(result?.file_path) || text(result?.filePath) || text(result?.path);
-  if (!diff || !path) return [];
-  const kind = result?.type === "create" ? { type: "add" as const } : result?.type === "delete" ? { type: "delete" as const } : { type: "update" as const, move_path: null };
-  return [{ path, kind, diff }];
-}
-
 export function completeTool(
   item: ThreadItem,
   output: string,
@@ -323,14 +315,6 @@ export function completeTool(
     exitCode: typeof result?.exit_code === "number" ? result.exit_code : typeof result?.exitCode === "number" ? result.exitCode : isError ? 1 : 0,
     durationMs,
   };
-  if (item.type === "fileChange") {
-    const changes = resultDiff(result);
-    return {
-      ...item,
-      status: declined ? "declined" : isError ? "failed" : "completed",
-      changes: changes.length > 0 ? changes : item.changes,
-    };
-  }
   if (item.type === "mcpToolCall") return {
     ...item, status: isError ? "failed" : "completed", durationMs,
     result: isError ? null : { content: output ? [{ type: "text", text: output } as JsonValue] : [], structuredContent: null, _meta: null },

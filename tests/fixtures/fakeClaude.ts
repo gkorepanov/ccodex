@@ -363,8 +363,12 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     const decision = ["auto", "bypassPermissions"].includes(options.permissionMode) ? { behavior: "allow" }
       : await options.canUseTool(name, input, { toolUseID: toolUseId, signal: new AbortController().signal, suggestions: [] });
     const result = decision.behavior === "allow" ? "done" : `denied: ${decision.message}`;
-    transcript.write({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: result }] }, toolUseResult: { stdout: result, stderr: "" } });
-    yield base(sessionId, { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: result }] }, tool_use_result: { stdout: result, stderr: "" } });
+    // Like the CLI: a file Write created has its content and no patch.
+    const toolUseResult = fileTool && decision.behavior === "allow"
+      ? { type: "create", filePath: `${transcript.cwd}/notes.txt`, content: "fruit=kiwi\n", structuredPatch: [], originalFile: null }
+      : { stdout: result, stderr: "" };
+    transcript.write({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: result }] }, toolUseResult });
+    yield base(sessionId, { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: result }] }, tool_use_result: toolUseResult });
     reply = `approval ${decision.behavior}`;
   }
   const question = /^ask me: (.+\?) (.+)$/u.exec(text);
