@@ -13,7 +13,7 @@ import { invalidParams, invalidRequest, requestedModel, type JsonObject, type Th
 import { anchorCursor, historyCursors, occurrencesPage, paginateItems, paginateTurns, startedTurn, turnOccurrences } from "../protocol/turnPagination.js";
 import { claudeEffort, ULTRA } from "./delegation.js";
 import { normalizeUserInput } from "./inputMapper.js";
-import { claudeModelLabel, modelCatalogValue, normalizeClaudeModelIdentifier } from "./modelSelection.js";
+import { claudeModelLabel, latestClaudeModels, modelCatalogValue, normalizeClaudeModelIdentifier } from "./modelSelection.js";
 import { NativeSessionCatalog, type SessionSummary } from "./native/catalog.js";
 import { firstMatch } from "./native/search.js";
 import { nativeThread, type TranscriptProjection } from "./native/projector.js";
@@ -812,8 +812,9 @@ export class ClaudeThreads {
       this.contextWindows.set(modelCatalogValue(model), model.contextWindow);
       if (model.resolvedModel) this.contextWindows.set(normalizeClaudeModelIdentifier(model.resolvedModel), model.contextWindow);
     }
-    const mapped = models.filter((model) => model.value !== "default").map((model) => mapClaudeModel(model, this.config.modelPrefix));
-    for (const [index, model] of models.filter((model) => model.value !== "default").entries()) {
+    const selectable = latestClaudeModels(models.filter((model) => model.value !== "default"));
+    const mapped = selectable.map((model) => mapClaudeModel(model, this.config.modelPrefix));
+    for (const [index, model] of selectable.entries()) {
       if (!model.supportedEffortLevels?.length) continue;
       const effort = mapped[index]!.defaultReasoningEffort as string;
       this.defaultEfforts.set(modelCatalogValue(model), effort);
