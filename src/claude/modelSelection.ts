@@ -63,7 +63,28 @@ const CLAUDE_MODEL_VERSION = /^claude-([a-z][a-z0-9]*?)-(\d+)(?:-(\d{1,2})(?=-|$
 
 export function parseClaudeModelVersion(value: string): { family: string; version: number } | undefined {
   const match = CLAUDE_MODEL_VERSION.exec(normalizeClaudeModelIdentifier(value));
-  return match ? { family: match[1]!, version: Number(match[2]) + Number(match[3] ?? 0) / 100 } : undefined;
+  return match ? { family: match[1]!, version: Number(match[2]) * 100 + Number(match[3] ?? 0) } : undefined;
+}
+
+/** Keeps one newest selectable model per versioned family, while retaining aliases and custom models. */
+export function latestClaudeModels(models: readonly ModelInfo[]): ModelInfo[] {
+  const newest = new Map<string, { version: number; model: ModelInfo; canonical: boolean }>();
+  for (const model of models) {
+    const version = parseClaudeModelVersion(model.resolvedModel ?? model.value)
+      ?? parseClaudeModelVersion(model.value);
+    if (!version) continue;
+    const canonical = parseClaudeModelVersion(model.value) !== undefined;
+    const current = newest.get(version.family);
+    if (!current || version.version > current.version ||
+        (version.version === current.version && canonical && !current.canonical)) {
+      newest.set(version.family, { version: version.version, model, canonical });
+    }
+  }
+  const retained = new Set([...newest.values()].map(({ model }) => model));
+  return models.filter((model) => {
+    const version = parseClaudeModelVersion(model.resolvedModel ?? model.value) ?? parseClaudeModelVersion(model.value);
+    return version ? retained.has(model) : true;
+  });
 }
 
 export type ClaudeModelReplacement = { readonly value: string; readonly reason: "exact" | "family" | "default" };
