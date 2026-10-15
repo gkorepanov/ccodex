@@ -59,12 +59,15 @@ export async function replyViaGateway(socketPath: string, chat: string, prompt: 
       }
       threadId = found[0].id;
     }
+    let model: unknown;
     try {
-      await request("thread/resume", { threadId, excludeTurns: true });
+      model = (await request("thread/resume", { threadId, excludeTurns: true })).model;
     } catch (error) {
       throw new GatewayUnavailable(error instanceof Error ? error.message : String(error));
     }
-    const turnId = (await request("turn/start", { threadId, input: [{ type: "text", text: prompt }] })).turn?.id;
+    // A `turn/start` without a model would complete a model switch someone left pending on the chat (the app sends the
+    // model with each turn); naming the chat's own model keeps it on the provider it is on.
+    const turnId = (await request("turn/start", { threadId, input: [{ type: "text", text: prompt }], ...(typeof model === "string" && model ? { model } : {}) })).turn?.id;
     const done = async () => {
       for (;;) {
         const end = messages.find((m) => m.method === "turn/completed" && m.params?.threadId === threadId && (!turnId || m.params?.turn?.id === turnId));

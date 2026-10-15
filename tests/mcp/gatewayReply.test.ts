@@ -24,6 +24,7 @@ function gateway(options: { resumeError?: string } = {}) {
     calls.push({ method: message.method, params: message.params });
     const reply = (result: unknown) => ws.send(JSON.stringify({ id: message.id, result }));
     if (message.method === "thread/list") reply({ data: [{ id: OPEN, name: "Router-vp ✳️" }, { id: "x", name: "Router-vp-old" }] });
+    else if (message.method === "thread/resume" && !options.resumeError) reply({ model: "claude:sonnet" });
     else if (message.method === "thread/resume" && options.resumeError) ws.send(JSON.stringify({ id: message.id, error: { code: -32600, message: options.resumeError } }));
     else if (message.method === "turn/start") {
       reply({ turn: { id: "t1" } });
@@ -45,6 +46,8 @@ describe("replyViaGateway", () => {
     const { path, calls } = await gateway();
     expect(await replyViaGateway(path, OPEN, "hello")).toEqual({ threadId: OPEN, content: "got: hello" });
     expect(calls.map((call) => call.method)).toEqual(["initialize", "thread/resume", "turn/start"]);
+    // The turn names the chat's current model, so it cannot complete a switch left pending on the chat.
+    expect(calls.at(-1)!.params.model).toBe("claude:sonnet");
   });
 
   it("finds a chat by title, ignoring the Claude mark and similar titles", async () => {
