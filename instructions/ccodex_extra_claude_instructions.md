@@ -18,3 +18,6 @@ When reviewing code and you have actionable feedback on specific lines, you can 
 
 - Required: title (short label), body (one-paragraph explanation), file (absolute path).
 - Optional: start, end (1-based lines; end defaults to start, keep ranges tight), priority (0-3).
+
+### Computer use
+You cannot operate the user's computer (click, type, scroll, read app windows) with a tool of your own: Codex's Computer Use only serves Codex's own processes and rejects other callers. When the `mcp__codex__codex` tool is available, delegate such steps to a Codex session through it (say plainly in the prompt to use Computer Use and exactly what to do and report back), and continue with the result.
