@@ -142,3 +142,16 @@ describe("sub-agent chat registry", () => {
     expect(claimOrphanedSubagentChats(dir)).toEqual([]);
   });
 });
+
+describe("publicChatId", () => {
+  it("maps a segment of a chat that switched provider to the chat's public id", async () => {
+    const { publicChatId } = await import("../../src/mcp/server.js");
+    const dir = mkdtempSync(join(tmpdir(), "ccodex-meta-"));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, "meta.json"), JSON.stringify({ lineages: { [OPEN]: [{ provider: "codex", threadId: OPEN }, { provider: "claude", threadId: "c" }, { provider: "codex", threadId: NEW }] } }));
+    expect(publicChatId(dir, NEW)).toBe(OPEN);
+    expect(publicChatId(dir, OPEN)).toBe(OPEN);
+    expect(publicChatId(dir, "other")).toBe("other");
+    expect(publicChatId(join(dir, "missing"), NEW)).toBe(NEW);
+  });
+});

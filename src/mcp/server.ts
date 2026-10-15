@@ -2,8 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import type { Config } from "../config.js";
-import { existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { GatewayUnavailable, archiveViaGateway, claudeModelId, replyViaGateway, startViaGateway } from "./gatewayReply.js";
 import { claimOrphanedSubagentChats, forgetSubagentChat, recordSubagentChat } from "./subagentRegistry.js";
 
@@ -106,11 +106,23 @@ function runCall(config: Config, tool: string, args: Args, children: Map<unknown
 }
 
 /**
+ * The chat a thread id belongs to. A chat that switched provider is a lineage of segments under one public id; agents
+ * may know a segment's id (a sub-agent's parent metadata names the segment it runs under), which the app's own
+ * app-server holds as the writer, so it is replaced with the chat's public id.
+ */
+export function publicChatId(dataDir: string, chat: string): string {
+  let lineages: Record<string, Array<{ threadId?: string }>>;
+  try { lineages = (JSON.parse(readFileSync(join(dataDir, "meta.json"), "utf8")) as { lineages?: typeof lineages }).lineages ?? {}; } catch { return chat; }
+  if (chat in lineages) return chat;
+  return Object.entries(lineages).find(([, segments]) => segments.some((segment) => segment.threadId === chat))?.[0] ?? chat;
+}
+
+/**
  * `codex-reply` goes through the gateway (the way the app talks), so chats the app has open, busy chats and chats on
  * Claude models take it; without a gateway, or for a thread only `codex exec` knows, it resumes the session as before.
  */
 async function replyThroughGateway(config: Config, args: Args, children: Map<unknown, ChildProcess>, id: unknown): Promise<unknown> {
-  const chat = String(args.threadId ?? args.conversationId ?? "");
+  const chat = publicChatId(config.dataDir, String(args.threadId ?? args.conversationId ?? "").trim());
   try {
     const { threadId, content } = await replyViaGateway(config.publicSocket, chat, String(args.prompt));
     return { content: [{ type: "text", text: content }], structuredContent: { threadId, content } };
