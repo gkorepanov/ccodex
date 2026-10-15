@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { claimOrphanedSubagentChats, forgetSubagentChat, recordSubagentChat } from "../../src/mcp/subagentRegistry.js";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
-import { GatewayUnavailable, claudeModelId, replyViaGateway, startViaGateway } from "../../src/mcp/gatewayReply.js";
+import { GatewayUnavailable, archiveViaGateway, claudeModelId, replyViaGateway, startViaGateway } from "../../src/mcp/gatewayReply.js";
 
 const OPEN = "11111111-1111-4111-8111-111111111111";
 const NEW = "22222222-2222-4222-8222-222222222222";
@@ -12,7 +13,7 @@ const cleanup: Array<() => void> = [];
 afterEach(() => { while (cleanup.length) cleanup.pop()!(); });
 
 /** A gateway that answers like the real one: a chat's reply arrives as notifications after `turn/start`. */
-function gateway(options: { resumeError?: string } = {}) {
+function gateway(options: { resumeError?: string; failTurn?: boolean; hold?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "ccodex-gw-"));
   const path = join(dir, "gw.sock");
   const calls: Array<{ method: string; params: any }> = [];
@@ -28,7 +29,13 @@ function gateway(options: { resumeError?: string } = {}) {
     else if (message.method === "thread/resume" && !options.resumeError) reply({ model: "claude:sonnet" });
     else if (message.method === "thread/resume" && options.resumeError) ws.send(JSON.stringify({ id: message.id, error: { code: -32600, message: options.resumeError } }));
     else if (message.method === "thread/start") reply({ thread: { id: NEW } });
-    else if (message.method === "turn/start") {
+    else if (message.method === "turn/start" && options.hold) reply({ turn: { id: "t1" } });
+    else if (message.method === "turn/start" && options.failTurn) {
+      reply({ turn: { id: "t1" } });
+      const threadId = message.params.threadId;
+      ws.send(JSON.stringify({ method: "item/completed", params: { threadId, item: { type: "agentMessage", phase: "final_answer", text: "model problem" } } }));
+      ws.send(JSON.stringify({ method: "turn/completed", params: { threadId, turn: { id: "t1", status: "failed", error: { message: "model problem" } } } }));
+    } else if (message.method === "turn/start") {
       reply({ turn: { id: "t1" } });
       const threadId = message.params.threadId;
       ws.send(JSON.stringify({ method: "item/completed", params: { threadId, item: { type: "agentMessage", phase: "final_answer", text: `got: ${message.params.input[0].text}` } } }));
@@ -98,5 +105,40 @@ describe("claudeModelId", () => {
     expect(claudeModelId("claude-haiku-5-5")).toBe("claude:claude-haiku-5-5");
     expect(claudeModelId("gpt-6.1-sol")).toBeUndefined();
     expect(claudeModelId(undefined)).toBeUndefined();
+  });
+});
+
+describe("startViaGateway failures", () => {
+  it("rejects a failed turn even when it left a message, and still archives the chat", async () => {
+    const { path, calls } = await gateway({ failTurn: true });
+    await expect(startViaGateway(path, { prompt: "x", model: "claude:nonexistent" })).rejects.toThrow("model problem");
+    expect(calls.map((call) => call.method)).toContain("thread/archive");
+  });
+
+  it("interrupts the turn, archives the chat and rejects when aborted", async () => {
+    const { path, calls } = await gateway({ hold: true });
+    const controller = new AbortController();
+    const run = startViaGateway(path, { prompt: "x", model: "claude:haiku", signal: controller.signal });
+    setTimeout(() => controller.abort(), 300);
+    await expect(run).rejects.toThrow("Cancelled");
+    expect(calls.map((call) => call.method)).toEqual(expect.arrayContaining(["turn/interrupt", "thread/archive"]));
+  });
+
+  it("archives chats by id", async () => {
+    const { path, calls } = await gateway();
+    expect(await archiveViaGateway(path, [OPEN, NEW])).toEqual([OPEN, NEW]);
+    expect(calls.filter((call) => call.method === "thread/archive").map((call) => call.params.threadId)).toEqual([OPEN, NEW]);
+  });
+});
+
+describe("sub-agent chat registry", () => {
+  it("hands out only chats whose server is gone, once", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ccodex-reg-"));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    recordSubagentChat(dir, "mine");
+    writeFileSync(join(dir, "subagent-chats.json"), JSON.stringify({ mine: { pid: process.pid, at: 1 }, dead: { pid: 2 ** 22 + 12345, at: 1 }, gone: { pid: 2 ** 22 + 54321, at: 1 } }));
+    forgetSubagentChat(dir, "gone");
+    expect(claimOrphanedSubagentChats(dir)).toEqual(["dead"]);
+    expect(claimOrphanedSubagentChats(dir)).toEqual([]);
   });
 });

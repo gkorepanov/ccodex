@@ -55,19 +55,22 @@ async function connectGateway(socketPath: string): Promise<Gateway> {
   return { request, messages, isClosed: () => closed, close };
 }
 
-/** Starts a turn and waits for it: resolves with the turn's final agent message. */
-async function runTurn(gateway: Gateway, threadId: string, prompt: string, model: unknown): Promise<string> {
+/** Starts a turn and waits for it: resolves with the turn's final agent message; a failed turn is an error, whatever it said. */
+async function runTurn(gateway: Gateway, threadId: string, prompt: string, model: unknown, signal?: AbortSignal): Promise<string> {
   const { request, messages, isClosed } = gateway;
   const turnId = (await request("turn/start", { threadId, input: [{ type: "text", text: prompt }], ...(typeof model === "string" && model ? { model } : {}) })).turn?.id;
   let end: Message | undefined;
   while (!(end = messages.find((m) => m.method === "turn/completed" && m.params?.threadId === threadId && (!turnId || m.params?.turn?.id === turnId)))) {
+    if (signal?.aborted) {
+      await request("turn/interrupt", { threadId, ...(turnId ? { turnId } : {}) }).catch(() => undefined);
+      throw new Error("Cancelled.");
+    }
     if (isClosed()) throw new Error("CCodex gateway closed the connection.");
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  if (end.params?.turn?.status === "failed") throw new Error(String(end.params?.turn?.error?.message ?? "The turn failed."));
   const said = messages.filter((m) => m.method === "item/completed" && m.params?.threadId === threadId && m.params?.item?.type === "agentMessage");
   const final = said.filter((m) => m.params.item.phase === "final_answer").at(-1) ?? said.at(-1);
-  const failure = end.params?.turn?.status === "failed" ? end.params?.turn?.error?.message : undefined;
-  if (failure && !final) throw new Error(String(failure));
   return final?.params.item.text ?? "";
 }
 
@@ -79,11 +82,12 @@ export function claudeModelId(model: unknown): string | undefined {
   return /^(opus|sonnet|haiku|fable)$/iu.test(name) ? `claude:${name.toLowerCase()}` : undefined;
 }
 
-export type StartOptions = { prompt: string; model: string; cwd?: string; sandbox?: string; approvalPolicy?: string; name?: string; developerInstructions?: string; baseInstructions?: string; archive?: boolean };
+export type StartOptions = { prompt: string; model: string; cwd?: string; sandbox?: string; approvalPolicy?: string; name?: string; archive?: boolean; signal?: AbortSignal; onThread?: (threadId: string) => void };
 
 /**
  * Runs a prompt in a new chat on a Claude model, which `codex exec` cannot do: the chat is created through the gateway
- * like one made in the app. It is archived afterwards unless `archive` is false, so sub-agent runs do not pile up in
+ * like one made in the app. Claude chats have no sandbox, only permission modes: `danger-full-access` runs it with all
+ * tools allowed and anything else in don't-ask mode, where tools not already allowed (shell, edits) are denied. It is archived afterwards unless `archive` is false, so sub-agent runs do not pile up in
  * the sidebar; the thread id still works with `codex-reply`.
  */
 export async function startViaGateway(socketPath: string, options: StartOptions): Promise<{ threadId: string; content: string }> {
@@ -95,20 +99,33 @@ export async function startViaGateway(socketPath: string, options: StartOptions)
       approvalPolicy: options.approvalPolicy ?? "never",
       sandbox: options.sandbox ?? "read-only",
       ephemeral: false,
-      ...(options.developerInstructions ? { developerInstructions: options.developerInstructions } : {}),
-      ...(options.baseInstructions ? { baseInstructions: options.baseInstructions } : {}),
     });
     const threadId = String(started.thread?.id ?? "");
     if (!threadId) throw new Error("CCodex gateway did not return a thread id.");
+    options.onThread?.(threadId);
     if (options.name) await gateway.request("thread/name/set", { threadId, name: options.name }).catch(() => undefined);
     try {
-      return { threadId, content: await runTurn(gateway, threadId, options.prompt, options.model) };
+      return { threadId, content: await runTurn(gateway, threadId, options.prompt, options.model, options.signal) };
     } finally {
       if (options.archive !== false) await gateway.request("thread/archive", { threadId }).catch(() => undefined);
     }
   } finally {
     gateway.close();
   }
+}
+
+/** Archives chats (best effort), for sub-agent chats left behind by a server that was killed mid-call. */
+export async function archiveViaGateway(socketPath: string, threadIds: string[]): Promise<string[]> {
+  const gateway = await connectGateway(socketPath);
+  const archived: string[] = [];
+  try {
+    for (const threadId of threadIds) {
+      try { await gateway.request("thread/archive", { threadId }); archived.push(threadId); } catch { /* gone or already archived */ }
+    }
+  } finally {
+    gateway.close();
+  }
+  return archived;
 }
 
 /**
