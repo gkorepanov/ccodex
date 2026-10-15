@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
-import { GatewayUnavailable, replyViaGateway } from "../../src/mcp/gatewayReply.js";
+import { GatewayUnavailable, claudeModelId, replyViaGateway, startViaGateway } from "../../src/mcp/gatewayReply.js";
 
 const OPEN = "11111111-1111-4111-8111-111111111111";
+const NEW = "22222222-2222-4222-8222-222222222222";
 const cleanup: Array<() => void> = [];
 afterEach(() => { while (cleanup.length) cleanup.pop()!(); });
 
@@ -26,6 +27,7 @@ function gateway(options: { resumeError?: string } = {}) {
     if (message.method === "thread/list") reply({ data: [{ id: OPEN, name: "Router-vp ✳️" }, { id: "x", name: "Router-vp-old" }] });
     else if (message.method === "thread/resume" && !options.resumeError) reply({ model: "claude:sonnet" });
     else if (message.method === "thread/resume" && options.resumeError) ws.send(JSON.stringify({ id: message.id, error: { code: -32600, message: options.resumeError } }));
+    else if (message.method === "thread/start") reply({ thread: { id: NEW } });
     else if (message.method === "turn/start") {
       reply({ turn: { id: "t1" } });
       const threadId = message.params.threadId;
@@ -65,5 +67,36 @@ describe("replyViaGateway", () => {
 
   it("reports a missing gateway as unavailable", async () => {
     await expect(replyViaGateway(join(tmpdir(), "ccodex-no-such.sock"), OPEN, "hi")).rejects.toThrow(GatewayUnavailable);
+  });
+});
+
+describe("startViaGateway", () => {
+  it("starts a chat on the given model, runs the prompt on it and archives the chat", async () => {
+    const { path, calls } = await gateway();
+    const result = await startViaGateway(path, { prompt: "work", model: "claude:haiku", cwd: "/tmp/x", name: "Sub-agent: work" });
+    expect(result).toEqual({ threadId: NEW, content: "got: work" });
+    expect(calls.map((call) => call.method)).toEqual(["initialize", "thread/start", "thread/name/set", "turn/start", "thread/archive"]);
+    expect(calls[1].params).toMatchObject({ model: "claude:haiku", cwd: "/tmp/x", sandbox: "read-only", approvalPolicy: "never" });
+    expect(calls[3].params.model).toBe("claude:haiku");
+  });
+
+  it("keeps the chat unarchived when asked", async () => {
+    const { path, calls } = await gateway();
+    await startViaGateway(path, { prompt: "work", model: "claude:sonnet", archive: false });
+    expect(calls.map((call) => call.method)).not.toContain("thread/archive");
+  });
+
+  it("reports a missing gateway as unavailable", async () => {
+    await expect(startViaGateway(join(tmpdir(), "ccodex-no-such.sock"), { prompt: "x", model: "claude:haiku" })).rejects.toThrow(GatewayUnavailable);
+  });
+});
+
+describe("claudeModelId", () => {
+  it("maps Claude names to gateway ids and leaves other models alone", () => {
+    expect(claudeModelId("claude:haiku")).toBe("claude:haiku");
+    expect(claudeModelId("Haiku")).toBe("claude:haiku");
+    expect(claudeModelId("claude-haiku-5-5")).toBe("claude:claude-haiku-5-5");
+    expect(claudeModelId("gpt-6.1-sol")).toBeUndefined();
+    expect(claudeModelId(undefined)).toBeUndefined();
   });
 });

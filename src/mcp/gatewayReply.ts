@@ -9,12 +9,10 @@ const MARK = /\s*✳️\s*$/u;
 /** A failure to reach the gateway or its thread, after which the caller may fall back to `codex exec`. */
 export class GatewayUnavailable extends Error {}
 
-/**
- * Sends a prompt to a chat through CCodex's own socket, as the Codex app does: a chat the app has open (it has an
- * active writer, which `codex exec resume` cannot take), a busy chat (the prompt joins its running turn) and a chat
- * now on a Claude model (the gateway routes it to the Claude session) all get it. `chat` is a thread id or a title.
- */
-export async function replyViaGateway(socketPath: string, chat: string, prompt: string): Promise<{ threadId: string; content: string }> {
+type Gateway = { request: (method: string, params: object) => Promise<Message>; messages: Message[]; isClosed: () => boolean; close: () => void };
+
+/** Opens CCodex's own socket as an app-like client and initializes it. */
+async function connectGateway(socketPath: string): Promise<Gateway> {
   const socket = new WebSocket("ws://ccodex/rpc", { createConnection: () => createConnection(socketPath), perMessageDeflate: false });
   try {
     await new Promise<void>((resolve, reject) => { socket.once("open", () => resolve()); socket.once("error", reject); });
@@ -46,9 +44,82 @@ export async function replyViaGateway(socketPath: string, chat: string, prompt: 
     waiting.set(id, { resolve, reject });
     socket.send(JSON.stringify({ id, method, params }));
   });
+  const close = () => { socket.removeAllListeners(); socket.terminate(); };
   try {
     await request("initialize", { clientInfo: { name: "ccodex_mcp", title: "CCodex MCP", version: "1" }, capabilities: { experimentalApi: true } });
     socket.send(JSON.stringify({ method: "initialized" }));
+  } catch (error) {
+    close();
+    throw error;
+  }
+  return { request, messages, isClosed: () => closed, close };
+}
+
+/** Starts a turn and waits for it: resolves with the turn's final agent message. */
+async function runTurn(gateway: Gateway, threadId: string, prompt: string, model: unknown): Promise<string> {
+  const { request, messages, isClosed } = gateway;
+  const turnId = (await request("turn/start", { threadId, input: [{ type: "text", text: prompt }], ...(typeof model === "string" && model ? { model } : {}) })).turn?.id;
+  let end: Message | undefined;
+  while (!(end = messages.find((m) => m.method === "turn/completed" && m.params?.threadId === threadId && (!turnId || m.params?.turn?.id === turnId)))) {
+    if (isClosed()) throw new Error("CCodex gateway closed the connection.");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const said = messages.filter((m) => m.method === "item/completed" && m.params?.threadId === threadId && m.params?.item?.type === "agentMessage");
+  const final = said.filter((m) => m.params.item.phase === "final_answer").at(-1) ?? said.at(-1);
+  const failure = end.params?.turn?.status === "failed" ? end.params?.turn?.error?.message : undefined;
+  if (failure && !final) throw new Error(String(failure));
+  return final?.params.item.text ?? "";
+}
+
+/** The gateway's id for a Claude model given as `claude:haiku`, `haiku` or a full id such as `claude-haiku-5-5`; undefined for anything else. */
+export function claudeModelId(model: unknown): string | undefined {
+  const name = typeof model === "string" ? model.trim() : "";
+  if (/^claude:./u.test(name)) return name;
+  if (/^claude-/u.test(name)) return `claude:${name}`;
+  return /^(opus|sonnet|haiku|fable)$/iu.test(name) ? `claude:${name.toLowerCase()}` : undefined;
+}
+
+export type StartOptions = { prompt: string; model: string; cwd?: string; sandbox?: string; approvalPolicy?: string; name?: string; developerInstructions?: string; baseInstructions?: string; archive?: boolean };
+
+/**
+ * Runs a prompt in a new chat on a Claude model, which `codex exec` cannot do: the chat is created through the gateway
+ * like one made in the app. It is archived afterwards unless `archive` is false, so sub-agent runs do not pile up in
+ * the sidebar; the thread id still works with `codex-reply`.
+ */
+export async function startViaGateway(socketPath: string, options: StartOptions): Promise<{ threadId: string; content: string }> {
+  const gateway = await connectGateway(socketPath);
+  try {
+    const started = await gateway.request("thread/start", {
+      model: options.model,
+      cwd: options.cwd ?? process.cwd(),
+      approvalPolicy: options.approvalPolicy ?? "never",
+      sandbox: options.sandbox ?? "read-only",
+      ephemeral: false,
+      ...(options.developerInstructions ? { developerInstructions: options.developerInstructions } : {}),
+      ...(options.baseInstructions ? { baseInstructions: options.baseInstructions } : {}),
+    });
+    const threadId = String(started.thread?.id ?? "");
+    if (!threadId) throw new Error("CCodex gateway did not return a thread id.");
+    if (options.name) await gateway.request("thread/name/set", { threadId, name: options.name }).catch(() => undefined);
+    try {
+      return { threadId, content: await runTurn(gateway, threadId, options.prompt, options.model) };
+    } finally {
+      if (options.archive !== false) await gateway.request("thread/archive", { threadId }).catch(() => undefined);
+    }
+  } finally {
+    gateway.close();
+  }
+}
+
+/**
+ * Sends a prompt to a chat through CCodex's own socket, as the Codex app does: a chat the app has open (it has an
+ * active writer, which `codex exec resume` cannot take), a busy chat (the prompt joins its running turn) and a chat
+ * now on a Claude model (the gateway routes it to the Claude session) all get it. `chat` is a thread id or a title.
+ */
+export async function replyViaGateway(socketPath: string, chat: string, prompt: string): Promise<{ threadId: string; content: string }> {
+  const gateway = await connectGateway(socketPath);
+  const { request } = gateway;
+  try {
     let threadId = chat.trim();
     if (!UUID.test(threadId)) {
       const wanted = threadId.replace(MARK, "").toLowerCase();
@@ -67,23 +138,8 @@ export async function replyViaGateway(socketPath: string, chat: string, prompt: 
     }
     // A `turn/start` without a model would complete a model switch someone left pending on the chat (the app sends the
     // model with each turn); naming the chat's own model keeps it on the provider it is on.
-    const turnId = (await request("turn/start", { threadId, input: [{ type: "text", text: prompt }], ...(typeof model === "string" && model ? { model } : {}) })).turn?.id;
-    const done = async () => {
-      for (;;) {
-        const end = messages.find((m) => m.method === "turn/completed" && m.params?.threadId === threadId && (!turnId || m.params?.turn?.id === turnId));
-        if (end) return end;
-        if (closed) throw new Error("CCodex gateway closed the connection.");
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    };
-    const end = await done();
-    const said = messages.filter((m) => m.method === "item/completed" && m.params?.threadId === threadId && m.params?.item?.type === "agentMessage");
-    const final = said.filter((m) => m.params.item.phase === "final_answer").at(-1) ?? said.at(-1);
-    const failure = end.params?.turn?.status === "failed" ? end.params?.turn?.error?.message : undefined;
-    if (failure && !final) throw new Error(String(failure));
-    return { threadId, content: final?.params.item.text ?? "" };
+    return { threadId, content: await runTurn(gateway, threadId, prompt, model) };
   } finally {
-    socket.removeAllListeners();
-    socket.terminate();
+    gateway.close();
   }
 }
