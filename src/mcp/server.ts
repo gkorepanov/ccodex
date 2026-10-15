@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import type { Config } from "../config.js";
+import { GatewayUnavailable, replyViaGateway } from "./gatewayReply.js";
 
 /** Written into each session's rollout (`thread_source`), so CCodex's streaming can find the journal of a call. */
 export const MCP_THREAD_SOURCE = "ccodex-mcp";
@@ -102,6 +103,27 @@ function runCall(config: Config, tool: string, args: Args, children: Map<unknown
 }
 
 /**
+ * `codex-reply` goes through the gateway (the way the app talks), so chats the app has open, busy chats and chats on
+ * Claude models take it; without a gateway, or for a thread only `codex exec` knows, it resumes the session as before.
+ */
+async function replyThroughGateway(config: Config, args: Args, children: Map<unknown, ChildProcess>, id: unknown): Promise<unknown> {
+  const chat = String(args.threadId ?? args.conversationId ?? "");
+  try {
+    const { threadId, content } = await replyViaGateway(config.publicSocket, chat, String(args.prompt));
+    return { content: [{ type: "text", text: content }], structuredContent: { threadId, content } };
+  } catch (error) {
+    if (!(error instanceof GatewayUnavailable)) {
+      const text = error instanceof Error ? error.message : String(error);
+      return { content: [{ type: "text", text }], structuredContent: { threadId: chat, content: text }, isError: true };
+    }
+    if (!/^[0-9a-f-]{36}$/iu.test(chat)) {
+      return { content: [{ type: "text", text: error.message }], structuredContent: { threadId: chat, content: error.message }, isError: true };
+    }
+    return runCall(config, "codex-reply", args, children, id);
+  }
+}
+
+/**
  * `codex mcp-server` (removed from codex in 0.154): the same stdio MCP server, running each call as a `codex exec`
  * session of the installed codex. Sessions are `exec`-sourced (hidden from Desktop's list) and persist their
  * rollouts, so Claude threads stream them and `codex-reply` resumes them.
@@ -121,7 +143,8 @@ export async function runMcpServer(config: Config, version: string, input: Reada
     } else if (method === "tools/list") {
       send({ id, result: { tools: TOOLS } });
     } else if (method === "tools/call" && TOOLS.some((tool) => tool.name === params?.name)) {
-      void runCall(config, params.name, params.arguments ?? {}, children, id).then((result) => send({ id, result }));
+      void (params.name === "codex-reply" ? replyThroughGateway(config, params.arguments ?? {}, children, id) : runCall(config, params.name, params.arguments ?? {}, children, id))
+        .then((result) => send({ id, result }));
     } else if (method === "ping") {
       send({ id, result: {} });
     } else {
