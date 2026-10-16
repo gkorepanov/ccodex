@@ -13,7 +13,7 @@ const cleanup: Array<() => void> = [];
 afterEach(() => { while (cleanup.length) cleanup.pop()!(); });
 
 /** A gateway that answers like the real one: a chat's reply arrives as notifications after `turn/start`. */
-function gateway(options: { resumeError?: string; failTurn?: boolean; hold?: boolean; busy?: boolean } = {}) {
+function gateway(options: { resumeError?: string; failTurn?: boolean; hold?: boolean; busy?: boolean; background?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "ccodex-gw-"));
   const path = join(dir, "gw.sock");
   const calls: Array<{ method: string; params: any }> = [];
@@ -25,7 +25,7 @@ function gateway(options: { resumeError?: string; failTurn?: boolean; hold?: boo
     if (message.id === undefined) return;
     calls.push({ method: message.method, params: message.params });
     const reply = (result: unknown) => ws.send(JSON.stringify({ id: message.id, result }));
-    if (message.method === "thread/list") reply({ data: [{ id: OPEN, name: "Router-vp ✳️" }, { id: "x", name: "Router-vp-old" }] });
+    if (message.method === "thread/list") reply({ data: [{ id: "stale", name: "Router-vp", updatedAt: 1 }, { id: OPEN, name: "Router-vp ✳️", updatedAt: 2 }, { id: "x", name: "Router-vp-old", updatedAt: 3 }] });
     else if (message.method === "thread/resume" && !options.resumeError) reply({ model: "claude:sonnet", thread: { status: { type: options.busy ? "active" : "idle" } } });
     else if (message.method === "thread/resume" && options.resumeError) ws.send(JSON.stringify({ id: message.id, error: { code: -32600, message: options.resumeError } }));
     else if (message.method === "thread/start") reply({ thread: { id: NEW } });
@@ -36,6 +36,17 @@ function gateway(options: { resumeError?: string; failTurn?: boolean; hold?: boo
       ws.send(JSON.stringify({ method: "item/completed", params: { threadId, item: { type: "agentMessage", text: "earlier work" } } }));
       ws.send(JSON.stringify({ method: "item/completed", params: { threadId, item: { type: "userMessage", content: [{ type: "text", text: message.params.input[0].text }] } } }));
       ws.send(JSON.stringify({ method: "item/completed", params: { threadId, item: { type: "agentMessage", text: "answer" } } }));
+    } else if (message.method === "turn/start" && options.background) {
+      // A Claude chat whose background task reports first, in a turn of its own, and which shows its MCP calls.
+      reply({ turn: { id: "t1" } });
+      const threadId = message.params.threadId;
+      const item = (turnId: string, item: object) => ws.send(JSON.stringify({ method: "item/completed", params: { threadId, turnId, item } }));
+      item("bg", { type: "agentMessage", phase: "final_answer", text: "background progress" });
+      ws.send(JSON.stringify({ method: "turn/completed", params: { threadId, turn: { id: "bg", status: "completed" } } }));
+      item("t1", { type: "userMessage", content: [{ type: "text", text: message.params.input[0].text }] });
+      item("t1", { type: "agentMessage", text: "◆ CCodex │ Codex MCP prompt\n\nsomething" });
+      item("t1", { type: "agentMessage", phase: "final_answer", text: "ACK" });
+      ws.send(JSON.stringify({ method: "turn/completed", params: { threadId, turn: { id: "t1", status: "completed" } } }));
     } else if (message.method === "turn/start" && options.hold) reply({ turn: { id: "t1" } });
     else if (message.method === "turn/start" && options.failTurn) {
       reply({ turn: { id: "t1" } });
@@ -66,7 +77,7 @@ describe("replyViaGateway", () => {
     expect(calls.at(-1)!.params.model).toBe("claude:sonnet");
   });
 
-  it("finds a chat by title, ignoring the Claude mark and similar titles", async () => {
+  it("finds a chat by title, ignoring the Claude mark and similar titles, and takes the one used last of the same title", async () => {
     const { path } = await gateway();
     expect((await replyViaGateway(path, "Router-vp", "hi")).threadId).toBe(OPEN);
     expect((await replyViaGateway(path, "Router-vp ✳️", "hi")).threadId).toBe(OPEN);
@@ -168,6 +179,11 @@ describe("replyViaGateway waiting", () => {
     const { path } = await gateway({ busy: true });
     const { content } = await replyViaGateway(path, OPEN, "question");
     expect(content).toMatch(/^answer\n\n\[CCodex: the chat was busy/u);
+  });
+
+  it("answers with the turn the prompt is in, not a background task's turn or CCodex's display of MCP calls", async () => {
+    const { path } = await gateway({ background: true });
+    expect((await replyViaGateway(path, OPEN, "question")).content).toBe("ACK");
   });
 
   it("stops waiting at the limit and says the message was delivered", async () => {

@@ -74,14 +74,19 @@ async function runTurn(gateway: Gateway, threadId: string, prompt: string, model
   const turnId = (await request("turn/start", { threadId, input: [{ type: "text", text: prompt }], ...(typeof model === "string" && model ? { model } : {}) })).turn?.id;
   const deadline = Date.now() + (options.waitMs ?? REPLY_WAIT_MS);
   const ofThread = (m: Message, type: string) => m.method === "item/completed" && m.params?.threadId === threadId && m.params?.item?.type === type;
+  // CCodex shows a Claude chat's MCP calls as agent messages of its own; they are not the chat's words.
+  const spoken = (m: Message) => ofThread(m, "agentMessage") && !String(m.params.item.text ?? "").startsWith("◆ CCodex │");
+  const asked = () => messages.slice(from).find((m) => ofThread(m, "userMessage") && JSON.stringify(m.params.item.content ?? "").includes(JSON.stringify(prompt.slice(0, 60)).slice(1, -1)));
+  // The turn our prompt is in: a Claude chat also completes turns of its own (background tasks reporting back).
+  const ours = () => asked()?.params?.turnId ?? turnId;
   // Replies after our prompt: in a joined turn, earlier messages answer something else.
   const replies = () => {
     const recent = messages.slice(from);
-    const asked = recent.findIndex((m) => ofThread(m, "userMessage") && JSON.stringify(m.params.item.content ?? "").includes(JSON.stringify(prompt.slice(0, 60)).slice(1, -1)));
-    return recent.slice(asked + 1).filter((m) => ofThread(m, "agentMessage")).map((m) => String(m.params.item.text ?? ""));
+    const at = recent.indexOf(asked() as Message);
+    return recent.slice(at + 1).filter(spoken).map((m) => String(m.params.item.text ?? ""));
   };
   let end: Message | undefined;
-  while (!(end = messages.find((m) => m.method === "turn/completed" && m.params?.threadId === threadId && (!turnId || m.params?.turn?.id === turnId)))) {
+  while (!(end = messages.find((m) => m.method === "turn/completed" && m.params?.threadId === threadId && (!ours() || m.params?.turn?.id === ours())))) {
     if (options.signal?.aborted) {
       await request("turn/interrupt", { threadId, ...(turnId ? { turnId } : {}) }).catch(() => undefined);
       throw new Error("Cancelled.");
@@ -95,7 +100,8 @@ async function runTurn(gateway: Gateway, threadId: string, prompt: string, model
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   if (end.params?.turn?.status === "failed") throw new Error(String(end.params?.turn?.error?.message ?? "The turn failed."));
-  const said = messages.filter((m) => ofThread(m, "agentMessage"));
+  const turn = end.params?.turn?.id;
+  const said = messages.filter((m) => spoken(m) && (!turn || !m.params.turnId || m.params.turnId === turn));
   const final = said.filter((m) => m.params.item.phase === "final_answer").at(-1) ?? said.at(-1);
   return final?.params.item.text ?? "";
 }
@@ -168,10 +174,9 @@ export async function replyViaGateway(socketPath: string, chat: string, prompt: 
       const wanted = threadId.replace(MARK, "").toLowerCase();
       const found = ((await request("thread/list", { searchTerm: threadId.replace(MARK, ""), limit: 50 })).data ?? [])
         .filter((thread: Message) => String(thread.name ?? "").replace(MARK, "").toLowerCase() === wanted);
-      if (found.length !== 1) {
-        throw new GatewayUnavailable(found.length ? `Several chats are titled "${chat}": ${found.map((thread: Message) => thread.id).join(", ")}. Use a thread id.` : `No chat is titled "${chat}".`);
-      }
-      threadId = found[0].id;
+      if (!found.length) throw new GatewayUnavailable(`No chat is titled "${chat}".`);
+      // Old copies keep a role's title (a chat from before CCodex, an earlier chat of the role): the one used last is the role's.
+      threadId = found.sort((left: Message, right: Message) => Number(right.updatedAt ?? 0) - Number(left.updatedAt ?? 0))[0].id;
     }
     let resumed: Message;
     try {
