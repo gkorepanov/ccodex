@@ -55,21 +55,47 @@ async function connectGateway(socketPath: string): Promise<Gateway> {
   return { request, messages, isClosed: () => closed, close };
 }
 
-/** Starts a turn and waits for it: resolves with the turn's final agent message; a failed turn is an error, whatever it said. */
-async function runTurn(gateway: Gateway, threadId: string, prompt: string, model: unknown, signal?: AbortSignal): Promise<string> {
+/** Waiting for a reply ends before the MCP client's own limit (codex's default tool timeout is an hour). */
+export const REPLY_WAIT_MS = 50 * 60_000;
+
+const waited = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)} seconds` : `${Math.round(ms / 60_000)} minutes`);
+
+type TurnOptions = { signal?: AbortSignal; busy?: boolean; waitMs?: number };
+
+/**
+ * Starts a turn and waits for it: resolves with the turn's final agent message; a failed turn is an error, whatever it
+ * said. A prompt sent to a busy chat joins the turn it is running, which may go on for hours, so it resolves with the
+ * chat's first reply after the prompt; past `waitMs` it resolves with what the chat has said since, noting it is still
+ * working.
+ */
+async function runTurn(gateway: Gateway, threadId: string, prompt: string, model: unknown, options: TurnOptions = {}): Promise<string> {
   const { request, messages, isClosed } = gateway;
+  const from = messages.length;
   const turnId = (await request("turn/start", { threadId, input: [{ type: "text", text: prompt }], ...(typeof model === "string" && model ? { model } : {}) })).turn?.id;
+  const deadline = Date.now() + (options.waitMs ?? REPLY_WAIT_MS);
+  const ofThread = (m: Message, type: string) => m.method === "item/completed" && m.params?.threadId === threadId && m.params?.item?.type === type;
+  // Replies after our prompt: in a joined turn, earlier messages answer something else.
+  const replies = () => {
+    const recent = messages.slice(from);
+    const asked = recent.findIndex((m) => ofThread(m, "userMessage") && JSON.stringify(m.params.item.content ?? "").includes(JSON.stringify(prompt.slice(0, 60)).slice(1, -1)));
+    return recent.slice(asked + 1).filter((m) => ofThread(m, "agentMessage")).map((m) => String(m.params.item.text ?? ""));
+  };
   let end: Message | undefined;
   while (!(end = messages.find((m) => m.method === "turn/completed" && m.params?.threadId === threadId && (!turnId || m.params?.turn?.id === turnId)))) {
-    if (signal?.aborted) {
+    if (options.signal?.aborted) {
       await request("turn/interrupt", { threadId, ...(turnId ? { turnId } : {}) }).catch(() => undefined);
       throw new Error("Cancelled.");
     }
     if (isClosed()) throw new Error("CCodex gateway closed the connection.");
+    if (options.busy && replies().length) return `${replies()[0]}\n\n[CCodex: the chat was busy; this is its first reply after your message, and it is still working on its turn.]`;
+    if (Date.now() > deadline) {
+      const said = replies().join("\n\n");
+      return `${said ? `${said}\n\n` : ""}[CCodex: your message was delivered; no final reply within ${waited(options.waitMs ?? REPLY_WAIT_MS)}, the chat is still working.]`;
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   if (end.params?.turn?.status === "failed") throw new Error(String(end.params?.turn?.error?.message ?? "The turn failed."));
-  const said = messages.filter((m) => m.method === "item/completed" && m.params?.threadId === threadId && m.params?.item?.type === "agentMessage");
+  const said = messages.filter((m) => ofThread(m, "agentMessage"));
   const final = said.filter((m) => m.params.item.phase === "final_answer").at(-1) ?? said.at(-1);
   return final?.params.item.text ?? "";
 }
@@ -105,7 +131,7 @@ export async function startViaGateway(socketPath: string, options: StartOptions)
     options.onThread?.(threadId);
     if (options.name) await gateway.request("thread/name/set", { threadId, name: options.name }).catch(() => undefined);
     try {
-      return { threadId, content: await runTurn(gateway, threadId, options.prompt, options.model, options.signal) };
+      return { threadId, content: await runTurn(gateway, threadId, options.prompt, options.model, { signal: options.signal, waitMs: Number.POSITIVE_INFINITY }) };
     } finally {
       if (options.archive !== false) await gateway.request("thread/archive", { threadId }).catch(() => undefined);
     }
@@ -133,7 +159,7 @@ export async function archiveViaGateway(socketPath: string, threadIds: string[])
  * active writer, which `codex exec resume` cannot take), a busy chat (the prompt joins its running turn) and a chat
  * now on a Claude model (the gateway routes it to the Claude session) all get it. `chat` is a thread id or a title.
  */
-export async function replyViaGateway(socketPath: string, chat: string, prompt: string): Promise<{ threadId: string; content: string }> {
+export async function replyViaGateway(socketPath: string, chat: string, prompt: string, waitMs = REPLY_WAIT_MS): Promise<{ threadId: string; content: string }> {
   const gateway = await connectGateway(socketPath);
   const { request } = gateway;
   try {
@@ -147,15 +173,15 @@ export async function replyViaGateway(socketPath: string, chat: string, prompt: 
       }
       threadId = found[0].id;
     }
-    let model: unknown;
+    let resumed: Message;
     try {
-      model = (await request("thread/resume", { threadId, excludeTurns: true })).model;
+      resumed = await request("thread/resume", { threadId, excludeTurns: true });
     } catch (error) {
       throw new GatewayUnavailable(error instanceof Error ? error.message : String(error));
     }
     // A `turn/start` without a model would complete a model switch someone left pending on the chat (the app sends the
     // model with each turn); naming the chat's own model keeps it on the provider it is on.
-    return { threadId, content: await runTurn(gateway, threadId, prompt, model) };
+    return { threadId, content: await runTurn(gateway, threadId, prompt, resumed.model, { busy: resumed.thread?.status?.type === "active", waitMs }) };
   } finally {
     gateway.close();
   }

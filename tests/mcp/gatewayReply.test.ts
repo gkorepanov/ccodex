@@ -13,7 +13,7 @@ const cleanup: Array<() => void> = [];
 afterEach(() => { while (cleanup.length) cleanup.pop()!(); });
 
 /** A gateway that answers like the real one: a chat's reply arrives as notifications after `turn/start`. */
-function gateway(options: { resumeError?: string; failTurn?: boolean; hold?: boolean } = {}) {
+function gateway(options: { resumeError?: string; failTurn?: boolean; hold?: boolean; busy?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "ccodex-gw-"));
   const path = join(dir, "gw.sock");
   const calls: Array<{ method: string; params: any }> = [];
@@ -26,10 +26,17 @@ function gateway(options: { resumeError?: string; failTurn?: boolean; hold?: boo
     calls.push({ method: message.method, params: message.params });
     const reply = (result: unknown) => ws.send(JSON.stringify({ id: message.id, result }));
     if (message.method === "thread/list") reply({ data: [{ id: OPEN, name: "Router-vp ✳️" }, { id: "x", name: "Router-vp-old" }] });
-    else if (message.method === "thread/resume" && !options.resumeError) reply({ model: "claude:sonnet" });
+    else if (message.method === "thread/resume" && !options.resumeError) reply({ model: "claude:sonnet", thread: { status: { type: options.busy ? "active" : "idle" } } });
     else if (message.method === "thread/resume" && options.resumeError) ws.send(JSON.stringify({ id: message.id, error: { code: -32600, message: options.resumeError } }));
     else if (message.method === "thread/start") reply({ thread: { id: NEW } });
-    else if (message.method === "turn/start" && options.hold) reply({ turn: { id: "t1" } });
+    else if (message.method === "turn/start" && options.busy) {
+      // A busy chat: the prompt joins the running turn, the chat answers it and keeps working.
+      reply({ turn: { id: "t1" } });
+      const threadId = message.params.threadId;
+      ws.send(JSON.stringify({ method: "item/completed", params: { threadId, item: { type: "agentMessage", text: "earlier work" } } }));
+      ws.send(JSON.stringify({ method: "item/completed", params: { threadId, item: { type: "userMessage", content: [{ type: "text", text: message.params.input[0].text }] } } }));
+      ws.send(JSON.stringify({ method: "item/completed", params: { threadId, item: { type: "agentMessage", text: "answer" } } }));
+    } else if (message.method === "turn/start" && options.hold) reply({ turn: { id: "t1" } });
     else if (message.method === "turn/start" && options.failTurn) {
       reply({ turn: { id: "t1" } });
       const threadId = message.params.threadId;
@@ -153,5 +160,19 @@ describe("publicChatId", () => {
     expect(publicChatId(dir, OPEN)).toBe(OPEN);
     expect(publicChatId(dir, "other")).toBe("other");
     expect(publicChatId(join(dir, "missing"), NEW)).toBe(NEW);
+  });
+});
+
+describe("replyViaGateway waiting", () => {
+  it("returns a busy chat's first reply after the prompt without waiting for its turn to end", async () => {
+    const { path } = await gateway({ busy: true });
+    const { content } = await replyViaGateway(path, OPEN, "question");
+    expect(content).toMatch(/^answer\n\n\[CCodex: the chat was busy/u);
+  });
+
+  it("stops waiting at the limit and says the message was delivered", async () => {
+    const { path } = await gateway({ hold: true });
+    const { content } = await replyViaGateway(path, OPEN, "question", 300);
+    expect(content).toBe("[CCodex: your message was delivered; no final reply within 0 seconds, the chat is still working.]");
   });
 });
