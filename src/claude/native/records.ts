@@ -260,6 +260,11 @@ export function isChainRecord(record: TranscriptRecord): record is TranscriptCha
     || record.type === "attachment";
 }
 
+/** A sub-agent's record (its parent's sidechain) as one of the sub-agent's own thread. */
+export function asVisibleSidechain(record: TranscriptRecord): TranscriptRecord {
+  return isChainRecord(record) ? { ...record, isSidechain: false } : record;
+}
+
 export function isCompactBoundary(record: TranscriptRecord): record is SystemRecord {
   return record.type === "system" && record.subtype === "compact_boundary";
 }

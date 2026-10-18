@@ -681,6 +681,13 @@ function projectTurnBoundaries(
   });
 }
 
+/** Whether the last turn of a transcript's end runs on: `records` reach back to its start, or as far as was read. */
+export function lastTurnRuns(records: readonly TranscriptRecord[], subagentPromptUuid?: string): boolean {
+  const selected = selectHistory(records).records;
+  const turn = selected.slice(turnStarts(selected, subagentPromptUuid, steeredPrompts(records)).at(-1)?.index ?? 0);
+  return turn.length > 0 && turnStatus(turn, false) === "inProgress";
+}
+
 /** The Codex thread for a native session header (list rows, reads, live responses). */
 export function nativeThread(
   id: string,

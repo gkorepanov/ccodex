@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { projectTranscript } from "../../../src/claude/native/projector.js";
-import { projectSubagents } from "../../../src/claude/native/subagents.js";
+import { TranscriptPages } from "../../../src/claude/native/pages.js";
+import { listSubagents } from "../../../src/claude/native/subagents.js";
 
 const projectDirectory = fileURLToPath(new URL("../../fixtures/nativeClaudeHome/projects/-home-user-project/", import.meta.url));
 
@@ -45,7 +46,8 @@ describe("native Claude fixtures", () => {
   it("projects the root and retained sub-agent threads", async () => {
     const sessionId = "d7dbe40e-3c05-40e6-b17f-40e4ff574798";
     const root = await fixture(sessionId);
-    const children = await projectSubagents(`${projectDirectory}${sessionId}`, sessionId);
+    const children = await Promise.all((await listSubagents(`${projectDirectory}${sessionId}`, sessionId)).map(async (subagent) =>
+      ({ projection: (await new TranscriptPages().newest(subagent.source, Infinity)).projection })));
 
     // Three turns Claude went on in: after a finished task woke it up, or after a message of an answer's length.
     expect(root.turns).toHaveLength(21);

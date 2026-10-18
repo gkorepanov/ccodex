@@ -56,6 +56,8 @@ const HEAD_BYTES = 4_096;
 const CACHE_WRITE_DELAY_MS = 1_000;
 const PROJECTION_CACHE_SIZE = 8;
 const PAGES_CACHE_SIZE = 16;
+/** A session's sub-agents run side by side (a pool of experts), each followed as Claude writes its transcript. */
+const SUBAGENT_PAGES_CACHE_SIZE = 32;
 const WATCH_DEBOUNCE_MS = 250;
 
 function ignored(error: unknown): boolean {
@@ -92,6 +94,15 @@ function summaryOf(file: DiscoveredFile, state: TranscriptSummaryState): Session
   };
 }
 
+/** The paged reads kept under `key`, now the most recently used. */
+function recent(pagers: Map<string, TranscriptPages>, key: string, size: number): TranscriptPages {
+  const pages = pagers.get(key) ?? new TranscriptPages();
+  pagers.delete(key);
+  pagers.set(key, pages);
+  while (pagers.size > size) pagers.delete(pagers.keys().next().value!);
+  return pages;
+}
+
 async function hashHead(path: string, length: number): Promise<string> {
   const handle = await open(path, "r");
   try {
@@ -114,6 +125,7 @@ export class NativeSessionCatalog implements PeerDirectory {
   private refreshQueued: Promise<void> | undefined;
   private readonly projections = new Map<string, Promise<TranscriptProjection>>();
   private readonly pagers = new Map<string, TranscriptPages>();
+  private readonly subagentPagers = new Map<string, TranscriptPages>();
   private senders = new Map<string, string>();
   private receivers = new Map<string, string>();
   public bytesParsed = 0;
@@ -194,15 +206,15 @@ export class NativeSessionCatalog implements PeerDirectory {
     const entry = this.entriesBySessionId.get(sessionId);
     if (!entry) throw new Error(`Unknown native Claude session: ${sessionId}`);
     const path = entry.summary.path;
-    const key = `${sessionId}\0${leafUuid ?? ""}`;
-    const pages = this.pagers.get(key) ?? new TranscriptPages();
-    this.pagers.delete(key);
-    this.pagers.set(key, pages);
-    while (this.pagers.size > PAGES_CACHE_SIZE) this.pagers.delete(this.pagers.keys().next().value!);
     return {
-      pages,
+      pages: recent(this.pagers, `${sessionId}\0${leafUuid ?? ""}`, PAGES_CACHE_SIZE),
       source: { sessionId, path, header: entry.summary, peers: this, peersVersion: `${this.senders.size}:${this.receivers.size}`, ...(leafUuid ? { leafUuid } : {}) },
     };
+  }
+
+  /** Paged reads of a sub-agent's (`agent-<id>`) transcript: see `readSubagent` for its source. */
+  public subagentPages(threadId: string): TranscriptPages {
+    return recent(this.subagentPagers, threadId, SUBAGENT_PAGES_CACHE_SIZE);
   }
 
   /** The session's transcript is deleted: one written anew under its id may take the same inode. */

@@ -17,7 +17,7 @@ import { claudeModelLabel, modelCatalogValue, normalizeClaudeModelIdentifier } f
 import { NativeSessionCatalog, type SessionSummary } from "./native/catalog.js";
 import { firstMatch } from "./native/search.js";
 import { nativeThread, type TranscriptProjection } from "./native/projector.js";
-import { projectSubagents, type ProjectedSubagent } from "./native/subagents.js";
+import { listSubagents, readSubagent, type Subagent } from "./native/subagents.js";
 import { readTranscriptRecords } from "./native/records.js";
 import { preview, summarizeTranscript, userText, type TranscriptHeader } from "./native/summary.js";
 import { claudeMode, codexPermissions, mapClaudeModel, mapSkill, permissionSettings, withProbeQuery } from "./sdk.js";
@@ -313,23 +313,36 @@ export class ClaudeThreads {
     return summary?.sessionId;
   }
 
-  private async subagents(root: string): Promise<ProjectedSubagent[]> {
+  private async subagents(root: string): Promise<Subagent[]> {
     if (!this.catalog.get(root)) await this.catalog.refresh();
     const summary = this.catalog.get(root);
     if (!summary) return [];
-    const children = await projectSubagents(summary.path.replace(/\.jsonl$/u, ""), root).catch(() => []);
-    for (const child of children) this.subagentRoots.set(`agent-${child.agentId}`, root);
+    const children = await listSubagents(summary.path.replace(/\.jsonl$/u, ""), root).catch(() => []);
+    for (const child of children) this.subagentRoots.set(child.source.sessionId, root);
     return children;
   }
 
-  private async subagentProjection(threadId: string): Promise<TranscriptProjection | undefined> {
+  /** A sub-agent once Claude has written its task's prompt (its siblings' transcripts are not read). */
+  private async subagent(threadId: string): Promise<Subagent | undefined> {
     const root = this.subagentRoot(threadId);
-    const children = root ? await this.subagents(root) : [];
-    const projection = children.find((child) => `agent-${child.agentId}` === threadId)?.projection;
-    if (!projection || this.spawnedSubagents.get(threadId)?.status.type !== "idle" || projection.thread.status.type !== "active") return projection;
-    // Settled, though Claude writes a sub-agent's last records a moment after that.
-    const turns = projection.turns.map((turn, index) => index < projection.turns.length - 1 ? turn : { ...turn, status: "completed" as const });
-    return { ...projection, turns, thread: { ...projection.thread, status: { type: "idle" } } };
+    if (!root) return undefined;
+    if (!this.catalog.get(root)) await this.catalog.refresh();
+    const summary = this.catalog.get(root);
+    return summary && readSubagent(summary.path.replace(/\.jsonl$/u, ""), threadId.slice("agent-".length), root).catch(() => undefined);
+  }
+
+  /** Settled once its task has, though Claude writes a sub-agent's last records a moment after that. */
+  private subagentThread({ source, running }: Subagent): Thread {
+    const status: Thread["status"] = running && this.spawnedSubagents.get(source.sessionId)?.status.type !== "idle" ? { type: "active", activeFlags: [] } : { type: "idle" };
+    return nativeThread(source.sessionId, source.header, { status, subagent: source.subagent });
+  }
+
+  /** All of a sub-agent's history, from its own transcript. */
+  private async subagentProjection(threadId: string): Promise<TranscriptProjection | undefined> {
+    const subagent = await this.subagent(threadId);
+    if (!subagent) return undefined;
+    const { turns, projection } = await this.catalog.subagentPages(threadId).newest(subagent.source, Infinity);
+    return { ...projection, turns, thread: this.subagentThread(subagent) };
   }
 
   /** Sub-agent threads spawned (directly or not) by a Claude session or sub-agent, parents first. */
@@ -337,10 +350,11 @@ export class ClaudeThreads {
     const root = ancestorId.startsWith("agent-") ? this.subagentRoot(ancestorId) : ancestorId;
     if (!root) return [];
     const descendants = new Set([ancestorId]);
-    const threads = (await this.subagents(root)).flatMap(({ projection }) => {
-      if (!descendants.has(projection.thread.parentThreadId ?? "")) return [];
-      descendants.add(projection.thread.id);
-      return [{ ...projection.thread, turns: [] }];
+    const threads = (await this.subagents(root)).flatMap((subagent) => {
+      const thread = this.subagentThread(subagent);
+      if (!descendants.has(thread.parentThreadId ?? "")) return [];
+      descendants.add(thread.id);
+      return [thread];
     });
     const spawned = [...this.spawnedSubagents.values()].filter((thread) =>
       descendants.has(thread.parentThreadId ?? "") && !threads.some((listed) => listed.id === thread.id));
@@ -367,7 +381,7 @@ export class ClaudeThreads {
 
   /** The coordinator's message resumed a sub-agent whose work had ended: it runs again (Claude's same task). */
   public async subagentResumed(session: ClaudeSession, childId: string): Promise<void> {
-    const thread = this.spawnedSubagents.get(childId) ?? (await this.subagentProjection(childId))?.thread;
+    const thread = this.spawnedSubagents.get(childId) ?? await this.subagent(childId).then((subagent) => subagent && this.subagentThread(subagent));
     if (!thread || this.liveSubagents.has(childId)) return;
     const status: Thread["status"] = { type: "active", activeFlags: [] };
     this.spawnedSubagents.set(childId, { ...thread, turns: [], status });
@@ -422,7 +436,7 @@ export class ClaudeThreads {
   /** Emits what the sub-agent's transcript (and its Codex calls) holds beyond what its thread already showed. */
   private async refreshSubagent(childId: string): Promise<Turn | undefined> {
     const live = this.liveSubagents.get(childId);
-    const turn = live && (await this.subagentProjection(childId).catch(() => undefined))?.turns.at(-1);
+    const turn = live && (await this.newestTurns(childId, 1).catch(() => undefined))?.turns.at(-1);
     if (!live || !turn) return undefined;
     if (live.turnId !== turn.id) {
       live.turnId = turn.id;
@@ -462,19 +476,26 @@ export class ClaudeThreads {
     return { thread: this.decorate(thread), turns, usage: projection.tokenUsage };
   }
 
-  /** The thread without its history: the catalog's header, no transcript read. */
+  /** The thread without its history: the catalog's header (a sub-agent's, the ends of its transcript), no transcript read. */
   public async thread(threadId: string): Promise<Thread> {
     const side = this.sides.get(threadId);
     if (side) return this.sideThread(side);
+    const subagent = threadId.startsWith("agent-") ? await this.subagent(threadId) : undefined;
+    if (subagent) return this.decorate(this.subagentThread(subagent));
     if (!this.catalog.get(threadId)) await this.catalog.refresh();
-    if (!this.paged(threadId)) return (await this.read(threadId)).thread;
+    if (!this.catalog.has(threadId)) return (await this.read(threadId)).thread;
     await this.models().catch(() => undefined);
     return this.decorate(nativeThread(threadId, this.headerOf(this.catalog.get(threadId)!, this.sessions.get(threadId)), { status: this.status(threadId) }));
   }
 
-  /** A main session with a transcript: its history is read page by page (a sub-agent's, a small file of one turn, whole). */
-  private paged(threadId: string): boolean {
-    return !threadId.startsWith("agent-") && !this.sides.has(threadId) && this.catalog.has(threadId);
+  /** Paged reads of a thread's transcript, a main session's or a sub-agent's own; none for a side chat, nor before Claude wrote one. */
+  private async paged(threadId: string): Promise<ReturnType<NativeSessionCatalog["pages"]> | undefined> {
+    if (threadId.startsWith("agent-")) {
+      const subagent = await this.subagent(threadId);
+      return subagent && { pages: this.catalog.subagentPages(threadId), source: subagent.source };
+    }
+    if (!this.catalog.get(threadId)) await this.catalog.refresh();
+    return !this.sides.has(threadId) && this.catalog.has(threadId) ? this.pages(threadId) : undefined;
   }
 
   private pages(threadId: string): ReturnType<NativeSessionCatalog["pages"]> {
@@ -496,8 +517,12 @@ export class ClaudeThreads {
     })) : [...history];
     const live = session?.liveTurn();
     // Stock's stale turns: one the transcript leaves unfinished with none running here (its Claude died with a daemon
-    // restart) was interrupted. A sub-agent runs in its parent's session.
-    if (!live) return threadId.startsWith("agent-") ? turns : turns.map((turn) => turn.status === "inProgress" ? { ...turn, status: "interrupted" } : turn);
+    // restart) was interrupted. A sub-agent runs in its parent's session: its turn is done once its task settled, though
+    // Claude writes its last records a moment after that.
+    if (!live && threadId.startsWith("agent-")) {
+      return this.spawnedSubagents.get(threadId)?.status.type === "idle" ? turns.map((turn) => turn.status === "inProgress" ? { ...turn, status: "completed" } : turn) : turns;
+    }
+    if (!live) return turns.map((turn) => turn.status === "inProgress" ? { ...turn, status: "interrupted" } : turn);
     const index = turns.findIndex((turn) => turn.id === live.id);
     if (index >= 0) turns = [...turns.slice(0, index), { ...turns[index]!, status: "inProgress", completedAt: null }];
     else turns.push(live);
@@ -506,20 +531,19 @@ export class ClaudeThreads {
 
   /** The newest turns (at least `count` unless history is shorter). */
   private async newestTurns(threadId: string, count: number): Promise<{ turns: Turn[]; usage?: TranscriptProjection["tokenUsage"] }> {
-    if (!this.catalog.get(threadId)) await this.catalog.refresh();
-    if (!this.paged(threadId)) return this.read(threadId);
-    const { pages, source } = this.pages(threadId);
-    const window = await pages.newest(source, count);
+    const paged = await this.paged(threadId);
+    if (!paged) return this.read(threadId);
+    const window = await paged.pages.newest(paged.source, count);
     return { turns: this.withLive(threadId, window.turns), usage: window.projection.tokenUsage };
   }
 
   public async turnsPage(threadId: string, params: JsonObject): Promise<JsonObject> {
-    if (!this.catalog.get(threadId)) await this.catalog.refresh();
     const anchor = params.cursor ? anchorCursor("turnId", params.cursor) : undefined;
     const descending = (params.sortDirection ?? "desc") === "desc";
     // Oldest first from the start: the one page that needs all of history.
-    if (!this.paged(threadId) || !descending && !anchor) return paginateTurns((await this.read(threadId)).turns, params);
-    const { pages, source } = this.pages(threadId);
+    const paged = descending || anchor ? await this.paged(threadId) : undefined;
+    if (!paged) return paginateTurns((await this.read(threadId)).turns, params);
+    const { pages, source } = paged;
     const limit = Math.max(1, Math.min(params.limit ?? 25, 100));
     const window = !anchor || this.running(threadId, anchor.anchor) ? await pages.newest(source, limit + 1)
       : descending ? await pages.around(source, anchor.anchor, limit + 1)
@@ -530,10 +554,11 @@ export class ClaudeThreads {
   /** Stock's `thread/searchOccurrences`: history is read back only to the first message holding the term (ripgrep finds it). */
   public async searchOccurrences(threadId: string, params: JsonObject): Promise<JsonObject> {
     if (!String(params.searchTerm ?? "").trim()) throw invalidRequest("thread/searchOccurrences requires a non-empty searchTerm");
-    if (!this.catalog.get(threadId)) await this.catalog.refresh();
+    // Ripgrep finds a main session's messages only (a sub-agent's records are its parent's sidechain).
+    const paged = threadId.startsWith("agent-") ? undefined : await this.paged(threadId);
     let turns: Turn[];
-    if (this.paged(threadId)) {
-      const { pages, source } = this.pages(threadId);
+    if (paged) {
+      const { pages, source } = paged;
       const at = await firstMatch(this.config.claudeBinary, source.path, params.searchTerm);
       turns = this.withLive(threadId, at === undefined ? [] : (await pages.reaching(source, at)).turns);
     } else turns = (await this.read(threadId)).turns;
@@ -541,10 +566,10 @@ export class ClaudeThreads {
   }
 
   public async itemsPage(threadId: string, params: JsonObject): Promise<JsonObject> {
-    if (!this.catalog.get(threadId)) await this.catalog.refresh();
     // Desktop always names the turn; items across the whole thread need all of it.
-    if (!this.paged(threadId) || !params.turnId) return paginateItems((await this.read(threadId)).turns, params);
-    const { pages, source } = this.pages(threadId);
+    const paged = params.turnId ? await this.paged(threadId) : undefined;
+    if (!paged) return paginateItems((await this.read(threadId)).turns, params);
+    const { pages, source } = paged;
     const window = this.running(threadId, params.turnId) ? await pages.newest(source, 1) : await pages.around(source, params.turnId, 0);
     const turn = this.withLive(threadId, window.turns).find((candidate) => candidate.id === params.turnId)!;
     const anchor = params.cursor ? anchorCursor("itemId", params.cursor)?.anchor : undefined;

@@ -7,8 +7,8 @@ import { open, stat } from "node:fs/promises";
 import type { Turn } from "../../protocol/codex.js";
 import type { PeerDirectory } from "../peers.js";
 import type { BackgroundEnd } from "../toolMapper.js";
-import { backgroundEnds, projectTranscript, type TranscriptProjection } from "./projector.js";
-import { parseTranscriptLine, type TranscriptRecord } from "./records.js";
+import { backgroundEnds, projectTranscript, type ProjectTranscriptInput, type TranscriptProjection } from "./projector.js";
+import { asVisibleSidechain, parseTranscriptLine, type TranscriptRecord } from "./records.js";
 import type { TranscriptHeader } from "./summary.js";
 
 const CHUNK_BYTES = 1 << 20;
@@ -26,6 +26,8 @@ export interface PageSource {
   readonly peersVersion: string;
   /** The rolled-back-to record; else the latest one. */
   readonly leafUuid?: string;
+  /** A sub-agent's own transcript: its records are its parent's sidechain, its history starts at its task's prompt. */
+  readonly subagent?: { readonly parentThreadId: string; readonly promptRecordUuid: string; readonly nickname: string; readonly depth: number };
 }
 
 export interface TurnWindow {
@@ -62,7 +64,13 @@ function emptyWindow(end: number): Window {
   return { start: end, end, records: [], positions: [], offsets: new Map() };
 }
 
-async function readRange(path: string, from: number, to: number): Promise<Buffer> {
+/** What a window's records project as: a sub-agent's as its own thread's. */
+function projected(source: PageSource, records: TranscriptRecord[]): Pick<ProjectTranscriptInput, "records" | "parentThreadId" | "subagent"> {
+  const subagent = source.subagent;
+  return subagent ? { records: records.map(asVisibleSidechain), parentThreadId: subagent.parentThreadId, subagent } : { records };
+}
+
+export async function readRange(path: string, from: number, to: number): Promise<Buffer> {
   const handle = await open(path, "r");
   try {
     const bytes = Buffer.alloc(to - from);
@@ -74,7 +82,7 @@ async function readRange(path: string, from: number, to: number): Promise<Buffer
 }
 
 /** Complete lines of `bytes` (read at `at`) from `first` up to the last newline: records with their line offsets. */
-function parseLines(bytes: Buffer, at: number, first: number): { records: TranscriptRecord[]; positions: number[]; end: number } {
+export function parseLines(bytes: Buffer, at: number, first: number): { records: TranscriptRecord[]; positions: number[]; end: number } {
   const records: TranscriptRecord[] = [];
   const positions: number[] = [];
   let line = first;
@@ -264,7 +272,7 @@ export class TranscriptPages {
     for (let chunk = this.chunkBytes; ; chunk *= 2) {
       if (window.records.length && (!leafUuid || window.offsets.has(leafUuid))) {
         const projection = await projectTranscript({
-          sessionId: source.sessionId, path: source.path, records: window.records, header: source.header,
+          sessionId: source.sessionId, path: source.path, ...projected(source, window.records), header: source.header,
           peers: source.peers, continues, physical, backgroundEnds: this.ends, ...(leafUuid ? { leafUuid } : {}),
         });
         // Cut off from its start, the first turn lacks what came before it (a steer's queue, the prompt of the answer it
@@ -282,7 +290,7 @@ export class TranscriptPages {
           return { turns, older, projection };
         }
       } else if (window.start === 0) {
-        if (!leafUuid) return { turns: [], older: false, projection: await projectTranscript({ sessionId: source.sessionId, path: source.path, records: [], header: source.header }) };
+        if (!leafUuid) return { turns: [], older: false, projection: await projectTranscript({ sessionId: source.sessionId, path: source.path, ...projected(source, []), header: source.header }) };
         throw new Error(`${source.path}: record ${leafUuid} not found`);
       }
       await readBack(source.path, window, chunk, this.ends);

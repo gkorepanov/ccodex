@@ -2,7 +2,14 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { projectSubagents } from "../../../src/claude/native/subagents.js";
+import { TranscriptPages } from "../../../src/claude/native/pages.js";
+import { listSubagents } from "../../../src/claude/native/subagents.js";
+
+/** The session's sub-agents as listed, each with all of its history read. */
+async function projectSubagents(sessionDirectory: string, spawningThreadId: string) {
+  return Promise.all((await listSubagents(sessionDirectory, spawningThreadId)).map(async (subagent) =>
+    ({ agentId: subagent.agentId, projection: (await new TranscriptPages().newest(subagent.source, Infinity)).projection })));
+}
 
 function transcript(agentId: string) {
   return [
@@ -21,7 +28,7 @@ function transcript(agentId: string) {
   ];
 }
 
-describe("native Claude sub-agent projection", () => {
+describe("native Claude sub-agent reads", () => {
   it("projects the meta parent tree and descriptive current-style names", async () => {
     const sessionDirectory = await mkdtemp(join(tmpdir(), "ccodex-native-subagents-"));
     const directory = join(sessionDirectory, "subagents");
