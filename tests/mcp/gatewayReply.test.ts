@@ -208,7 +208,7 @@ describe("replyViaGateway cwd", () => {
     const { path, calls } = await gateway({ heldOpen: true });
     const dir = mkdtempSync(join(tmpdir(), "ccodex-cwd-"));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-    await expect(replyViaGateway(path, OPEN, "hello", undefined, { cwd: dir })).rejects.toThrow(/was not applied and the message was not sent/);
+    await expect(replyViaGateway(path, OPEN, "hello", undefined, { cwd: dir })).rejects.toThrow(/another client is still subscribed to it/);
     expect(calls.map((call) => call.method)).not.toContain("turn/start");
   });
 
