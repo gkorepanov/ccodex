@@ -13,7 +13,7 @@ const cleanup: Array<() => void> = [];
 afterEach(() => { while (cleanup.length) cleanup.pop()!(); });
 
 /** A gateway that answers like the real one: a chat's reply arrives as notifications after `turn/start`. */
-function gateway(options: { resumeError?: string; failTurn?: boolean; hold?: boolean; busy?: boolean; background?: boolean } = {}) {
+function gateway(options: { resumeError?: string; failTurn?: boolean; hold?: boolean; busy?: boolean; background?: boolean; heldOpen?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "ccodex-gw-"));
   const path = join(dir, "gw.sock");
   const calls: Array<{ method: string; params: any }> = [];
@@ -26,7 +26,7 @@ function gateway(options: { resumeError?: string; failTurn?: boolean; hold?: boo
     calls.push({ method: message.method, params: message.params });
     const reply = (result: unknown) => ws.send(JSON.stringify({ id: message.id, result }));
     if (message.method === "thread/list") reply({ data: [{ id: "stale", name: "Router-vp", updatedAt: 1 }, { id: OPEN, name: "Router-vp ✳️", updatedAt: 2 }, { id: "x", name: "Router-vp-old", updatedAt: 3 }] });
-    else if (message.method === "thread/resume" && !options.resumeError) reply({ model: "claude:sonnet", thread: { status: { type: options.busy ? "active" : "idle" } } });
+    else if (message.method === "thread/resume" && !options.resumeError) reply({ model: "claude:sonnet", cwd: options.heldOpen ? "/" : message.params.cwd ?? "/", thread: { status: { type: options.busy ? "active" : "idle" } } });
     else if (message.method === "thread/resume" && options.resumeError) ws.send(JSON.stringify({ id: message.id, error: { code: -32600, message: options.resumeError } }));
     else if (message.method === "thread/start") reply({ thread: { id: NEW } });
     else if (message.method === "turn/start" && options.busy) {
@@ -190,5 +190,31 @@ describe("replyViaGateway waiting", () => {
     const { path } = await gateway({ hold: true });
     const { content } = await replyViaGateway(path, OPEN, "question", 300);
     expect(content).toBe("[CCodex: your message was delivered; no final reply within 0 seconds, the chat is still working.]");
+  });
+});
+
+describe("replyViaGateway cwd", () => {
+  it("resumes the chat in the given directory and runs the turn there", async () => {
+    const { path, calls } = await gateway();
+    const dir = mkdtempSync(join(tmpdir(), "ccodex-cwd-"));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    expect((await replyViaGateway(path, OPEN, "hello", undefined, { cwd: dir })).content).toBe("got: hello");
+    expect(calls.find((call) => call.method === "thread/resume")!.params.cwd).toBe(dir);
+    // The turn carries no cwd: a turn-level directory would move the turns without reloading the MCP servers.
+    expect(calls.find((call) => call.method === "turn/start")!.params.cwd).toBeUndefined();
+  });
+
+  it("does not send the message when the chat keeps its own directory", async () => {
+    const { path, calls } = await gateway({ heldOpen: true });
+    const dir = mkdtempSync(join(tmpdir(), "ccodex-cwd-"));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    await expect(replyViaGateway(path, OPEN, "hello", undefined, { cwd: dir })).rejects.toThrow(/was not applied and the message was not sent/);
+    expect(calls.map((call) => call.method)).not.toContain("turn/start");
+  });
+
+  it("leaves the directory alone without a cwd", async () => {
+    const { path, calls } = await gateway();
+    await replyViaGateway(path, OPEN, "hello");
+    expect(calls.find((call) => call.method === "thread/resume")!.params).not.toHaveProperty("cwd");
   });
 });

@@ -1,5 +1,7 @@
 import { createConnection } from "node:net";
 import WebSocket from "ws";
+import { realpathSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 
 type Message = Record<string, any>;
 
@@ -165,7 +167,14 @@ export async function archiveViaGateway(socketPath: string, threadIds: string[])
  * active writer, which `codex exec resume` cannot take), a busy chat (the prompt joins its running turn) and a chat
  * now on a Claude model (the gateway routes it to the Claude session) all get it. `chat` is a thread id or a title.
  */
-export async function replyViaGateway(socketPath: string, chat: string, prompt: string, waitMs = REPLY_WAIT_MS): Promise<{ threadId: string; content: string }> {
+function sameDir(actual: unknown, wanted: string): boolean {
+  if (typeof actual !== "string") return false;
+  const real = (path: string) => { try { return realpathSync(path); } catch { return resolvePath(path); } };
+  return real(actual) === real(wanted);
+}
+
+export async function replyViaGateway(socketPath: string, chat: string, prompt: string, waitMs = REPLY_WAIT_MS,
+  options: { cwd?: string } = {}): Promise<{ threadId: string; content: string }> {
   const gateway = await connectGateway(socketPath);
   const { request } = gateway;
   try {
@@ -180,9 +189,15 @@ export async function replyViaGateway(socketPath: string, chat: string, prompt: 
     }
     let resumed: Message;
     try {
-      resumed = await request("thread/resume", { threadId, excludeTurns: true });
+      resumed = await request("thread/resume", { threadId, excludeTurns: true, ...(options.cwd ? { cwd: options.cwd } : {}) });
     } catch (error) {
       throw new GatewayUnavailable(error instanceof Error ? error.message : String(error));
+    }
+    // Stock applies a resume's cwd (and reloads the project config and MCP servers there) only when it loads the chat
+    // again, i.e. when no other client has it open; otherwise it keeps the chat's own directory. A turn-level cwd would
+    // move the turns without the MCP servers, so it is not sent: the message is held back instead.
+    if (options.cwd && !sameDir(resumed.cwd ?? resumed.thread?.cwd, options.cwd)) {
+      throw new Error(`The chat stays in ${resumed.cwd ?? resumed.thread?.cwd ?? "its own directory"}: it is open in another client (such as the Codex app) or does not support a new directory, so ${options.cwd} was not applied and the message was not sent. Close the chat there and try again.`);
     }
     // A `turn/start` without a model would complete a model switch someone left pending on the chat (the app sends the
     // model with each turn); naming the chat's own model keeps it on the provider it is on.

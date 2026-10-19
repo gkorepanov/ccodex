@@ -46,6 +46,7 @@ const TOOLS = [
       properties: {
         prompt: { type: "string", description: "The *next user prompt* to continue the Codex conversation." },
         threadId: { type: "string", description: "The thread id for this Codex session." },
+        cwd: { type: "string", description: "Optional absolute working directory to continue the chat in (Codex chats). The chat is reloaded there, so that directory's project config and MCP servers apply to this and later turns; this works only while no other client (such as the Codex app) has the chat open. Omit to keep the chat's own directory." },
         conversationId: { type: "string", description: "DEPRECATED: use threadId instead." },
       },
     },
@@ -58,7 +59,7 @@ type Args = Record<string, any>;
 /** `codex exec` arguments for a tool call. */
 function execArgs(tool: string, args: Args): string[] {
   const common = ["--json", "--skip-git-repo-check", "--thread-source", MCP_THREAD_SOURCE];
-  if (tool === "codex-reply") return ["exec", "resume", ...common, String(args.threadId ?? args.conversationId), "--", String(args.prompt)];
+  if (tool === "codex-reply") return ["exec", ...(args.cwd ? ["--cd", String(args.cwd)] : []), "resume", ...common, String(args.threadId ?? args.conversationId), "--", String(args.prompt)];
   const overrides: Record<string, unknown> = {
     ...args.config,
     ...(args["approval-policy"] ? { approval_policy: args["approval-policy"] } : {}),
@@ -123,8 +124,15 @@ export function publicChatId(dataDir: string, chat: string): string {
  */
 async function replyThroughGateway(config: Config, args: Args, children: Map<unknown, ChildProcess>, id: unknown): Promise<unknown> {
   const chat = publicChatId(config.dataDir, String(args.threadId ?? args.conversationId ?? "").trim());
+  let cwd: string | undefined;
+  if (args.cwd !== undefined && args.cwd !== null && String(args.cwd).trim() !== "") {
+    cwd = String(args.cwd).trim();
+    const bad = !cwd.startsWith("/") ? `The working directory ${cwd} must be an absolute path.`
+      : !existsSync(cwd) || !statSync(cwd).isDirectory() ? `The working directory ${cwd} does not exist.` : undefined;
+    if (bad) return { content: [{ type: "text", text: bad }], structuredContent: { threadId: chat, content: bad }, isError: true };
+  }
   try {
-    const { threadId, content } = await replyViaGateway(config.publicSocket, chat, String(args.prompt));
+    const { threadId, content } = await replyViaGateway(config.publicSocket, chat, String(args.prompt), undefined, { cwd });
     return { content: [{ type: "text", text: content }], structuredContent: { threadId, content } };
   } catch (error) {
     if (!(error instanceof GatewayUnavailable)) {
