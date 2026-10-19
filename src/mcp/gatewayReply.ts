@@ -201,9 +201,9 @@ export async function replyViaGateway(socketPath: string, chat: string, prompt: 
       const facts = `[CCodex: requested cwd ${options.cwd}; chat reports cwd ${kept}; model ${resumed.model ?? "unknown"}; status ${resumed.thread?.status?.type ?? "unknown"}.]`;
       throw new Error(String(resumed.model ?? "").startsWith("claude")
         ? `Not sent: Claude chats cannot move to another directory, so the chat stays in ${kept}. ${facts}`
-        // Each gateway client has a stock connection of its own, and stock applies a resume's cwd only when no other
-        // connection is subscribed to the chat: a kept directory means one still is.
-        : `Not sent: the chat stays in ${kept} because another client is still subscribed to it (a Codex app window that opened it, a remote or mobile client, a terminal \`codex resume\`, or another call still waiting on it), and the app server applies a new directory only when no other client holds the chat. ${facts}`);
+        // Observed, not exhaustive: a client still subscribed to the chat makes stock keep its directory; stock's reasons
+        // for not applying a resume's cwd were not read from its source.
+        : `Not sent: the app server kept the chat in ${kept} instead of ${options.cwd}. Why is not reported; one cause seen in tests is another client still subscribed to the chat (one that opened or resumed it and is connected), other causes are not ruled out. ${facts}`);
     }
     // A `turn/start` without a model would complete a model switch someone left pending on the chat (the app sends the
     // model with each turn); naming the chat's own model keeps it on the provider it is on.
