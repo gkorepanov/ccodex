@@ -78,6 +78,34 @@ describe("native Claude sub-agent reads", () => {
     }
   });
 
+  it("shows a fork's task as its prompt, without the orders Claude Code gives a fork", async () => {
+    const sessionDirectory = await mkdtemp(join(tmpdir(), "ccodex-native-subagents-"));
+    const directory = join(sessionDirectory, "subagents");
+    await mkdir(directory);
+    const [, answer] = transcript("fork1");
+    const envelope = { sessionId: "root", agentId: "fork1", isSidechain: true, cwd: "/workspace" };
+    // As Claude Code 2.1.304 writes a fork: its parent's context by reference, the spawn, then the orders with the task.
+    const records = [
+      { type: "fork-context-ref", agentId: "fork1", parentSessionId: "root", parentLastUuid: "parent-last", contextLength: 12 },
+      { type: "assistant", uuid: "spawn", parentUuid: null, timestamp: "2026-09-18T00:00:00.000Z", ...envelope, message: { id: "spawn-message", role: "assistant", model: "claude-sonnet-5", content: [{ type: "tool_use", id: "tool-fork", name: "Agent", input: { description: "Report secret word", subagent_type: "fork", prompt: "Reply with the secret word." } }], stop_reason: null } },
+      { type: "user", uuid: "fork1-prompt", parentUuid: "spawn", promptId: "p1", timestamp: "2026-09-18T00:00:00.500Z", ...envelope, message: { role: "user", content: [
+        { type: "tool_result", tool_use_id: "tool-fork", content: [{ type: "text", text: "Fork started — processing in background" }] },
+        { type: "text", text: "<fork-boilerplate>\nYou are a worker fork. Execute ONE directive, then stop.\n</fork-boilerplate>\n\nYour directive: Reply with the secret word." },
+      ] } },
+      { ...answer, parentUuid: "fork1-prompt" },
+    ];
+    await writeFile(join(directory, "agent-fork1.meta.json"), `${JSON.stringify({ agentType: "fork", isFork: true, description: "Report secret word", toolUseId: "tool-fork", spawnDepth: 1, model: "inherit" })}\n`);
+    await writeFile(join(directory, "agent-fork1.jsonl"), `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+    try {
+      const { projection } = (await projectSubagents(sessionDirectory, "root-thread"))[0]!;
+      expect(projection.turns.map((turn) => turn.items.map((item) => item.type))).toEqual([["userMessage", "agentMessage"]]);
+      expect(projection.turns[0]!.items[0]).toMatchObject({ content: [{ type: "text", text: "Reply with the secret word." }] });
+      expect(projection.thread.preview).toBe("Reply with the secret word.");
+    } finally {
+      await rm(sessionDirectory, { recursive: true });
+    }
+  });
+
   it("shows its coordinator's message in the running turn as the message alone, like stock's to a running sub-agent", async () => {
     const sessionDirectory = await mkdtemp(join(tmpdir(), "ccodex-native-subagents-"));
     const directory = join(sessionDirectory, "subagents");

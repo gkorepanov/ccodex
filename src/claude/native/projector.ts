@@ -32,6 +32,7 @@ import {
   type UserRecord,
 } from "./records.js";
 import {
+  FORK_ORDERS,
   slashCommand,
   startsTurn,
   summarizeTranscript,
@@ -183,7 +184,7 @@ function userInputs(record: UserRecord): UserInput[] {
     return [{ type: "text", text, text_elements: [] }];
   }
   return record.message.content.flatMap((block): UserInput[] => {
-    if (block.type === "text") return [{ type: "text", text: block.text, text_elements: [] }];
+    if (block.type === "text") return [{ type: "text", text: block.text.replace(FORK_ORDERS, ""), text_elements: [] }];
     if (block.type === "image") {
       const image = imageInput(block.source);
       return image ? [image] : [];

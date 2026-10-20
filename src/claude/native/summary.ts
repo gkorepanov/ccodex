@@ -48,9 +48,12 @@ export function timestampSeconds(timestamp: string | undefined): number | null {
   return Number.isNaN(milliseconds) ? null : Math.floor(milliseconds / 1_000);
 }
 
+/** Claude Code's orders to a fork, its rules and then its task: the fork's thread shows the task, as a sub-agent's its prompt. */
+export const FORK_ORDERS = /^<fork-boilerplate>[\s\S]*?<\/fork-boilerplate>\s*Your directive: /u;
+
 export function userText(record: UserRecord): string {
   if (typeof record.message.content === "string") return record.message.content;
-  return record.message.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
+  return record.message.content.flatMap((block) => block.type === "text" ? [block.text.replace(FORK_ORDERS, "")] : []).join("\n");
 }
 
 function hasToolResult(record: UserRecord): boolean {
