@@ -513,7 +513,10 @@ function steeredPrompts(records: readonly TranscriptRecord[]): ReadonlySet<strin
         continue;
       }
     }
-    if (record.type === "assistant" || record.type === "user") for (const entry of queue) entry.waited = true;
+    // A finished task's notification Claude took from the queue at the same time is no sign of a running turn.
+    if (record.type === "assistant" || (record.type === "user" && record.origin?.kind !== "task-notification")) {
+      for (const entry of queue) entry.waited = true;
+    }
   }
   return steered;
 }
