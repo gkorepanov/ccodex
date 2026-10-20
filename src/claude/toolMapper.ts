@@ -276,6 +276,19 @@ export function proposedChanges(name: string, input: Record<string, unknown>, cw
   return [{ path, kind: { type: "update", move_path: null }, diff }];
 }
 
+/**
+ * Files Claude sends the user (`SendUserFile`, Claude Desktop's file cards) as a message linking them: Codex Desktop shows
+ * a linked local file as its card, an image inline.
+ */
+function sentFiles(input: Record<string, unknown>, cwd: string): string {
+  const links = (input.files as string[]).map((file) => {
+    const path = absolutePath(file, cwd);
+    const target = /[\s()<>]/u.test(path) ? `<${path}>` : path;
+    return `${imageExtensions.has(extname(path).toLocaleLowerCase()) ? "!" : ""}[${basename(path)}](${target})`;
+  });
+  return [text(input.caption), ...links].filter(Boolean).join("\n\n");
+}
+
 export function isImageRead(state: ActiveTool, cwd: string): boolean {
   return imagePath(state.name, state.input, cwd) !== undefined;
 }
@@ -293,6 +306,10 @@ export function projectToolCompletion(
   if (path) {
     const image: ThreadItem = { type: "imageView", id: state.itemId, path };
     return { started: image, completed: image };
+  }
+  if (state.name === "SendUserFile" && !isError) {
+    const message: ThreadItem = { type: "agentMessage", id: state.itemId, text: sentFiles(state.input, cwd), phase: "commentary", memoryCitation: null };
+    return { started: message, completed: message };
   }
   return {
     started: item,

@@ -163,6 +163,16 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(seen).toEqual({ turns: ["inProgress"], read: ["inProgress"], thread: "active" });
   });
 
+  it("shows the files Claude sends the user as a message linking them, which Codex Desktop shows as file cards and images, as history does", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "send files: out/report.pdf, /tmp/my plot.png");
+    const sent = "the report\n\n[report.pdf](/work/out/report.pdf)\n\n![my plot.png](</tmp/my plot.png>)";
+    const live = client.notifications("item/completed", threadId).map((message) => message.params.item).filter((item) => item.type === "agentMessage");
+    expect(live.map((item) => item.text)).toEqual([sent, "sent"]);
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(itemsOf(thread.turns)).toEqual(["user:send files: out/report.pdf, /tmp/my plot.png", `agent:${sent}`, "agent:sent"]);
+  });
+
   it("keeps the API requests Claude Code records since 2.1.300 out of Claude's transcripts", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "hello");
@@ -331,7 +341,7 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     const planned = await client.turn(threadId, "propose a plan: 1. add the flag", { ...full, collaborationMode: { mode: "plan", settings: { model: CLAUDE, reasoning_effort: null, developer_instructions: null } } });
     expect(fakeClaude.options.at(-1)!.permissionMode).toBe("plan");
     // Claude enters plan mode only as the user sets it.
-    expect(fakeClaude.options.at(-1)!.disallowedTools).toEqual(["EnterPlanMode"]);
+    expect(fakeClaude.options.at(-1)!.disallowedTools).toEqual(["EnterPlanMode", "Artifact", "ArtifactComments", "ArtifactData", "SuggestPluginInstall", "SuggestSkills"]);
     // No approval of ExitPlanMode: the plan item is what Desktop asks "Implement this plan?" about once the turn completes.
     expect(asked).toEqual([]);
     expect(planned.turn.status).toBe("completed");

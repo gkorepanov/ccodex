@@ -343,8 +343,9 @@ export class ClaudeSession {
       permissionMode: claudeMode(settings),
       // Recorded on the chat's first request and reused until compaction, as Claude Code keeps its system prompt.
       systemPrompt: { type: "preset", preset: "claude_code", append: claudeInstructions(this.host.config.improveModelsFormatting) },
-      // Claude enters plan mode only as the user sets it (stock's collaboration mode).
-      disallowedTools: ["EnterPlanMode"],
+      // Claude enters plan mode only as the user sets it (stock's collaboration mode). Claude Desktop's artifacts (published
+      // on claude.ai) and its install suggestions are cards a Codex client has no place for.
+      disallowedTools: ["EnterPlanMode", "Artifact", "ArtifactComments", "ArtifactData", "SuggestPluginInstall", "SuggestSkills"],
       // Claude 5 omits its thinking by default: summarized, it shows as the turn's reasoning summary like stock's.
       extraArgs: { "thinking-display": "summarized" },
       allowDangerouslySkipPermissions: true,

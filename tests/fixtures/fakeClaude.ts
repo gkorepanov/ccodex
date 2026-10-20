@@ -302,6 +302,16 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     yield* toolResult(call, "a.txt");
     reply = "listed";
   }
+  // Like Claude Code under the desktop entrypoint: files it sends the user (Claude Desktop shows them as cards).
+  const sent = /^send files: (.+)$/u.exec(text);
+  if (sent) {
+    const files = sent[1]!.split(", ");
+    const call = tool(`msg_${randomUUID().slice(0, 8)}`, 0, "SendUserFile", { files, caption: "the report", status: "normal" });
+    transcript.write(call);
+    yield base(sessionId, call);
+    yield* toolResult(call, `${files.length} files delivered to user.`, { caption: "the report", attachments: files.map((path) => ({ path, size: 1, isImage: path.endsWith(".png"), pathValidated: true })) });
+    reply = "sent";
+  }
   // Like Claude: a command in the background, whose end wakes Claude up after its answer (`fakeClaude.backgroundMs` later),
   // or which Claude stops itself (TaskStop).
   const background = /^watch in background: (.+)$/u.exec(text) ?? /^stop in background: (.+)$/u.exec(text);
