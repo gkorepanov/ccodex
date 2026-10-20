@@ -11,7 +11,9 @@ import { ULTRA } from "./delegation.js";
 export function claudeEnvironment(): Record<string, string | undefined> {
   // Claude chats are a desktop app's, like Claude Desktop's: background commands run with no time limit (Claude Code
   // stops them after 30 min to 2 h in Agent SDK sessions, which it takes for unattended).
-  const env: Record<string, string | undefined> = { ...process.env, CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_ENTRYPOINT: "claude-desktop" };
+  // Transcripts leave out what Claude Code 2.1.300+ records of each API request (prompt, tools, parameters): half again
+  // a long chat's size, all read through when paging back.
+  const env: Record<string, string | undefined> = { ...process.env, CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_ENTRYPOINT: "claude-desktop", CLAUDE_CODE_ELEGANT_MEADOW: "0" };
   delete env.CCODEX_SHIM_ACTIVE;
   delete env.CODEX_CLI_PATH;
   return env;

@@ -505,6 +505,8 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   // Like the CLI since 2.1.287: the frames of a forked skill typed as the prompt stream too.
   if (text.startsWith("fork skill:")) yield base(sessionId, { type: "assistant", parent_tool_use_id: "forked-command-review", agent_id: "fork1", message: { id: "msg_fork", role: "assistant", model, content: [{ type: "text", text: "FORK-INSIDE" }], stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } } });
   const messageId = `msg_${randomUUID().slice(0, 8)}`;
+  // Like the CLI since 2.1.300: the request's prompt, tools and parameters recorded, unless turned off.
+  if (options.env?.CLAUDE_CODE_ELEGANT_MEADOW !== "0") appendFileSync(transcript.path, `${JSON.stringify({ type: "api-request", sessionId, id: messageId, querySource: "repl_main_thread", params: {} })}\n`);
   yield base(sessionId, { type: "stream_event", event: { type: "message_start", message: { id: messageId } } });
   // Like the CLI: Claude 5 thinking comes back empty unless the session asks for summarized thinking.
   const thought = text.startsWith("think: ") ? options.extraArgs?.["thinking-display"] === "summarized" ? `pondering ${text.slice(7)}` : "" : undefined;

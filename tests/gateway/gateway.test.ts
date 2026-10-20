@@ -163,6 +163,15 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(seen).toEqual({ turns: ["inProgress"], read: ["inProgress"], thread: "active" });
   });
 
+  it("keeps the API requests Claude Code records since 2.1.300 out of Claude's transcripts", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "hello");
+    const projects = join(process.env.CLAUDE_CONFIG_DIR!, "projects");
+    const transcript = join(projects, readdirSync(projects).find((key) => existsSync(join(projects, key, `${threadId}.jsonl`)))!, `${threadId}.jsonl`);
+    expect(readFileSync(transcript, "utf8")).toContain("claude: hello");
+    expect(readFileSync(transcript, "utf8")).not.toContain("\"type\":\"api-request\"");
+  });
+
   it("keeps a deleted Claude thread gone when Claude writes its closing metadata into the file afterwards", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "hello");
