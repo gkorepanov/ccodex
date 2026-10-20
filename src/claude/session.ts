@@ -44,6 +44,8 @@ interface ActiveTurn {
   resultSeen: boolean;
   interrupted: boolean;
   error: string | null;
+  /** It only waits for Claude's background sub-agents: Claude goes on in it when one ends. */
+  waiting: boolean;
 }
 
 interface Response {
@@ -184,7 +186,7 @@ export class ClaudeSession {
   private readonly killed = new Map<string, string>();
   /** TaskStop calls: shown on the command they stop, as stock shows a Ctrl-C (by tool use id). */
   private readonly stops = new Map<string, Tool>();
-  /** Claude's sub-agents running (in the background they keep no turn open: each has a chat of its own). */
+  /** Claude's sub-agents running (each has a chat of its own; in the background the chat waits for them in a turn). */
   private readonly agents = new Set<string>();
   public queued: QueuedSubmissionLike[] = [];
   public totalUsage: TokenUsageBreakdown = EMPTY_USAGE;
@@ -269,6 +271,10 @@ export class ClaudeSession {
 
   public get waitingOnTasks(): boolean {
     return !this.turn && this.tasks.size > 0;
+  }
+
+  public get waitingForAgents(): boolean {
+    return this.turn?.waiting ?? false;
   }
 
   /** The item ids of the background commands running (history shows them ended unless they run here). */
@@ -423,6 +429,8 @@ export class ClaudeSession {
     const content = await claudeContent(input, this.settings.cwd);
     // Desktop shows `/goal` messages itself.
     const hidden = typeof content === "string" && /^\/(?:compact|goal)(?:\s|$)/u.test(content);
+    // Claude takes it as a prompt of its own, not into the turn that waits for its sub-agents.
+    if (this.turn?.waiting) this.completeTurn(true);
     if (this.turn) {
       // Claude folds a message sent mid-turn into the running turn, like a steer.
       this.pendingInputs.set(uuid, { input, clientId: params.clientUserMessageId ?? null, hidden });
@@ -448,6 +456,7 @@ export class ClaudeSession {
 
   public async steer(params: JsonObject): Promise<string> {
     if (!this.turn) throw invalidRequest("no active turn to steer");
+    if (this.turn.waiting) return (await this.startTurn({ input: params.input, clientUserMessageId: params.clientUserMessageId })).id;
     const input = normalizeUserInput(params.input ?? []);
     // The client's id is the message's in the transcript: history gives it back as the message's client id.
     const uuid: string = UUID.test(params.clientUserMessageId ?? "") ? params.clientUserMessageId : randomUUID();
@@ -522,9 +531,10 @@ export class ClaudeSession {
     for (const taskId of this.tasks.keys()) this.endBackground(taskId, { status: "stopped", summary: "", atMs: Date.now() });
     this.tasks.clear();
     this.agents.clear();
-    if (this.state === "idle" && this.turn) {
+    // Waiting, nothing else runs: the turn ends as its sub-agents stop.
+    if ((this.state === "idle" || this.turn?.waiting) && this.turn) {
       this.turn.resultSeen = true;
-      this.maybeComplete();
+      this.completeTurn();
     }
   }
 
@@ -599,7 +609,7 @@ export class ClaudeSession {
   /** `announced`: the provider switch already started the turn under this preallocated id. */
   private openTurn(id: string, input: UserInput[], clientId: string | null, hidden: boolean, announced = false): Turn {
     const turn = this.newTurnObject(id);
-    this.turn = { id, startedAt: Date.now(), items: turn.items, resultSeen: false, interrupted: false, error: null };
+    this.turn = { id, startedAt: Date.now(), items: turn.items, resultSeen: false, interrupted: false, error: null, waiting: false };
     this.started = true;
     this.activeAt = Date.now();
     this.afterResult = false;
@@ -632,9 +642,26 @@ export class ClaudeSession {
 
   private maybeComplete(): void {
     // Background commands run on past the turn (stock's background terminals); a task's end that wakes Claude up starts
-    // a turn of its own.
-    if (!this.turn || !this.turn.resultSeen || this.state !== "idle") return;
+    // a turn of its own. Claude stays running while its background sub-agents work: the turn ends at its answer.
+    const turn = this.turn;
+    if (!turn?.resultSeen || (this.agents.size ? turn.waiting : this.state !== "idle")) return;
     this.completeTurn();
+  }
+
+  /**
+   * Claude's background sub-agents work on after its answer, and Claude wakes up as each one ends: the chat waits for
+   * them in the turn Claude goes on in then (history's), with the wait as its reasoning.
+   */
+  private waitForAgents(): void {
+    const id = this.lastBlock ? continuationTurnId(this.lastBlock.id) : randomUUID();
+    this.openTurn(id, [], null, true);
+    Object.assign(this.turn!, { resultSeen: true, waiting: true });
+    // A message from another agent may wake Claude up instead: the transcript tells.
+    this.afterResult = true;
+    const count = this.agents.size;
+    const item: ThreadItem = { type: "reasoning", id: `${id}:waiting`, summary: [`Waiting for ${count} subagent${count === 1 ? "" : "s"} to finish…`], content: [] };
+    this.itemStarted(item);
+    this.itemCompleted(item);
   }
 
   /** Claude goes on after an answer with no prompt: the answer ends its turn, the work goes on in a new one (history's). */
@@ -672,11 +699,13 @@ export class ClaudeSession {
         startedAt: Math.floor(turn.startedAt / 1000), completedAt, durationMs: Date.now() - turn.startedAt,
       },
     });
-    if (!continued) this.emit("thread/status/changed", { threadId: this.threadId, status: { type: "idle" } });
+    const next = continued ? undefined : this.queued.shift();
+    const waiting = !continued && !next && !turn.interrupted && this.agents.size > 0;
+    if (!continued && !waiting) this.emit("thread/status/changed", { threadId: this.threadId, status: { type: "idle" } });
     this.host.turnCompleted(this, turn.id);
     this.turnWaiters.get(turn.id)?.(status);
     this.turnWaiters.delete(turn.id);
-    const next = continued ? undefined : this.queued.shift();
+    if (waiting) this.waitForAgents();
     if (next) {
       this.emit("thread/queue/changed", { threadId: this.threadId });
       void this.startTurn({ input: next.input, clientUserMessageId: next.clientUserMessageId }).catch((error: unknown) =>
@@ -713,7 +742,11 @@ export class ClaudeSession {
     if (m.parent_tool_use_id) return;
     // Claude's own word on `/goal` ("Goal set: …"), streamed as a reply: Codex clients show goals themselves.
     if (m.local_command_run?.command === "goal") return;
-    if (this.afterResult && (m.type === "stream_event" || m.type === "assistant")) this.continued();
+    if (m.type === "stream_event" || m.type === "assistant") {
+      if (this.afterResult) this.continued();
+      // Claude woke up: the turn that waited is its turn now.
+      if (this.turn?.waiting) Object.assign(this.turn, { resultSeen: false, waiting: false });
+    }
     switch (m.type) {
       case "stream_event": return this.onStream(m.event);
       case "assistant": return this.onAssistant(m);
@@ -742,6 +775,9 @@ export class ClaudeSession {
       this.injections.delete(uuid);
     }
     const pending = uuid ? this.pendingInputs.get(uuid) : undefined;
+    // Waiting for its sub-agents, Claude takes a prompt or a message from another agent as when idle (a finished task's
+    // notification goes on in the turn that waited).
+    if (m.state === "started" && uuid && this.turn?.waiting && !this.injections.has(uuid) && (pending || !this.notified)) this.completeTurn(true);
     // A command Claude started by itself (a message another agent sent): its turn has the id history gives it.
     if (m.state === "started" && uuid && !pending && !this.injections.has(uuid)) {
       clearTimeout(this.runningTimer);
@@ -782,7 +818,7 @@ export class ClaudeSession {
         if (record.origin?.kind === "task-notification" && this.lastBlock) this.continueTurn();
         return;
       }
-      this.completeTurn();
+      this.completeTurn(this.turn.waiting);
       this.ensureTurn(record.uuid);
       this.showPeer(record.uuid, origin, userText(record));
     } catch (error) {
@@ -844,7 +880,7 @@ export class ClaudeSession {
           if (!origin) return;
           // Taken as a prompt of its own right after a turn's result (no idle between): a turn of its own, as in history.
           if (prompt && this.turn && this.turn.id !== uuid && this.turn.resultSeen && !this.queued.length) {
-            this.completeTurn();
+            this.completeTurn(this.turn.waiting);
             this.ensureTurn(uuid);
           }
           return this.showPeer(uuid, origin, prompt ? userText(record) : String(queued!.prompt ?? ""));
@@ -889,7 +925,7 @@ export class ClaudeSession {
         this.tasks.delete(m.task_id);
         this.agents.delete(m.task_id);
         this.host.subagentFinished(`agent-${m.task_id}`);
-        this.notified ||= !this.turn;
+        this.notified ||= !this.turn || this.turn.waiting;
         this.endBackground(m.task_id, { status: String(m.status), summary: String(m.summary ?? ""), ...(m.output_file ? { outputFile: m.output_file } : {}), atMs: Date.now() });
         return;
       case "background_tasks_changed": {

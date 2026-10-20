@@ -26,6 +26,13 @@ async function historyTurns(threadId: string): Promise<Array<{ id: string; items
   return thread.turns.map((turn: any) => ({ id: turn.id, status: turn.status, items: turn.items.map((item: any) => `${item.type}:${item.text ?? ""}`) }));
 }
 
+/** Starts a turn and waits for it alone to complete (`client.turn` waits for the turns that follow it too). */
+async function answered(threadId: string, text: string): Promise<string> {
+  const { turn } = await client.request("turn/start", { threadId, input: [{ type: "text", text, text_elements: [] }] });
+  await client.waitFor("turn/completed", (params) => params.turn.id === turn.id, 3_000);
+  return turn.id;
+}
+
 async function chat(): Promise<string> {
   const { thread } = await client.request("thread/start", { model: "claude:claude-opus-5-5", cwd: "/work" });
   return thread.id;
@@ -110,6 +117,58 @@ describe("Claude going on after an answer: a turn of its own, as history shows i
     expect(fakeClaude.calls.filter((call) => call.method === "stopTask")).toEqual([{ method: "stopTask", args: ["bg1"] }]);
     const ended = await client.waitFor("item/completed", (params) => params.item.type === "commandExecution" && params.turnId === first.turn.id, 500);
     expect(ended.item).toMatchObject({ status: "failed", processId: "bg1", exitCode: null });
+  });
+
+  it("waits for Claude's background sub-agents in a turn of its own: the chat stays busy, Claude goes on in it as each one ends, as history shows", async () => {
+    fakeClaude.backgroundMs = 300;
+    const threadId = await chat();
+    const first = await answered(threadId, "delegate in background: APPLE, BANANA");
+    const waits: string[] = [];
+    for (const word of ["APPLE", "BANANA"]) {
+      const waiting = await client.waitFor("turn/started", (params) => params.threadId === threadId && ![first, ...waits].includes(params.turn.id), 3_000);
+      waits.push(waiting.turn.id);
+      await client.waitFor("turn/completed", (params) => params.turn.id === waiting.turn.id && params.turn.status === "completed", 3_000);
+      expect(liveTurns(threadId).find((turn) => turn.id === waiting.turn.id)!.items.at(-1)).toBe(`agentMessage:the helper said ${word}`);
+    }
+    const live = liveTurns(threadId);
+    expect(live.map((turn) => turn.id)).toEqual([first, ...waits]);
+    expect(waits.every((id) => id.endsWith(":0:continued"))).toBe(true);
+    const reasoning = client.notifications("item/completed", threadId).map((message) => message.params).filter((params) => params.item.type === "reasoning");
+    expect(reasoning.map((params) => [params.turnId, params.item.summary])).toEqual([
+      [waits[0], ["Waiting for 2 subagents to finish…"]], [waits[1], ["Waiting for 1 subagent to finish…"]],
+    ]);
+    // Desktop's sidebar shows the chat working until the last sub-agent ends.
+    expect(client.notifications("thread/status/changed", threadId).map((message) => message.params.status.type).filter((status) => status === "idle")).toHaveLength(1);
+    expect(client.notifications("thread/status/changed", threadId).at(-1)!.params.status.type).toBe("idle");
+    // The wait is shown live only (the two spawns read as one, as live items are told apart by kind and text).
+    const shown = live.map((turn) => ({ ...turn, items: turn.items.filter((item) => item !== "reasoning:") }));
+    const history = (await historyTurns(threadId)).map((turn) => ({ ...turn, items: [...new Set(turn.items)] }));
+    expect(history).toEqual(shown.map((turn) => ({ ...turn, status: "completed" })));
+  });
+
+  it("starts a prompt sent while Claude waits for its sub-agents at once, as a turn of its own; the sub-agents work on", async () => {
+    fakeClaude.backgroundMs = 3_000;
+    const threadId = await chat();
+    const first = await answered(threadId, "delegate in background: APPLE");
+    const waiting = await client.waitFor("turn/started", (params) => params.threadId === threadId && params.turn.id !== first, 500);
+    await client.request("thread/queue/add", { threadId, input: [{ type: "text", text: "and meanwhile?", text_elements: [] }] });
+    expect((await client.request("thread/queue/list", { threadId })).data).toEqual([]);
+    await client.waitFor("turn/completed", (params) => params.turn.id === waiting.turn.id && params.turn.status === "completed", 500);
+    const next = await client.waitFor("turn/started", (params) => params.threadId === threadId && ![first, waiting.turn.id].includes(params.turn.id), 500);
+    const prompt = await client.waitFor("item/completed", (params) => params.turnId === next.turn.id && params.item.type === "userMessage", 500);
+    expect(prompt.item.content[0].text).toBe("and meanwhile?");
+    expect(fakeClaude.calls.some((call) => call.method === "stopTask")).toBe(false);
+  });
+
+  it("stops the sub-agents Claude waits for when the waiting turn is stopped, as Stop does mid-turn", async () => {
+    fakeClaude.backgroundMs = 3_000;
+    const threadId = await chat();
+    const first = await answered(threadId, "delegate in background: APPLE");
+    const waiting = await client.waitFor("turn/started", (params) => params.threadId === threadId && params.turn.id !== first, 500);
+    await client.request("turn/interrupt", { threadId, turnId: waiting.turn.id });
+    await client.waitFor("turn/completed", (params) => params.turn.id === waiting.turn.id && params.turn.status === "interrupted", 500);
+    expect(fakeClaude.calls.filter((call) => call.method === "stopTask")).toEqual([{ method: "stopTask", args: ["b9a0"] }]);
+    expect(client.notifications("thread/status/changed", threadId).at(-1)!.params.status.type).toBe("idle");
   });
 
   it("shows Claude stopping its background command on the command (stock's Ctrl-C), not as a call of its own", async () => {

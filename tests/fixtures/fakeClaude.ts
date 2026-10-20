@@ -174,6 +174,8 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   fakeClaude.prompts.push({ sessionId, uuid, text, shouldQuery: prompt.shouldQuery !== false });
   yield base(sessionId, { type: "system", subtype: "session_state_changed", state: "running" });
   yield base(sessionId, { type: "command_lifecycle", state: "started", command_uuid: uuid });
+  /** Background sub-agents working: Claude stays running after its answer. */
+  let agentsRunning = 0;
   const finish = function* (result: string, subtype = "success"): Generator<Message> {
     // Like the CLI's after each API answer: no `utilization`, the plan windows in `unifiedWindows`.
     yield base(sessionId, { type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: 1790539800, rateLimitType: "five_hour", isUsingOverage: false,
@@ -182,7 +184,7 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     const fast = options.settings?.fastMode ? { fast_mode_state: fakeClaude.fastOff ? "off" : "on", ...(fakeClaude.fastOff ? { fast_mode_disabled_reason: "extra_usage_disabled" } : {}) } : {};
     yield base(sessionId, { type: "result", subtype, is_error: false, result, total_cost_usd: 0.01, user_message_uuids: [uuid], modelUsage: { "claude-opus-5-5": { contextWindow: 200_000 } }, ...fast });
     yield base(sessionId, { type: "command_lifecycle", state: "completed", command_uuid: uuid });
-    yield base(sessionId, { type: "system", subtype: "session_state_changed", state: "idle" });
+    if (!agentsRunning) yield base(sessionId, { type: "system", subtype: "session_state_changed", state: "idle" });
   };
   if (prompt.shouldQuery === false) {
     transcript.write({ type: "user", uuid, message: { role: "user", content: text } });
@@ -449,6 +451,33 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     await sleep(500);
     child.write({ type: "assistant", isSidechain: true, agentId, apiBlockIndex: 0, message: { id: `msg_${randomUUID().slice(0, 8)}`, role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "Codex is done" }], stop_reason: "end_turn", usage: { input_tokens: 5, output_tokens: 1 } } });
   }
+  // Like Claude Code 2.1.300+ (the desktop entrypoint): sub-agents always run in the background, Claude stays running
+  // until they end and wakes up as each one does (the i-th `fakeClaude.backgroundMs` × (i + 1) after its answer).
+  const delegatedInBackground = /^delegate in background: (.+)$/u.exec(text)?.[1]!.split(", ");
+  const helpers: Array<{ agentId: string; toolUseId: string; word: string; child: Transcript }> = [];
+  for (const [index, word] of (delegatedInBackground ?? []).entries()) {
+    const toolUseId = `toolu_${randomUUID().slice(0, 8)}`;
+    const agentId = `b9a${index}`;
+    const input = { description: `Helper ${word}`, prompt: `Reply ${word}`, subagent_type: "general-purpose" };
+    const spawn = { type: "assistant", message: { id: `msg_${randomUUID().slice(0, 8)}`, role: "assistant", model: "claude-opus-5-5", content: [{ type: "tool_use", id: toolUseId, name: "Agent", input }], stop_reason: "tool_use", usage: { input_tokens: 5, output_tokens: 1 } } };
+    transcript.write({ ...spawn, apiBlockIndex: 0 });
+    yield base(sessionId, spawn);
+    const directory = transcript.path.replace(/\.jsonl$/u, "/subagents");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, `agent-${agentId}.meta.json`), JSON.stringify({ agentType: "general-purpose", description: input.description, toolUseId, spawnDepth: 1 }));
+    const child = new Transcript(sessionId, options.cwd ?? process.cwd(), join(directory, `agent-${agentId}.jsonl`));
+    child.write({ type: "user", isSidechain: true, agentId, message: { role: "user", content: input.prompt } });
+    yield base(sessionId, { type: "system", subtype: "task_started", task_id: agentId, tool_use_id: toolUseId, description: input.description, task_type: "local_agent" });
+    const launched = { isAsync: true, status: "async_launched", agentId, description: input.description, resolvedModel: "claude-opus-5-5", prompt: input.prompt };
+    const content = [{ type: "tool_result", tool_use_id: toolUseId, content: "Async agent launched" }];
+    transcript.write({ type: "user", message: { role: "user", content }, toolUseResult: launched });
+    yield base(sessionId, { type: "user", message: { role: "user", content }, tool_use_result: launched });
+    helpers.push({ agentId, toolUseId, word, child });
+  }
+  if (helpers.length) {
+    agentsRunning = helpers.length;
+    reply = "started";
+  }
   if (text.includes("spawn a sub-agent")) {
     // Claude writes the child's transcript only after the spawn's result: here it never does.
     const toolUseId = `toolu_${randomUUID().slice(0, 8)}`;
@@ -531,6 +560,25 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   // Streamed assistant messages never carry the stop reason (only the transcript does).
   yield base(sessionId, { ...assistant, message: { ...assistant.message, stop_reason: null } });
   yield* finish(reply);
+  for (const [index, helper] of helpers.entries()) {
+    await sleep(fakeClaude.backgroundMs);
+    helper.child.write({ type: "assistant", isSidechain: true, agentId: helper.agentId, apiBlockIndex: 0, message: { id: `msg_${randomUUID().slice(0, 8)}`, role: "assistant", model: "claude-opus-5-5", content: [{ type: "text", text: helper.word }], stop_reason: "end_turn", usage: { input_tokens: 5, output_tokens: 1 } } });
+    agentsRunning -= 1;
+    yield base(sessionId, { type: "system", subtype: "task_notification", task_id: helper.agentId, tool_use_id: helper.toolUseId, status: "completed", output_file: "", summary: `Helper ${helper.word}` });
+    yield base(sessionId, { type: "system", subtype: "background_tasks_changed", tasks: helpers.slice(index + 1).map((next) => ({ task_id: next.agentId, type: "local_agent" })) });
+    transcript.write({ type: "user", origin: { kind: "task-notification" }, promptId: randomUUID(), message: { role: "user", content: `<task-notification>\n<task-id>${helper.agentId}</task-id>\n<tool-use-id>${helper.toolUseId}</tool-use-id>\n<status>completed</status>\n<summary>Agent "Helper ${helper.word}" completed</summary>\n<result>${helper.word}</result>\n</task-notification>` } });
+    const woken = `msg_${randomUUID().slice(0, 8)}`;
+    const said = `the helper said ${helper.word}`;
+    yield base(sessionId, { type: "stream_event", event: { type: "message_start", message: { id: woken } } });
+    yield base(sessionId, { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
+    yield base(sessionId, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: said } } });
+    yield base(sessionId, { type: "stream_event", event: { type: "message_stop" } });
+    const done = { type: "assistant", message: { id: woken, role: "assistant", model: "claude-opus-5-5", content: [{ type: "text", text: said }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 3 } } };
+    transcript.write({ ...done, apiBlockIndex: 0 });
+    yield base(sessionId, done);
+    yield base(sessionId, { type: "result", subtype: "success", is_error: false, result: said, total_cost_usd: 0.01 });
+    if (!agentsRunning) yield base(sessionId, { type: "system", subtype: "session_state_changed", state: "idle" });
+  }
   if (!background || stopped) return;
   await sleep(fakeClaude.backgroundMs);
   const outputFile = join(mkdtempSync(join(tmpdir(), "fake-task-")), "bg1.output");
