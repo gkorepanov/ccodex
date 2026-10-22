@@ -594,7 +594,15 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     await client.turn(threadId, "/ccstatus");
     expect(answerOf(threadId)).toMatch(/^### ◆ CCodex `[^`]+`\n\n\*\*֎ /u);
     // Claude's limits come from its /usage data before any Claude turn.
-    expect(answerOf(threadId)).toContain("| **Claude 5h** | `█░░░░░░░░░░░░░░░░░░░` 5% |\n| **Claude week** | `█░░░░░░░░░░░░░░░░░░░` 3% |\n| **Claude Fable week** | `████████░░░░░░░░░░░░` 40% |");
+    // A week's pace so far: where it ends by the reset (or when it runs out), what is left a day till then.
+    const at = /(\w{3} \d+, )?\d\d:\d\d UTC([+-]\d+(:\d\d)?)?/gu;
+    expect(answerOf(threadId).replace(at, "<time>")).toContain([
+      "| **Claude 5h** | `█░░░░░░░░░░░░░░░░░░░` 5% |",
+      "| **Claude week** | `█░░░░░░░░░░░░░░░░░░░` 3% → 4.2% by reset · resets <time> |",
+      "| | spending 0.6%/day · 49%/day left for 2 days |",
+      "| **Claude Fable week** | `██████████████████░░` 90% · 🔴 runs out ~<time> · resets <time> |",
+      "| | spending 18%/day · 5%/day left for 2 days |",
+    ].join("\n"));
     const claude = await claudeThread();
     // The skill Desktop's `/` menu offers arrives as its chip.
     const chip = `[$ccodex:status](${(await client.request("skills/list", {})).data[0].skills[0].path}) `;

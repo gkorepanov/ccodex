@@ -59,8 +59,11 @@ const PERMISSIONS: Record<string, string> = {
   default: "Ask", acceptEdits: "Accept edits", auto: "Auto", dontAsk: "Don't ask", bypassPermissions: "Bypass",
 };
 
+const DAY = 86_400_000;
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 const clock = (date: Date) => date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+/** A figure CCodex works out: one decimal below 10. */
+const figure = (value: number) => String(value < 10 ? Math.round(value * 10) / 10 : Math.round(value));
 
 function bar(percent: number): string {
   const filled = Math.round(Math.min(100, Math.max(0, percent)) / 5);
@@ -71,17 +74,32 @@ function tokens(value: number): string {
   return value < 1000 ? String(value) : value < 1_000_000 ? `${(value / 1000).toFixed(1).replace(/\.0$/u, "")}k` : `${(value / 1_000_000).toFixed(2).replace(/\.?0+$/u, "")}M`;
 }
 
-function reset(seconds: number | null): string {
-  if (!seconds) return "";
-  const date = new Date(seconds * 1000);
+/** A moment ahead: its day unless today, and the UTC offset of the gateway's machine, which may not be the user's. */
+function moment(date: Date): string {
   const day = date.toDateString() === new Date().toDateString() ? "" : `${date.toLocaleDateString("en-US", { month: "short", day: "numeric" })}, `;
-  return ` · resets ${day}${clock(date)}`;
+  const offset = -date.getTimezoneOffset();
+  const minutes = Math.abs(offset) % 60;
+  const zone = offset ? `UTC${offset > 0 ? "+" : "-"}${Math.floor(Math.abs(offset) / 60)}${minutes ? `:${String(minutes).padStart(2, "0")}` : ""}` : "UTC";
+  return `${day}${clock(date)} ${zone}`;
 }
 
+/** A window's row; a week's also tells where its pace so far ends by the reset, and what is left a day till then. */
 function limitRows(provider: string, limits: JsonObject): string[] {
-  return [limits.primary, limits.secondary].filter((window): window is Window => Boolean(window)).map((window) => {
+  return [limits.primary, limits.secondary].filter((window): window is Window => Boolean(window)).flatMap((window) => {
     const label = window.windowDurationMins === 300 ? "5h" : window.windowDurationMins === 10_080 ? "week" : `${Math.round((window.windowDurationMins ?? 0) / 60)}h`;
-    return `| **${provider} ${label}** | ${bar(window.usedPercent)} ${window.usedPercent}%${reset(window.resetsAt)} |`;
+    const used = window.usedPercent;
+    const resetsAt = (window.resetsAt ?? 0) * 1000;
+    const reset = resetsAt ? ` · resets ${moment(new Date(resetsAt))}` : "";
+    const left = (resetsAt - Date.now()) / DAY;
+    if (window.windowDurationMins !== 10_080 || left <= 0) return [`| **${provider} ${label}** | ${bar(used)} ${used}%${reset} |`];
+    const spending = used / (7 - left);
+    const forecast = used + spending * left;
+    const outlook = forecast <= 100 ? ` → ${figure(forecast)}% by reset`
+      : ` · 🔴 ${used >= 100 ? "used up" : `runs out ~${moment(new Date(Date.now() + (100 - used) / spending * DAY))}`}`;
+    return [
+      `| **${provider} ${label}** | ${bar(used)} ${used}%${outlook}${reset} |`,
+      `| | spending ${figure(spending)}%/day · ${figure(Math.max(0, 100 - used) / left)}%/day left for ${figure(left)} days |`,
+    ];
   });
 }
 
