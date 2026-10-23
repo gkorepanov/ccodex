@@ -602,6 +602,8 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
       "| | spending 0.6%/day · 49%/day left for 2 days |",
       "| **Claude Fable week** | `██████████████████░░` 90% · 🔴 runs out ~<time> · resets <time> |",
       "| | spending 18%/day · 5%/day left for 2 days |",
+      "| **Claude Sonnet week** | `█░░░░░░░░░░░░░░░░░░░` 5% → 5.2% by reset · resets <time> |",
+      "| | spending 0.7%/day · 95% left for 7h |",
     ].join("\n"));
     const claude = await claudeThread();
     // The skill Desktop's `/` menu offers arrives as its chip.

@@ -96,10 +96,11 @@ function limitRows(provider: string, limits: JsonObject): string[] {
     const forecast = used + spending * left;
     const outlook = forecast <= 100 ? ` → ${figure(forecast)}% by reset`
       : ` · 🔴 ${used >= 100 ? "used up" : `runs out ~${moment(new Date(Date.now() + (100 - used) / spending * DAY))}`}`;
-    return [
-      `| **${provider} ${label}** | ${bar(used)} ${used}%${outlook}${reset} |`,
-      `| | spending ${figure(spending)}%/day · ${figure(Math.max(0, 100 - used) / left)}%/day left for ${figure(left)} days |`,
-    ];
+    const rest = Math.max(0, 100 - used);
+    // Within its last day a week's rest a day would read as more than it has.
+    const budget = left < 1 ? `${rest}% left for ${left * 24 >= 1 ? `${Math.round(left * 24)}h` : `${Math.round(left * 1440)}m`}`
+      : `${figure(rest / left)}%/day left for ${figure(left)} days`;
+    return [`| **${provider} ${label}** | ${bar(used)} ${used}%${outlook}${reset} |`, `| | spending ${figure(spending)}%/day · ${budget} |`];
   });
 }
 
