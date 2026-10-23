@@ -245,4 +245,14 @@ describe("native Claude transcript projector", () => {
     expect(await failed([user, retry, reply])).toMatchObject({ message: "Failed to authenticate. API Error: 401" });
     expect(await failed([user, retry])).toMatchObject({ message: "401 OAuth access token has been revoked." });
   });
+  it("takes a request error Claude Code retried past (a usage limit waited out) for no failure", async () => {
+    const user = prompt("prompt-1", null, "hello", 1);
+    const limit = {
+      type: "system", subtype: "api_error", ...envelope("retry-1", user.uuid, 2), level: "error",
+      error: { status: 429, formatted: "429 This request would exceed your account's rate limit.", rateLimits: { rateLimitType: "five_hour" } },
+    } as unknown as TranscriptRecord;
+    const reply = assistant("reply-1", "retry-1", "message-1", [{ type: "text", text: "hi" }], 3, "end_turn");
+    const { thread } = await projectTranscript({ sessionId: "session", path: "/tmp/session.jsonl", records: [user, limit, reply] });
+    expect(thread.turns.map((turn) => [turn.status, turn.error])).toEqual([["completed", null]]);
+  });
 });

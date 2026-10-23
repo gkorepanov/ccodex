@@ -13,7 +13,12 @@ export function claudeEnvironment(): Record<string, string | undefined> {
   // stops them after 30 min to 2 h in Agent SDK sessions, which it takes for unattended).
   // Transcripts leave out what Claude Code 2.1.300+ records of each API request (prompt, tools, parameters): half again
   // a long chat's size, all read through when paging back.
-  const env: Record<string, string | undefined> = { ...process.env, CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_ENTRYPOINT: "claude-desktop", CLAUDE_CODE_ELEGANT_MEADOW: "0" };
+  // At a usage limit, or while the API is overloaded, Claude Code waits and retries in the same turn, as its unattended
+  // mode does, up to 10 hours (a limit that resets later ends the turn at once).
+  const env: Record<string, string | undefined> = {
+    ...process.env, CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_ENTRYPOINT: "claude-desktop", CLAUDE_CODE_ELEGANT_MEADOW: "0",
+    CLAUDE_CODE_RETRY_WATCHDOG: "1", CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS: "36000000", CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS: "36000000",
+  };
   delete env.CCODEX_SHIM_ACTIVE;
   delete env.CODEX_CLI_PATH;
   return env;

@@ -4,7 +4,7 @@ import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   query, startup, type CanUseTool, type Options, type PermissionMode, type PermissionResult, type Query, type SDKMessage,
-  type SDKUserMessage, type WarmQuery,
+  type SDKAPIRetryMessage, type SDKUserMessage, type WarmQuery,
 } from "@anthropic-ai/claude-agent-sdk";
 import { claudeInstructions } from "../instructions.js";
 import type { JsonObject, QueuedSubmissionLike, ThreadItem, TokenUsageBreakdown, Turn, UserInput } from "../protocol/codex.js";
@@ -46,6 +46,8 @@ interface ActiveTurn {
   error: string | null;
   /** It only waits for Claude's background sub-agents: Claude goes on in it when one ends. */
   waiting: boolean;
+  /** Claude Code waits to retry a request (a usage limit's reset, an overloaded API): the item that tells so. */
+  retry?: { readonly item: ThreadItem & { type: "reasoning" }; readonly limit: boolean };
 }
 
 interface Response {
@@ -458,6 +460,7 @@ export class ClaudeSession {
   public async steer(params: JsonObject): Promise<string> {
     if (!this.turn) throw invalidRequest("no active turn to steer");
     if (this.turn.waiting) return (await this.startTurn({ input: params.input, clientUserMessageId: params.clientUserMessageId })).id;
+    if (this.turn.retry?.limit) throw invalidRequest("Cannot steer while waiting for the usage limit to reset; queue the message instead");
     const input = normalizeUserInput(params.input ?? []);
     // The client's id is the message's in the transcript: history gives it back as the message's client id.
     const uuid: string = UUID.test(params.clientUserMessageId ?? "") ? params.clientUserMessageId : randomUUID();
@@ -747,6 +750,7 @@ export class ClaudeSession {
       if (this.afterResult) this.continued();
       // Claude woke up: the turn that waited is its turn now.
       if (this.turn?.waiting) Object.assign(this.turn, { resultSeen: false, waiting: false });
+      if (this.turn) this.turn.retry = undefined;
     }
     switch (m.type) {
       case "stream_event": return this.onStream(m.event);
@@ -937,6 +941,7 @@ export class ClaudeSession {
       }
       case "api_retry":
         this.host.logger.info("claude.api-retry", { threadId: this.threadId, attempt: m.attempt, error: m.error });
+        this.showRetry(m);
         return;
       case "local_command_output":
         this.systemText(String(m.content ?? ""));
@@ -954,6 +959,23 @@ export class ClaudeSession {
       default:
         return undefined;
     }
+  }
+
+  /**
+   * Claude Code waits to retry a request, again and again every 30 s while a usage limit's reset is ahead: one reasoning
+   * item says so and how long is left (live only, the transcript has no trace of the wait).
+   */
+  private showRetry(m: SDKAPIRetryMessage): void {
+    if (!this.turn) return;
+    const limit = m.error === "rate_limit";
+    const minutes = Math.ceil(m.retry_delay_ms / 60_000);
+    const left = minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+    const text = limit ? `Waiting for usage limit reset (${left} left)…`
+      : `Anthropic API ${m.error === "overloaded" ? "overloaded" : `error ${m.error_status ?? m.error}`}, retrying (attempt ${m.attempt})…`;
+    const item: ThreadItem & { type: "reasoning" } = { type: "reasoning", id: this.turn.retry?.item.id ?? `${m.uuid}:retry`, summary: [text], content: [] };
+    if (!this.turn.retry) this.itemStarted(item);
+    this.turn.retry = { item, limit };
+    this.itemCompleted(item);
   }
 
   /** A task ended while Claude was idle: its notification may wake Claude up, so the turn waits a moment for that. */

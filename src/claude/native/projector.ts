@@ -459,8 +459,10 @@ function assistantItems(
 }
 
 function turnStatus(records: readonly TranscriptChainRecord[], hasFollowingTurn: boolean): Turn["status"] {
-  const failed = records.some((record) => record.type === "system" && record.subtype === "api_error"
-    || record.type === "assistant" && (record.isApiErrorMessage === true || Boolean(record.error)));
+  // A request error Claude Code retried past (a usage limit waited out, an overloaded API) is no failure: a reply follows.
+  const requestError = records.findLastIndex((record) => record.type === "system" && record.subtype === "api_error");
+  const failed = requestError >= 0 && !records.slice(requestError + 1).some((record) => record.type === "assistant")
+    || records.some((record) => record.type === "assistant" && (record.isApiErrorMessage === true || Boolean(record.error)));
   const interrupted = records.some((record) => resumeFiller(record) || record.type === "user" && (record.interruptedByShutdown === true
     || record.toolUseResult?.interrupted === true || /^\[Request interrupted by user(?: for tool use)?\]$/u.test(userText(record))));
   if (interrupted) return "interrupted";

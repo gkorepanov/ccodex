@@ -365,6 +365,12 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   if (text === "banners") {
     for (const [level, content] of [["info", "transcript-only detail"], ["warning", "a warning"]]) yield base(sessionId, { type: "system", subtype: "informational", level, content });
   }
+  // Like Claude Code's unattended retries (CLAUDE_CODE_RETRY_WATCHDOG): a frame per 30 s waited, the time still ahead.
+  if (text === "usage limit") {
+    for (const delay of [9_000_000, 8_940_000]) yield base(sessionId, { type: "system", subtype: "api_retry", attempt: 1, max_retries: 300, retry_delay_ms: delay, error_status: 429, error: "rate_limit", uuid: randomUUID() });
+    await fakeClaude.hold;
+  }
+  if (text === "overloaded") yield base(sessionId, { type: "system", subtype: "api_retry", attempt: 3, max_retries: 300, retry_delay_ms: 8000, error_status: 529, error: "overloaded", uuid: randomUUID() });
   const fileTool = text.includes("needs file approval");
   if (text.includes("needs approval") || fileTool) {
     const toolUseId = `toolu_${randomUUID().slice(0, 8)}`;

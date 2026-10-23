@@ -686,6 +686,27 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     await client.waitFor("turn/completed", (params) => params.turn.id === turn.id);
   });
 
+  it("shows Claude Code's wait to retry as one reasoning item it updates, live only; no steer while a usage limit's reset is ahead", async () => {
+    const threadId = await claudeThread();
+    const retries = () => client.notifications("item/completed", threadId).map((message) => message.params.item)
+      .filter((item) => item.id.endsWith(":retry")).map((item) => [item.id, item.summary[0]]);
+    let release!: () => void;
+    fakeClaude.hold = new Promise((resolve) => { release = resolve; });
+    const { turn } = await client.request("turn/start", { threadId, input: text("usage limit") });
+    // Claude Code's unattended retries, up to 10 hours.
+    expect(fakeClaude.options.at(-1)!.env).toMatchObject({ CLAUDE_CODE_RETRY_WATCHDOG: "1", CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS: "36000000", CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS: "36000000" });
+    await vi.waitFor(() => expect(retries().map(([, summary]) => summary)).toEqual(["Waiting for usage limit reset (2h 30m left)…", "Waiting for usage limit reset (2h 29m left)…"]));
+    expect(new Set(retries().map(([id]) => id)).size).toBe(1);
+    expect(client.notifications("item/started", threadId).filter((message) => message.params.item.id.endsWith(":retry"))).toHaveLength(1);
+    await expect(client.request("turn/steer", { threadId, input: text("hurry"), expectedTurnId: turn.id })).rejects.toThrow("Cannot steer while waiting for the usage limit to reset");
+    release();
+    await client.waitFor("turn/completed", (params) => params.turn.id === turn.id);
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(itemsOf(thread.turns)).toEqual(["user:usage limit", `agent:${fakeClaude.reply("usage limit")}`]);
+    await client.turn(threadId, "overloaded");
+    expect(retries().at(-1)![1]).toBe("Anthropic API overloaded, retrying (attempt 3)…");
+  });
+
   it("shows Claude's banners as Claude Code does: not its transcript-only info ones", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "banners");
