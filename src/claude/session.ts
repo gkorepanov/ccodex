@@ -103,7 +103,7 @@ function lastPrompt(path: string): UserRecord | undefined {
 }
 
 /** How long a process started ahead of a first prompt waits for it. */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const WARM_MS = 10 * 60_000;
 
 interface WarmProcess {
@@ -446,9 +446,12 @@ export class ClaudeSession {
       this.delegating = !this.delegating;
       await this.inject(this.delegating ? DELEGATION_ON : DELEGATION_OFF);
     }
-    const turn = this.openTurn(uuid, input, params.clientUserMessageId ?? null, hidden, params.turnId !== undefined);
-    this.ensureQuery();
-    this.inbox!.push(userMessage(content, uuid));
+    // Announced after the answer to `turn/start`, as stock does: a client binds its own copy of the message to the turn
+    // that answer names (Codex's iOS app shows the message twice otherwise). Claude gets the message only then.
+    const turn = this.openTurn(uuid, input, params.clientUserMessageId ?? null, hidden, params.turnId !== undefined, () => {
+      this.ensureQuery();
+      this.inbox!.push(userMessage(content, uuid));
+    });
     return startedTurn(turn);
   }
 
@@ -611,7 +614,7 @@ export class ClaudeSession {
   }
 
   /** `announced`: the provider switch already started the turn under this preallocated id. */
-  private openTurn(id: string, input: UserInput[], clientId: string | null, hidden: boolean, announced = false): Turn {
+  private openTurn(id: string, input: UserInput[], clientId: string | null, hidden: boolean, announced = false, deliver?: () => void): Turn {
     const turn = this.newTurnObject(id);
     this.turn = { id, startedAt: Date.now(), items: turn.items, resultSeen: false, interrupted: false, error: null, waiting: false };
     this.started = true;
@@ -624,13 +627,17 @@ export class ClaudeSession {
     } catch {
       this.transcriptRead = 0;
     }
-    if (!announced) this.emit("turn/started", { threadId: this.threadId, turn: startedTurn(turn) });
-    this.emit("thread/status/changed", { threadId: this.threadId, status: { type: "active", activeFlags: [] } });
-    if (!hidden) {
-      const item: ThreadItem = { type: "userMessage", id, clientId, content: input };
-      this.itemStarted(item);
-      this.itemCompleted(item);
-    }
+    const announce = () => {
+      if (!announced) this.emit("turn/started", { threadId: this.threadId, turn: startedTurn(turn) });
+      this.emit("thread/status/changed", { threadId: this.threadId, status: { type: "active", activeFlags: [] } });
+      if (!hidden) {
+        const item: ThreadItem = { type: "userMessage", id, clientId, content: input };
+        this.itemStarted(item);
+        this.itemCompleted(item);
+      }
+    };
+    if (deliver) setImmediate(() => { announce(); deliver(); });
+    else announce();
     return turn;
   }
 

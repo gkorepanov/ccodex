@@ -686,6 +686,17 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     await client.waitFor("turn/completed", (params) => params.turn.id === turn.id);
   });
 
+  it("announces a Claude turn and its message after answering turn/start, as stock does (Codex's iOS app binds its copy of the message to that answer)", async () => {
+    const threadId = await claudeThread();
+    const { turn } = await client.request("turn/start", { threadId, input: text("hello"), clientUserMessageId: "DAB086C6-4A27-44B8-BB99-470CCA3E31BA" });
+    await client.waitFor("turn/completed", (params) => params.turn.id === turn.id);
+    const order = client.messages.flatMap((message) => message.result?.turn?.id === turn.id ? ["answer"]
+      : message.method === "turn/started" && message.params.turn.id === turn.id ? ["turn/started"]
+      : message.method === "item/started" && message.params.turnId === turn.id ? [`${message.params.item.type} ${message.params.item.clientId ?? ""}`.trim()]
+      : message.method === "turn/completed" && message.params.turn.id === turn.id ? ["turn/completed"] : []);
+    expect(order).toEqual(["answer", "turn/started", "userMessage DAB086C6-4A27-44B8-BB99-470CCA3E31BA", "agentMessage", "turn/completed"]);
+  });
+
   it("shows Claude Code's wait to retry as one reasoning item it updates, live only; no steer while a usage limit's reset is ahead", async () => {
     const threadId = await claudeThread();
     const retries = () => client.notifications("item/completed", threadId).map((message) => message.params.item)
