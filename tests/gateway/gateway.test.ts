@@ -1713,6 +1713,21 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(itemsOf(after.thread.turns)).toEqual(["user:first", "agent:gpt: first"]);
   });
 
+  it("switches a gpt chat with no message yet to claude: no rollout to resume or sum up, a Claude chat under its own id", async () => {
+    const { thread: started } = await client.request("thread/start", { model: "gpt-6-luna", cwd: "/work/empty" });
+    const threadId = started.id;
+    const { turn } = await client.request("turn/start", { threadId, model: CLAUDE, input: text("first") });
+    await client.waitFor("turn/completed", (params) => params.threadId === threadId && params.turn.id === turn.id);
+    expect(client.notifications("item/completed", threadId).map((message) => message.params.item.text)).toContain("claude: first");
+    expect(fakeClaude.prompts.map((prompt) => prompt.text)).toEqual(["first"]);
+    expect(fakeClaude.options.at(-1)!.cwd).toBe("/work/empty");
+    // No lineage: CCodex writes no meta for it.
+    expect(existsSync(join(gateway.config.dataDir, "meta.json"))).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect([thread.modelProvider, itemsOf(thread.turns)]).toEqual(["claude", ["user:first", "agent:claude: first"]]);
+  });
+
   it("switches gpt → claude in plan mode with the chat's own permissions (Desktop sends none in plan mode)", async () => {
     const threadId = await stockThread();
     await client.turn(threadId, "first", { approvalPolicy: "never", permissions: ":danger-full-access" });

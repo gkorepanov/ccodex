@@ -1181,8 +1181,8 @@ export class ClaudeThreads {
   }
 
   /** A new session, not announced (thread/start announces it; a provider switch keeps it hidden). */
-  public create(settings: SessionSettings): ClaudeSession {
-    const session = new ClaudeSession(this, uuidv7(), { ...settings, model: settings.model ?? this.defaultModel }, { exists: false });
+  public create(settings: SessionSettings, threadId = uuidv7()): ClaudeSession {
+    const session = new ClaudeSession(this, threadId, { ...settings, model: settings.model ?? this.defaultModel }, { exists: false });
     this.sessions.set(session.threadId, session);
     return session;
   }

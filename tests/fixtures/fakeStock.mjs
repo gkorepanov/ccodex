@@ -2,14 +2,18 @@
 // Minimal scripted `codex app-server --listen unix://…`: in-memory threads, the notifications stock sends, and a
 // few test hooks. Enough to exercise CCodex's gateway as a black box.
 import { randomUUID } from "node:crypto";
-import { existsSync, renameSync } from "node:fs";
+import { existsSync, mkdtempSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
 
 const listen = process.argv[process.argv.indexOf("--listen") + 1];
 const socketPath = listen.slice("unix://".length);
 const threads = new Map();
+/** Like stock: a thread's rollout file is written with its first message (or injected items), not at its start. */
+const rollouts = mkdtempSync(join(tmpdir(), "fake-stock-"));
+const materialize = (thread) => { if (!existsSync(thread.path)) writeFileSync(thread.path, ""); };
 const connections = new Set();
 /** Stock's server-owned order of the Pinned section. */
 const pinned = [];
@@ -29,7 +33,7 @@ function newThread(params, extra = {}) {
     injected: [], instructions: [], approvalPolicy: "on-request", sandbox: { type: "workspaceWrite" }, ...extra,
   };
   thread.sessionId = thread.id;
-  thread.path = `/sessions/rollout-${thread.id}.jsonl`;
+  thread.path = join(rollouts, `rollout-${thread.id}.jsonl`);
   threads.set(thread.id, thread);
   return thread;
 }
@@ -55,6 +59,7 @@ function reply(thread, text) {
 }
 
 function runTurn(connection, thread, params) {
+  materialize(thread);
   const text = (params.input ?? []).filter((part) => part.type === "text").map((part) => part.text).join("\n");
   const turn = { id: randomUUID(), items: [], itemsView: "full", status: "inProgress", error: null, startedAt: now(), completedAt: null, durationMs: null };
   const user = { type: "userMessage", id: randomUUID(), clientId: params.clientUserMessageId ?? null, content: params.input };
@@ -119,7 +124,7 @@ const handlers = {
   },
   "thread/resume": (connection, params) => {
     const thread = threads.get(params.threadId);
-    if (!thread) throw Object.assign(new Error(`no rollout found for thread id ${params.threadId}`), { code: -32600 });
+    if (!thread || !existsSync(thread.path)) throw Object.assign(new Error(`no rollout found for thread id ${params.threadId}`), { code: -32600 });
     if (params.path && params.path !== thread.path) throw new Error(`cannot resume running thread ${thread.id} with stale path`);
     thread.subscribers.add(connection);
     thread.instructions.push(params.developerInstructions ?? null);
@@ -154,6 +159,7 @@ const handlers = {
     if (params.beforeTurnId) turns = turns.slice(0, turns.findIndex((turn) => turn.id === params.beforeTurnId));
     const thread = newThread({ ...source, ephemeral: params.ephemeral }, { forkedFromId: source.id, turns: structuredClone(turns), preview: source.preview });
     thread.subscribers = new Set([connection]);
+    if (!params.ephemeral) materialize(thread);
     // Like stock: every new thread is announced to every connection, ephemeral ones included.
     broadcast("thread/started", { thread: summary(thread) });
     return { thread: params.excludeTurns ? summary(thread) : full(thread), ...settings(thread) };
@@ -164,7 +170,12 @@ const handlers = {
     for (const c of thread.subscribers) c.notify("thread/reverted", { threadId: thread.id });
     return { thread: summary(thread), turnsBackwardsCursor: null, itemsBackwardsCursor: null };
   },
-  "thread/inject_items": (_connection, params) => { threads.get(params.threadId).injected.push(...params.items); return {}; },
+  "thread/inject_items": (_connection, params) => {
+    const thread = threads.get(params.threadId);
+    thread.injected.push(...params.items);
+    materialize(thread);
+    return {};
+  },
   "thread/name/set": (_connection, params) => {
     threads.get(params.threadId).name = params.name;
     broadcast("thread/name/updated", { threadId: params.threadId, threadName: params.name });

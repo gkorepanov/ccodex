@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { codexPermissions, permissionSettings } from "../claude/sdk.js";
 import type { Provider, Segment } from "../meta.js";
 import { invalidRequest, requestedModel, type JsonObject, type Thread, type Turn } from "../protocol/codex.js";
@@ -581,6 +582,17 @@ export class Lineages {
         if (goal) await this.gateway.claude.giveGoal(source.threadId, goal);
         return answer;
       }
+    }
+    // A chat without a message has no rollout yet, nothing stock could resume or sum up: it is a Claude chat from here,
+    // under its own id.
+    const { thread } = await connection.upstream.request("thread/read", { threadId: source.threadId });
+    if (segments.length === 1 && !existsSync(thread.path)) {
+      const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd: thread.cwd, model: null, effort: null, fast: false, permissionMode: "default", plan: false }), publicId);
+      for (const viewer of viewers) this.gateway.subscribe(publicId, viewer);
+      this.gateway.titles.track(publicId);
+      tell("thread/settings/updated", { threadId: publicId, threadSettings: this.gateway.claude.threadSettings(session.settings) });
+      connection.provider = "claude";
+      return this.gateway.claude.handle(connection, "turn/start", params);
     }
     // codex → claude: stock compaction is encrypted, so an ephemeral fork writes a summary with the same model.
     // The chat's own permissions carry over: Desktop sends none in plan mode, stock's resume tells them.
