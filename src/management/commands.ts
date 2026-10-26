@@ -339,7 +339,7 @@ export async function doctor(config: Config, json: boolean): Promise<number> {
   const checks = await Promise.all([
     check("node", () => process.version),
     check("codex", async () => {
-      const codex = await stockCodex(config);
+      const codex = await stockCodex(config, false);
       const current = await codexVersion(codex);
       const latest = await newerCodex(current);
       return { detail: `${codex} (${current})`, ...latest ? { warning: `npm has ${latest} → run: ccodex update` } : {} };

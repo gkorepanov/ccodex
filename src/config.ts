@@ -155,12 +155,13 @@ export async function codexVersion(codex: string): Promise<string | undefined> {
 }
 
 /**
- * The codex the gateway runs as stock: `codex_binary` when set; started for a local Desktop, Desktop's own CLI (what
- * it runs without CCodex, so always one it works with); else, as for Desktop over SSH, the newest on the machine.
+ * The codex the gateway runs as stock: `codex_binary` when set; started by the Codex App on this machine, the App's
+ * own CLI (what it runs without CCodex, so always one it works with) if it answers; else, as for the App over SSH, the
+ * newest one on the machine, the App's included. A codex that gives no version is passed over.
  */
-export async function stockCodex(config: Config, desktop = desktopCodex()): Promise<string> {
+export async function stockCodex(config: Config, app: boolean, desktop = desktopCodex()): Promise<string> {
   if (config.codexConfigured) return config.codex;
-  if (desktop && process.env.CODEX_APP_TOOLS_PIPE_PATH) return desktop;
+  if (app && desktop && await codexVersion(desktop)) return desktop;
   const candidates = await Promise.all([...installedCodexes(config.productHome), ...desktop ? [desktop] : []]
     .map(async (path) => ({ path, version: await codexVersion(path) })));
   const known = candidates.filter((candidate): candidate is { path: string; version: string } => candidate.version !== undefined);

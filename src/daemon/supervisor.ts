@@ -19,6 +19,8 @@ import { dirname, join } from "node:path";
 const CHILD_PID_FILE = "CODEX_HYBRID_DAEMON_PID_FILE";
 const CHILD_TOKEN = "CODEX_HYBRID_DAEMON_TOKEN";
 const REMOTE_CONTROL_DISABLED = "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED";
+/** Set for a gateway the Codex App on this machine started (its stdio launch), not one over SSH or a terminal's. */
+export const APP_LAUNCH = "CCODEX_APP_LAUNCH";
 const POLL_MS = 50;
 const START_TIMEOUT_MS = 10_000;
 const STOP_GRACE_MS = 60_000;
@@ -224,6 +226,7 @@ export async function spawnDetachedGateway(options: {
   readonly stderrLog: string;
   readonly remoteControlEnabled: boolean;
   readonly desktop?: string;
+  readonly app?: boolean;
 }): Promise<number> {
   const token = randomUUID();
   const reservation = {
@@ -243,6 +246,7 @@ export async function spawnDetachedGateway(options: {
     [CHILD_PID_FILE]: options.pidFile,
     [CHILD_TOKEN]: token,
     ...(options.remoteControlEnabled ? {} : { [REMOTE_CONTROL_DISABLED]: "1" }),
+    [APP_LAUNCH]: options.app ? "1" : undefined,
   };
   let child;
   let spawnError: Error | undefined;

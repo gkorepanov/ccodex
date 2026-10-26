@@ -4,7 +4,7 @@ import { classifyInvocation, withProxySocket } from "./args.js";
 import { delegate } from "./delegate.js";
 import { loadConfig, stockCodex } from "../config.js";
 import { Logger } from "../log.js";
-import { publishDaemonChildRecord, withGatewayStartupFence } from "../daemon/supervisor.js";
+import { APP_LAUNCH, publishDaemonChildRecord, withGatewayStartupFence } from "../daemon/supervisor.js";
 import { publishGatewayOwner } from "../daemon/ownership.js";
 import { runDaemonCommand } from "../daemon/daemon.js";
 import { loadDaemonSettings } from "../daemon/settings.js";
@@ -47,6 +47,9 @@ async function main(): Promise<number> {
   const remoteControl = process.env.CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED !== "1"
     && (invocation.stockArgs.includes("--remote-control") || loadDaemonSettings().remoteControlEnabled);
   const stockArgs = invocation.stockArgs.filter((arg) => arg !== "--remote-control");
+  // Read once: the gateway's own children (stock, Claude's commands) don't inherit it.
+  const app = process.env[APP_LAUNCH] === "1";
+  delete process.env[APP_LAUNCH];
   let stop!: () => void;
   const stopped = new Promise<void>((resolve) => { stop = resolve; });
   process.once("SIGINT", stop);
@@ -58,7 +61,7 @@ async function main(): Promise<number> {
     gateway = await withGatewayStartupFence(async () => {
       // The PID handshake identifies the detached child; the daemon separately waits for socket ownership.
       releaseDaemonRecord = await publishDaemonChildRecord();
-      return startGateway({ ...config, codex: await stockCodex(config) }, invocation.socketPath, stockArgs, logger, remoteControl);
+      return startGateway({ ...config, codex: await stockCodex(config, app) }, invocation.socketPath, stockArgs, logger, remoteControl);
     });
     releaseGatewayOwner = publishGatewayOwner(invocation.socketPath);
     await stopped;

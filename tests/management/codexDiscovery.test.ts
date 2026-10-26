@@ -46,14 +46,13 @@ describe("the stock codex CCodex runs", () => {
     process.env.PATH = [join(root, "ccodex", "bin"), join(root, "npm"), join(root, "brew")].join(":");
     delete process.env.CCODEX_CODEX;
     process.env.CCODEX_CONFIG = join(root, "none.toml");
-    delete process.env.CODEX_APP_TOOLS_PIPE_PATH;
     // Over SSH (or from a terminal): the newest, a stable release above Desktop's alpha of it.
-    expect(await stockCodex(loadConfig(), desktop)).toBe(brew);
-    expect(await stockCodex(loadConfig(), undefined)).toBe(brew);
-    // Started for the Desktop on this machine: what Desktop runs without CCodex.
-    process.env.CODEX_APP_TOOLS_PIPE_PATH = join(root, "app-tools.sock");
-    expect(await stockCodex(loadConfig(), desktop)).toBe(desktop);
+    expect(await stockCodex(loadConfig(), false, desktop)).toBe(brew);
+    // Started by the App on this machine: what the App runs without CCodex; one that doesn't answer is passed over.
+    expect(await stockCodex(loadConfig(), true, desktop)).toBe(desktop);
+    expect(await stockCodex(loadConfig(), true, undefined)).toBe(brew);
+    expect(await stockCodex(loadConfig(), true, executable(join(root, "broken", "codex")))).toBe(brew);
     process.env.CCODEX_CODEX = npm;
-    expect(await stockCodex(loadConfig(), desktop)).toBe(npm);
+    expect(await stockCodex(loadConfig(), true, desktop)).toBe(npm);
   });
 });

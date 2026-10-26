@@ -36,6 +36,8 @@ interface DaemonInvocation {
    *  use its browser, so a daemon started otherwise is replaced by one the frontend starts, with its environment,
    *  unless the launch that started it is still open (it keeps its browser, and two open launches take no turns). */
   readonly desktop?: string;
+  /** Started by the Codex App on this machine (its stdio launch): the gateway runs the App's own Codex CLI. */
+  readonly app?: boolean;
 }
 
 interface DaemonPaths {
@@ -64,8 +66,8 @@ function paths(config: Config, wrapperPath: string): DaemonPaths {
 }
 
 /** The version of the codex the gateway runs as stock. */
-async function stockVersion(config: Config): Promise<string> {
-  const codex = await stockCodex(config);
+async function stockVersion(config: Config, app: boolean): Promise<string> {
+  const codex = await stockCodex(config, app);
   const version = await codexVersion(codex);
   if (!version) throw new Error(`Codex gave no version: ${codex}`);
   return version;
@@ -107,18 +109,20 @@ class HybridDaemon {
   private readonly paths: DaemonPaths;
   private version?: Promise<string>;
   private desktop?: string;
+  private app = false;
 
   public constructor(private readonly config: Config, wrapperPath: string) {
     this.paths = paths(config, wrapperPath);
   }
 
   private getVersion(): Promise<string> {
-    return this.version ??= stockVersion(this.config);
+    return this.version ??= stockVersion(this.config, this.app);
   }
 
   public run(invocation: DaemonInvocation): Promise<JsonOutput> {
     if (invocation.command === "version") return this.versionOutput();
     this.desktop = invocation.desktop;
+    this.app = invocation.app ?? false;
     return withDaemonLock(this.paths.stateDirectory, async () => {
       switch (invocation.command) {
         case "bootstrap": return this.bootstrap(invocation.remoteControl);
@@ -174,6 +178,7 @@ class HybridDaemon {
       stderrLog: this.paths.stderrLog,
       remoteControlEnabled: settings.remoteControlEnabled,
       desktop: this.desktop,
+      app: this.app,
     });
     const record = reconcileManagedProcess(this.paths.pidFile);
     if (!record || record.pid !== pid) throw new Error(`managed app server ${pid} lost daemon ownership during startup`);

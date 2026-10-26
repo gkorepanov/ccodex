@@ -53,7 +53,7 @@ function send(socket: WebSocket, line: string): Promise<void> {
 
 async function defaultKick(config: Config): Promise<void> {
   try {
-    await runDaemonCommand(config, { command: "start", remoteControl: false, desktop: process.env.CODEX_APP_TOOLS_PIPE_PATH }, process.argv[1] ?? process.execPath);
+    await runDaemonCommand(config, { command: "start", remoteControl: false, desktop: process.env.CODEX_APP_TOOLS_PIPE_PATH, app: true }, process.argv[1] ?? process.execPath);
   } catch (error) {
     process.stderr.write(`ccodex stdio frontend: gateway autostart failed: ${String(error)}\n`);
   }
