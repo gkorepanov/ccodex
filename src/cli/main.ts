@@ -2,7 +2,7 @@
 import { delimiter, dirname } from "node:path";
 import { classifyInvocation, withProxySocket } from "./args.js";
 import { delegate } from "./delegate.js";
-import { loadConfig } from "../config.js";
+import { loadConfig, stockCodex } from "../config.js";
 import { Logger } from "../log.js";
 import { publishDaemonChildRecord, withGatewayStartupFence } from "../daemon/supervisor.js";
 import { publishGatewayOwner } from "../daemon/ownership.js";
@@ -58,7 +58,7 @@ async function main(): Promise<number> {
     gateway = await withGatewayStartupFence(async () => {
       // The PID handshake identifies the detached child; the daemon separately waits for socket ownership.
       releaseDaemonRecord = await publishDaemonChildRecord();
-      return startGateway(config, invocation.socketPath, stockArgs, logger, remoteControl);
+      return startGateway({ ...config, codex: await stockCodex(config) }, invocation.socketPath, stockArgs, logger, remoteControl);
     });
     releaseGatewayOwner = publishGatewayOwner(invocation.socketPath);
     await stopped;

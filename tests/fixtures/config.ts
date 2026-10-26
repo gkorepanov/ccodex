@@ -3,6 +3,7 @@ import type { Config } from "../../src/config.js";
 export function testConfig(overrides: Partial<Config> = {}): Config {
   return {
     codex: "/usr/bin/codex",
+    codexConfigured: true,
     delegateCodex: "/usr/bin/codex",
     claudeBinary: "/usr/bin/claude",
     claudeHome: "/tmp/ccodex-test-claude",

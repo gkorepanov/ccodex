@@ -108,12 +108,16 @@ Claude's 30-day cleanup deleted come back as text. The 0.4 databases move to
   App shows a remote host's image or video): a bigger answer fails, a bigger notification is dropped, the output stops
   there. One huge message holds up every chat over SSH and can drop the phone's connection. `0` turns it off.
 - `log_level` — `debug`, `info` (default), `warn`, `error`.
-- `codex_binary`, `delegate_codex`, `claude_binary` — use a specific `codex` or `claude`.
+- `codex_binary`, `delegate_codex`, `claude_binary` — use a specific `codex` or `claude`. Without `codex_binary`, the
+  gateway runs Desktop's own Codex CLI when the Desktop on this machine starts it (the one Desktop runs without
+  CCodex), otherwise the newest `codex` on the machine; a plain `codex …` in a terminal runs the first one on PATH.
 
 ## Troubleshooting
 
 - `ccodex doctor` checks Node, Codex and Claude and their logins, the prebuilt native
-  relay (`@gkorepanov/ccodex-relay-*`), the gateway and the install, and says what to run.
+  relay (`@gkorepanov/ccodex-relay-*`), the gateway and the install, and says what to run. It warns when npm has a
+  newer Codex: `ccodex update` updates an npm global install of Codex along with CCodex (a Desktop update can need
+  a newer Codex on a host the App reaches over SSH).
 - The gateway's log is `~/.codex/app-server-daemon/app-server.stderr.log`, rewritten at
   each gateway start; set `log_level = "debug"` for more.
 - For a bug report, `rpc_capture = true` records every App message to

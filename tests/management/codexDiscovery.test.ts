@@ -2,11 +2,16 @@ import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { findInstalledCodex } from "../../src/config.js";
+import { findInstalledCodex, loadConfig, stockCodex } from "../../src/config.js";
 
 const env = { ...process.env };
 let root: string;
-const executable = (path: string) => { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, "#!/bin/sh\n"); chmodSync(path, 0o755); return path; };
+const executable = (path: string, version?: string) => {
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, `#!/bin/sh\n${version ? `echo "codex-cli ${version}"\n` : ""}`);
+  chmodSync(path, 0o755);
+  return path;
+};
 
 describe("the stock codex CCodex runs", () => {
   beforeEach(() => {
@@ -32,5 +37,23 @@ describe("the stock codex CCodex runs", () => {
     executable(join(root, "npm", "codex"));
     process.env.PATH = [join(root, "local-bin"), join(root, "ccodex", "bin"), join(root, "npm")].join(":");
     expect(findInstalledCodex()).toBe(join(root, "ccodex", "backups", "remote-codex"));
+  });
+
+  it("for the gateway: codex_binary if set; for a local Desktop launch, Desktop's own CLI; else the newest one", async () => {
+    const npm = executable(join(root, "npm", "codex"), "0.159.2");
+    const brew = executable(join(root, "brew", "codex"), "0.164.0");
+    const desktop = executable(join(root, "ChatGPT.app", "Contents", "Resources", "codex-cli", "bin", "codex"), "0.164.0-alpha.11.1");
+    process.env.PATH = [join(root, "ccodex", "bin"), join(root, "npm"), join(root, "brew")].join(":");
+    delete process.env.CCODEX_CODEX;
+    process.env.CCODEX_CONFIG = join(root, "none.toml");
+    delete process.env.CODEX_APP_TOOLS_PIPE_PATH;
+    // Over SSH (or from a terminal): the newest, a stable release above Desktop's alpha of it.
+    expect(await stockCodex(loadConfig(), desktop)).toBe(brew);
+    expect(await stockCodex(loadConfig(), undefined)).toBe(brew);
+    // Started for the Desktop on this machine: what Desktop runs without CCodex.
+    process.env.CODEX_APP_TOOLS_PIPE_PATH = join(root, "app-tools.sock");
+    expect(await stockCodex(loadConfig(), desktop)).toBe(desktop);
+    process.env.CCODEX_CODEX = npm;
+    expect(await stockCodex(loadConfig(), desktop)).toBe(npm);
   });
 });

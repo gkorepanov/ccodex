@@ -1,9 +1,7 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { join, resolve } from "node:path";
-import type { Config } from "../config.js";
+import { codexVersion, stockCodex, type Config } from "../config.js";
 import type { DaemonCommand } from "../cli/args.js";
 import { probeAppServer, type ProbeInfo } from "./probe.js";
 import {
@@ -28,7 +26,6 @@ import {
   type DaemonSettings,
 } from "./settings.js";
 
-const execFileAsync = promisify(execFile);
 const START_TIMEOUT_MS = 30_000;
 const POLL_MS = 50;
 
@@ -66,12 +63,11 @@ function paths(config: Config, wrapperPath: string): DaemonPaths {
   };
 }
 
-async function stockVersion(realCodex: string): Promise<string> {
-  const { stdout } = await execFileAsync(realCodex, ["--version"], {
-    env: { ...process.env, CODEX_CLI_PATH: undefined },
-  });
-  const version = stdout.trim().split(/\s+/u)[1];
-  if (!version) throw new Error(`Codex version output was malformed: ${stdout.trim()}`);
+/** The version of the codex the gateway runs as stock. */
+async function stockVersion(config: Config): Promise<string> {
+  const codex = await stockCodex(config);
+  const version = await codexVersion(codex);
+  if (!version) throw new Error(`Codex gave no version: ${codex}`);
   return version;
 }
 
@@ -117,7 +113,7 @@ class HybridDaemon {
   }
 
   private getVersion(): Promise<string> {
-    return this.version ??= stockVersion(this.config.codex);
+    return this.version ??= stockVersion(this.config);
   }
 
   public run(invocation: DaemonInvocation): Promise<JsonOutput> {

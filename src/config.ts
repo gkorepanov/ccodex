@@ -1,12 +1,17 @@
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 import { parse } from "smol-toml";
+import { compareSemver } from "./management/shimSelect.js";
 
 export interface Config {
   /** The codex installed on the machine (PATH, skipping our shims), or `codex_binary`. */
   readonly codex: string;
+  /** `codex_binary` (or `CCODEX_CODEX`) is set: the gateway runs that one too. */
+  readonly codexConfigured: boolean;
   readonly claudeBinary: string;
   readonly claudeHome: string;
   readonly productHome: string;
@@ -114,17 +119,52 @@ export function isCcodex(path: string, home = productHome()): boolean {
   return inside(path, join(home, "bin")) || inside(path, join(home, "versions")) || real === own || real.includes("/@gkorepanov/ccodex/");
 }
 
-/** First `codex` on PATH that is not CCodex; at `remoteCodexPath()` that is the codex CCodex displaced there. */
-export function findInstalledCodex(home = productHome()): string | undefined {
+/** Every `codex` on PATH that is not CCodex, in PATH order; at `remoteCodexPath()` the codex CCodex displaced there. */
+export function installedCodexes(home = productHome()): string[] {
   const remote = remoteCodexPath();
   const displaced = displacedCodexPath(home);
+  const found = new Map<string, string>();
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     const candidate = resolve(directory || ".", "codex");
     if (!existsSync(candidate)) continue;
-    if (!isCcodex(candidate, home)) return candidate;
-    if (candidate === remote && existsSync(displaced) && !isCcodex(displaced, home)) return displaced;
+    const codex = !isCcodex(candidate, home) ? candidate
+      : candidate === remote && existsSync(displaced) && !isCcodex(displaced, home) ? displaced : undefined;
+    if (codex && !found.has(realpathSync(codex))) found.set(realpathSync(codex), codex);
   }
-  return undefined;
+  return [...found.values()];
+}
+
+export function findInstalledCodex(home = productHome()): string | undefined {
+  return installedCodexes(home)[0];
+}
+
+/** Codex Desktop's own CLI on this machine (macOS app bundle, Linux package), newest layout first. */
+export function desktopCodex(): string | undefined {
+  const apps = ["/Applications/ChatGPT.app", join(homedir(), "Applications", "ChatGPT.app")].flatMap((app) =>
+    [join(app, "Contents", "Resources", "codex-cli", "bin", "codex"), join(app, "Contents", "Resources", "codex")]);
+  return [...apps, "/usr/lib/chatgpt/resources/codex-cli/bin/codex", "/usr/lib/chatgpt/resources/codex"].find((path) => existsSync(path));
+}
+
+const execFileAsync = promisify(execFile);
+
+/** A codex's version (`codex-cli 0.164.0` → `0.164.0`); undefined when it gives none. */
+export async function codexVersion(codex: string): Promise<string | undefined> {
+  const output = await execFileAsync(codex, ["--version"], { env: { ...process.env, CODEX_CLI_PATH: undefined }, timeout: 15_000 })
+    .then(({ stdout }) => stdout, () => "");
+  return /\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b/u.exec(output)?.[1];
+}
+
+/**
+ * The codex the gateway runs as stock: `codex_binary` when set; started for a local Desktop, Desktop's own CLI (what
+ * it runs without CCodex, so always one it works with); else, as for Desktop over SSH, the newest on the machine.
+ */
+export async function stockCodex(config: Config, desktop = desktopCodex()): Promise<string> {
+  if (config.codexConfigured) return config.codex;
+  if (desktop && process.env.CODEX_APP_TOOLS_PIPE_PATH) return desktop;
+  const candidates = await Promise.all([...installedCodexes(config.productHome), ...desktop ? [desktop] : []]
+    .map(async (path) => ({ path, version: await codexVersion(path) })));
+  const known = candidates.filter((candidate): candidate is { path: string; version: string } => candidate.version !== undefined);
+  return known.sort((left, right) => compareSemver(right.version, left.version))[0]?.path ?? config.codex;
 }
 
 export function loadConfig(): Config {
@@ -137,6 +177,7 @@ export function loadConfig(): Config {
   const renamePrompt = typeof file.rename_prompt === "string" && file.rename_prompt.trim() ? file.rename_prompt.trim() : undefined;
   return {
     codex,
+    codexConfigured: configuredCodex !== undefined,
     claudeBinary: process.env.CCODEX_CLAUDE_BINARY ?? file.claude_binary ?? bundledClaudeExecutable(),
     claudeHome: claudeHome(),
     productHome: home,

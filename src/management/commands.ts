@@ -1,11 +1,11 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { delegate } from "../cli/delegate.js";
-import { claudeHome, defaultConfigToml, displacedCodexPath, findInstalledCodex, isCcodex, productHome, remoteCodexPath, type Config } from "../config.js";
+import { claudeHome, codexVersion, defaultConfigToml, displacedCodexPath, findInstalledCodex, installedCodexes, isCcodex, productHome, remoteCodexPath, stockCodex, type Config } from "../config.js";
 import { probeAppServer } from "../daemon/probe.js";
 import { reconcileManagedProcess, stopManagedProcess } from "../daemon/supervisor.js";
 import { reconcileOwnedGateway, stopSocketOwner } from "../daemon/ownership.js";
@@ -248,18 +248,43 @@ export async function setup(args: readonly string[]): Promise<number> {
 
 export async function update(args: readonly string[]): Promise<number> {
   const channel = args.includes("--next") ? "next" : "latest";
+  const check = args.includes("--check");
   const { stdout } = await execute("npm", ["view", PACKAGE, `dist-tags.${channel}`, "--json"], { timeout: 30_000 });
   const latest = JSON.parse(stdout) as string;
   const current = readManifest()?.activeVersion;
-  if (current && compareSemver(latest, current) <= 0) {
-    process.stdout.write(`CCodex ${current} is current.\n`);
-    return 0;
+  let status = 0;
+  if (current && compareSemver(latest, current) <= 0) process.stdout.write(`CCodex ${current} is current.\n`);
+  else if (check) process.stdout.write(`CCodex ${latest} is available (current: ${current ?? "none"}).\n`);
+  else status = await setup(["--version", latest]);
+  await updateCodex(check);
+  return status;
+}
+
+/** The latest Codex on npm, newer than `version`; undefined when it isn't (or npm can't tell). */
+async function newerCodex(version: string | undefined): Promise<string | undefined> {
+  const latest = (await execute("npm", ["view", "@openai/codex", "version"], { timeout: 30_000 }).catch(() => ({ stdout: "" }))).stdout.trim();
+  return latest && (!version || compareSemver(latest, version) > 0) ? latest : undefined;
+}
+
+/**
+ * Codex too, as Desktop over SSH needs a recent app-server: an npm global install is updated, any other only named
+ * (its own package manager updates it).
+ */
+async function updateCodex(check: boolean): Promise<void> {
+  const root = (await execute("npm", ["root", "-g"], { timeout: 30_000 })).stdout.trim();
+  const installed = installedCodexes();
+  const npmCodex = installed.find((path) => realpathSync(path).startsWith(`${join(root, "@openai", "codex")}/`));
+  const codex = npmCodex ?? installed[0];
+  if (!codex) return;
+  const version = await codexVersion(codex);
+  const latest = await newerCodex(version);
+  if (!latest) process.stdout.write(`Codex ${version} is current (${codex}).\n`);
+  else if (!npmCodex) process.stdout.write(`Codex ${latest} is available (${codex}: ${version}); update it the way you installed it, e.g. brew upgrade codex.\n`);
+  else if (check) process.stdout.write(`Codex ${latest} is available (current: ${version}).\n`);
+  else {
+    await execute("npm", ["install", "-g", `@openai/codex@${latest}`], { timeout: 600_000 });
+    process.stdout.write(`Codex ${version} → ${latest}. Restart the gateway: codex app-server daemon restart\n`);
   }
-  if (args.includes("--check")) {
-    process.stdout.write(`CCodex ${latest} is available (current: ${current ?? "none"}).\n`);
-    return 0;
-  }
-  return setup(["--version", latest]);
 }
 
 export async function uninstall(args: readonly string[]): Promise<number> {
@@ -302,16 +327,23 @@ async function version(command: string, args: readonly string[]): Promise<string
 
 /** Minimal health report: runtimes, auth, relay, gateway. */
 export async function doctor(config: Config, json: boolean): Promise<number> {
-  const check = async (id: string, run: () => Promise<string> | string): Promise<{ id: string; ok: boolean; detail: string }> => {
+  type Outcome = string | { detail: string; warning?: string };
+  const check = async (id: string, run: () => Promise<Outcome> | Outcome): Promise<{ id: string; ok: boolean; detail: string; warning?: string }> => {
     try {
-      return { id, ok: true, detail: await run() };
+      const outcome = await run();
+      return { id, ok: true, ...typeof outcome === "string" ? { detail: outcome } : outcome };
     } catch (error) {
       return { id, ok: false, detail: error instanceof Error ? error.message.split("\n")[0]! : String(error) };
     }
   };
   const checks = await Promise.all([
     check("node", () => process.version),
-    check("codex", async () => `${config.codex} (${await version(config.codex, ["--version"])})`),
+    check("codex", async () => {
+      const codex = await stockCodex(config);
+      const current = await codexVersion(codex);
+      const latest = await newerCodex(current);
+      return { detail: `${codex} (${current})`, ...latest ? { warning: `npm has ${latest} → run: ccodex update` } : {} };
+    }),
     check("codex-auth", async () => {
       const status = await version(config.codex, ["login", "status"]);
       if (/not logged in/iu.test(status)) throw new Error(`${status} → run: ccodex auth codex`);
@@ -343,7 +375,7 @@ export async function doctor(config: Config, json: boolean): Promise<number> {
     }),
   ]);
   if (json) process.stdout.write(`${JSON.stringify({ ok: checks.every((item) => item.ok || item.id === "gateway"), checks }, null, 2)}\n`);
-  else for (const item of checks) process.stdout.write(`${item.ok ? "✓" : "✗"} ${item.id}: ${item.detail}\n`);
+  else for (const item of checks) process.stdout.write(`${item.ok ? item.warning ? "⚠" : "✓" : "✗"} ${item.id}: ${item.detail}${item.warning ? `, ${item.warning}` : ""}\n`);
   return checks.every((item) => item.ok || item.id === "gateway") ? 0 : 1;
 }
 
