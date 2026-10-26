@@ -1,11 +1,10 @@
 import { resolve } from "node:path";
 import type { Config } from "../config.js";
 
-const delegatedAppServerCommands = new Set([
-  "generate-ts",
-  "generate-json-schema",
-  "help",
-]);
+/** What only prints and exits, no server (help, schemas, Desktop's startup config check): stock answers it. */
+function printsAndExits(value: string): boolean {
+  return value === "help" || value === "-h" || value === "--help" || value.startsWith("generate-") || value.startsWith("--print-");
+}
 
 export type DaemonCommand =
   | "bootstrap"
@@ -19,12 +18,13 @@ export type DaemonCommand =
 export type Invocation =
   | { readonly kind: "delegate" }
   | { readonly kind: "mcpServer" }
-  | { readonly kind: "daemon"; readonly command: DaemonCommand; readonly remoteControl: boolean }
+  | { readonly kind: "daemon"; readonly command: DaemonCommand; readonly remoteControl: boolean; readonly ignored: string[] }
   | { readonly kind: "proxy"; readonly socketPath: string; readonly proxyArgs: string[] }
   | {
       readonly kind: "stdioFrontend";
       readonly socketPath: string;
       readonly configOverrides: string[];
+      readonly ignored: string[];
     }
   | { readonly kind: "gateway"; readonly socketPath: string; readonly stockArgs: string[] };
 
@@ -40,19 +40,12 @@ const daemonCommands = new Set<DaemonCommand>([
 
 function daemonInvocation(args: readonly string[]): Invocation {
   const command = args[0];
-  if (!command || command === "help" || command === "--help" || command === "-h") {
-    return { kind: "delegate" };
-  }
-  if (!daemonCommands.has(command as DaemonCommand)) {
-    throw new Error(`Unsupported app-server daemon command '${command}'.`);
-  }
+  // A command CCodex doesn't run itself (help, stock's newer ones) is stock's to answer; its own (start, stop...) run
+  // with options it doesn't know ignored, never handed to stock: stock's daemon would take the socket from CCodex's.
+  if (!command || printsAndExits(command) || !daemonCommands.has(command as DaemonCommand)) return { kind: "delegate" };
   const options = args.slice(1);
-  const remoteControl = options.includes("--remote-control");
-  const unexpected = options.filter((option) => option !== "--remote-control");
-  if (unexpected.length > 0 || (command !== "bootstrap" && remoteControl)) {
-    throw new Error(`Unexpected options for app-server daemon ${command}: ${options.join(" ")}`);
-  }
-  return { kind: "daemon", command: command as DaemonCommand, remoteControl };
+  const remoteControl = command === "bootstrap" && options.includes("--remote-control");
+  return { kind: "daemon", command: command as DaemonCommand, remoteControl, ignored: options.filter((option) => !(remoteControl && option === "--remote-control")) };
 }
 
 function optionValue(args: readonly string[], name: string): string | undefined {
@@ -113,14 +106,10 @@ export function classifyInvocation(args: readonly string[], config: Config): Inv
   const appArgs = args.slice(appServerIndex + 1);
   const daemonIndex = appArgs.indexOf("daemon");
   if (daemonIndex >= 0) return daemonInvocation(appArgs.slice(daemonIndex + 1));
-  const command = appArgs.find((value) =>
-    value === "proxy" || delegatedAppServerCommands.has(value),
-  );
-  if (command && delegatedAppServerCommands.has(command)) return { kind: "delegate" };
-  // Desktop (26.1021+) reads its startup requirements from stock's JSON before it starts: no server runs.
-  if (appArgs.includes("--print-startup-config")) return { kind: "delegate" };
+  // Desktop (26.1021+) reads its startup requirements with `--print-startup-config` before it starts.
+  if (appArgs.some(printsAndExits)) return { kind: "delegate" };
 
-  if (command === "proxy") {
+  if (appArgs.includes("proxy")) {
     const configuredSocket = optionValue(appArgs, "--sock");
     const proxyArgs = stripOption(appArgs.filter((value) => value !== "proxy"), "--sock");
     return {
@@ -137,6 +126,8 @@ export function classifyInvocation(args: readonly string[], config: Config): Inv
       kind: "stdioFrontend",
       socketPath: config.publicSocket,
       configOverrides: configOverrides(args),
+      // The gateway runs on: a launch option it doesn't take (stock's newer ones) is only noted.
+      ignored: stripOption(stripOption(stripOption(appArgs, "--listen"), "-c"), "--config").filter((value) => value !== "--stdio" && !value.startsWith("-c")),
     };
   }
   const socketPath = socketPathFromListen(listen, config);

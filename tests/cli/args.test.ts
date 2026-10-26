@@ -44,20 +44,22 @@ describe("classifyInvocation", () => {
       kind: "daemon",
       command: "start",
       remoteControl: false,
+      ignored: [],
     });
     expect(classifyInvocation(["app-server", "daemon", "bootstrap", "--remote-control"], config)).toEqual({
       kind: "daemon",
       command: "bootstrap",
       remoteControl: true,
+      ignored: [],
     });
     expect(classifyInvocation(["app-server", "daemon", "--help"], config)).toEqual({ kind: "delegate" });
   });
 
-  it("rejects unsupported daemon commands and options instead of falling into stock standalone", () => {
-    expect(() => classifyInvocation(["app-server", "daemon", "pid-update-loop"], config))
-      .toThrow("Unsupported app-server daemon command");
-    expect(() => classifyInvocation(["app-server", "daemon", "start", "--remote-control"], config))
-      .toThrow("Unexpected options");
+  it("hands stock's daemon commands CCodex doesn't run to stock, runs its own with options it doesn't know ignored", () => {
+    expect(classifyInvocation(["app-server", "daemon", "update"], config)).toEqual({ kind: "delegate" });
+    // Never stock's start: its daemon would take the socket from CCodex's.
+    expect(classifyInvocation(["app-server", "daemon", "start", "-c", "a=1", "--enable", "x", "--remote-control"], config))
+      .toEqual({ kind: "daemon", command: "start", remoteControl: false, ignored: ["-c", "a=1", "--enable", "x", "--remote-control"] });
   });
 
   it("delegates Desktop's startup config check (it prints stock's requirements, no server starts)", () => {
@@ -65,18 +67,20 @@ describe("classifyInvocation", () => {
       .toEqual({ kind: "delegate" });
   });
 
-  it("delegates schema generation", () => {
-    expect(classifyInvocation(["app-server", "generate-ts", "--out", "schemas"], config))
-      .toEqual({ kind: "delegate" });
+  it("delegates what only prints and exits: help, schema generation, any --print- option", () => {
+    for (const args of [["generate-ts", "--out", "schemas"], ["generate-json-schema"], ["help"], ["--help"], ["-h"], ["--print-something-new"]]) {
+      expect(classifyInvocation(["app-server", ...args], config)).toEqual({ kind: "delegate" });
+    }
   });
 
   it("routes bare and explicit stdio app-server launches through the existing gateway", () => {
-    expect(classifyInvocation(["app-server", "--analytics-default-enabled"], config))
-      .toEqual({ kind: "stdioFrontend", socketPath: config.publicSocket, configOverrides: [] });
+    // Launch options the frontend doesn't take are only noted.
+    expect(classifyInvocation(["app-server", "--analytics-default-enabled", "--strict-config"], config))
+      .toEqual({ kind: "stdioFrontend", socketPath: config.publicSocket, configOverrides: [], ignored: ["--analytics-default-enabled", "--strict-config"] });
     expect(classifyInvocation(["app-server", "--stdio"], config))
-      .toEqual({ kind: "stdioFrontend", socketPath: config.publicSocket, configOverrides: [] });
-    expect(classifyInvocation(["app-server", "--listen", "stdio://"], config))
-      .toEqual({ kind: "stdioFrontend", socketPath: config.publicSocket, configOverrides: [] });
+      .toEqual({ kind: "stdioFrontend", socketPath: config.publicSocket, configOverrides: [], ignored: [] });
+    expect(classifyInvocation(["app-server", "--listen", "stdio://", "-c", "a=1"], config))
+      .toEqual({ kind: "stdioFrontend", socketPath: config.publicSocket, configOverrides: ["a=1"], ignored: [] });
     expect(classifyInvocation(["app-server", "--listen", "unix://"], config))
       .toMatchObject({ kind: "gateway", socketPath: config.publicSocket });
   });
@@ -93,6 +97,7 @@ describe("classifyInvocation", () => {
         "features.code_mode_host=true",
         "mcp_servers.codex_app={ command=\"app-tools\" }",
       ],
+      ignored: [],
     });
   });
 });

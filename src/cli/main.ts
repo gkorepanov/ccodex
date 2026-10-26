@@ -18,6 +18,9 @@ async function main(): Promise<number> {
   if (management !== undefined) return management;
   const config = loadConfig();
   const invocation = classifyInvocation(args, config);
+  if ((invocation.kind === "daemon" || invocation.kind === "stdioFrontend") && invocation.ignored.length) {
+    new Logger(config.logLevel).info("cli.options-ignored", { args, ignored: invocation.ignored });
+  }
 
   if (invocation.kind === "delegate") return delegate(config.delegateCodex, args);
   if (invocation.kind === "mcpServer") {
