@@ -117,6 +117,8 @@ export function classifyInvocation(args: readonly string[], config: Config): Inv
     value === "proxy" || delegatedAppServerCommands.has(value),
   );
   if (command && delegatedAppServerCommands.has(command)) return { kind: "delegate" };
+  // Desktop (26.1021+) reads its startup requirements from stock's JSON before it starts: no server runs.
+  if (appArgs.includes("--print-startup-config")) return { kind: "delegate" };
 
   if (command === "proxy") {
     const configuredSocket = optionValue(appArgs, "--sock");

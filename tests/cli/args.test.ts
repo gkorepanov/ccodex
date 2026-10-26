@@ -60,6 +60,11 @@ describe("classifyInvocation", () => {
       .toThrow("Unexpected options");
   });
 
+  it("delegates Desktop's startup config check (it prints stock's requirements, no server starts)", () => {
+    expect(classifyInvocation(["app-server", "--print-startup-config", "--startup-client-info", "{\"name\":\"codex_desktop\"}"], config))
+      .toEqual({ kind: "delegate" });
+  });
+
   it("delegates schema generation", () => {
     expect(classifyInvocation(["app-server", "generate-ts", "--out", "schemas"], config))
       .toEqual({ kind: "delegate" });
