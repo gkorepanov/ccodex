@@ -198,6 +198,10 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   const command = /^\/(\w+)\s*([\s\S]*)$/u.exec(text);
   if (command?.[1] === "compact" && (!transcript.humanSinceCompaction() || fakeClaude.compactError)) {
     const output = fakeClaude.compactError ?? "Not enough messages to compact.";
+    if (fakeClaude.compactError) {
+      yield base(sessionId, { type: "system", subtype: "status", status: "compacting", uuid: randomUUID() });
+      yield base(sessionId, { type: "system", subtype: "status", status: null, compact_result: "failed", compact_error: output, uuid: randomUUID() });
+    }
     transcript.write({ type: "user", uuid, message: { role: "user", content: `<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args>${command[2]}</command-args>` } });
     transcript.write({ type: "system", subtype: "local_command", content: `<local-command-stdout>${output}</local-command-stdout>` });
     yield base(sessionId, { type: "system", subtype: "local_command_output", content: output });
@@ -212,7 +216,9 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
     transcript.write({ type: "user", isMeta: true, message: { role: "user", content: "<local-command-caveat>Caveat</local-command-caveat>" } });
     transcript.write({ type: "user", uuid, message: { role: "user", content: `<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args>${command[2]}</command-args>` } });
     transcript.write({ type: "user", message: { role: "user", content: "<local-command-stdout>Compacted</local-command-stdout>" } });
+    yield base(sessionId, { type: "system", subtype: "status", status: "compacting", uuid: randomUUID() });
     for (const hook of options.hooks?.PostCompact ?? []) for (const run of hook.hooks) await run({ compact_summary: summary });
+    yield base(sessionId, { type: "system", subtype: "status", status: null, compact_result: "success", uuid: randomUUID() });
     yield base(sessionId, { type: "system", subtype: "compact_boundary", uuid: boundary, compact_metadata: { trigger: "manual" } });
     yield* finish("");
     return;

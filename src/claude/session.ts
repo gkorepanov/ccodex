@@ -48,6 +48,8 @@ interface ActiveTurn {
   waiting: boolean;
   /** Claude Code waits to retry a request (a usage limit's reset, an overloaded API): the item that tells so. */
   retry?: { readonly item: ThreadItem & { type: "reasoning" }; readonly limit: boolean };
+  /** Claude compacts the conversation: the item shown while it does. */
+  compaction?: ThreadItem;
 }
 
 interface Response {
@@ -920,10 +922,20 @@ export class ClaudeSession {
         }
         if (m.state === "idle") this.maybeComplete();
         return;
+      // Like stock, a compaction shows from its start (a long chat's takes minutes); one that fails stays unfinished.
+      // Its id live is the start's: history names it after the boundary.
+      case "status":
+        if (m.status === "compacting" && this.turn && !this.turn.compaction) {
+          this.turn.compaction = { type: "contextCompaction", id: m.uuid };
+          this.itemStarted(this.turn.compaction);
+        }
+        if (m.compact_result === "failed" && this.turn) this.turn.compaction = undefined;
+        return;
       case "compact_boundary": {
         this.ensureTurn();
-        const item: ThreadItem = { type: "contextCompaction", id: m.uuid };
-        this.itemStarted(item);
+        const item = this.turn!.compaction ?? { type: "contextCompaction", id: m.uuid };
+        if (!this.turn!.compaction) this.itemStarted(item);
+        this.turn!.compaction = undefined;
         this.itemCompleted(item);
         return;
       }

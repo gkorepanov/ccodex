@@ -1404,6 +1404,21 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(client.notifications("turn/started", threadId).map((message) => message.params.turn.id)).toEqual([turn.id]);
   });
 
+  it("shows Claude's compaction from its start, like stock; one that fails stays unfinished", async () => {
+    const threadId = await claudeThread();
+    await client.turn(threadId, "first");
+    const compactions = (method: string) => client.notifications(method, threadId).filter((message) => message.params.item.type === "contextCompaction").map((message) => message.params.item.id);
+    await client.turn(threadId, "/compact");
+    const started = compactions("item/started");
+    expect(started).toHaveLength(1);
+    expect(compactions("item/completed")).toEqual(started);
+    await client.turn(threadId, "second");
+    fakeClaude.compactError = "Error during compaction: summarization produced empty response";
+    await client.turn(threadId, "/compact");
+    expect(compactions("item/started")).toHaveLength(2);
+    expect(compactions("item/completed")).toEqual(started);
+  });
+
   it("fails a switch to gpt with Claude's compaction error, never with an earlier compaction's summary", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "first");
