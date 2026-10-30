@@ -18,6 +18,10 @@ improve_models_formatting_for_codex_app = true
 # chat as GPT does.
 claude_visualize = true
 
+# Share stock Codex MCP tools/connectors with Claude through a separate codex_native server.
+# Off by default. Keeps the user's existing Claude MCP servers and native approvals.
+# native_mcp = true
+
 # codex_binary = "/path/to/codex"   # default: Desktop's own CLI when this machine's Desktop starts CCodex, else the newest `codex`
 # delegate_codex = "/path/to/codex" # what plain `codex …` (TUI, exec, login) runs; default: codex_binary, else the first `codex` on PATH
 # claude_binary = "/path/to/claude" # default: the Claude Code bundled with the Agent SDK

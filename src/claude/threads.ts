@@ -23,6 +23,7 @@ import { preview, summarizeTranscript, userText, type TranscriptHeader } from ".
 import { claudeMode, codexPermissions, mapClaudeModel, mapSkill, permissionSettings, withProbeQuery } from "./sdk.js";
 import { killProcesses, sessionProcesses, type SessionProcess } from "./processes.js";
 import { ClaudeSession, type SessionSettings } from "./session.js";
+import { nativeAccessFrom } from "./nativeAccess.js";
 import { stockVisualizeSkill, writeVisualizePlugin } from "./visualize.js";
 import type { Meta } from "../meta.js";
 
@@ -593,6 +594,7 @@ export class ClaudeThreads {
       effort: summary ? this.recordedEffort(summary) : null,
       fast: summary?.serviceTier === "fast",
       ...recordedPermissions(threadId, summary?.permissionMode, this.gateway.meta),
+      ...(this.config.nativeMcp ? { nativeAccess: this.gateway.meta.nativeMcpAccess(threadId) ?? {} } : {}),
     };
   }
 
@@ -649,6 +651,7 @@ export class ClaudeThreads {
       effort: params.effort ?? params.collaborationMode?.settings?.reasoning_effort ?? current.effort,
       fast: tier === undefined ? current.fast : tier === "fast" || tier === "priority",
       ...permissionSettings(params, current),
+      ...(this.config.nativeMcp ? { nativeAccess: nativeAccessFrom(params, current.nativeAccess) } : {}),
     };
   }
 
@@ -1198,10 +1201,17 @@ export class ClaudeThreads {
       setImmediate(() => this.gateway.emit(threadId, "thread/tokenUsage/updated", { threadId, turnId: turns.at(-1)?.id ?? null, tokenUsage: { ...usage, modelContextWindow } }));
     }
     // A sub-agent has no session of its own: it shows the model, effort and directory it runs with.
-    const settings = thread.parentThreadId && thread.model
+    let settings = thread.parentThreadId && thread.model
       ? { ...this.settings(threadId), cwd: thread.cwd, model: this.pickerModel(thread.model.slice(this.config.modelPrefix.length)), effort: thread.reasoningEffort ?? null }
       : this.settings(threadId);
-    if (!thread.parentThreadId && this.catalog.get(threadId)) this.prewarm(this.session(threadId), RESUME_WARM_MS);
+    if (!thread.parentThreadId && this.catalog.get(threadId)) {
+      const session = this.session(threadId);
+      if (this.config.nativeMcp) {
+        await session.updateSettings(params);
+        settings = session.settings;
+      }
+      this.prewarm(session, RESUME_WARM_MS);
+    }
     const response: JsonObject = {
       thread: { ...thread, turns: params.excludeTurns ? [] : turns },
       ...this.settingsResponse(settings),

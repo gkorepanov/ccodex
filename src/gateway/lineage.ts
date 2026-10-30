@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { codexPermissions, permissionSettings } from "../claude/sdk.js";
+import { nativeAccessFrom } from "../claude/nativeAccess.js";
 import type { Provider, Segment } from "../meta.js";
 import { invalidRequest, requestedModel, type JsonObject, type Thread, type Turn } from "../protocol/codex.js";
 import { historyCursors, occurrencesPage, paginateItems, paginateTurns, startedTurn, turnCursor, turnView } from "../protocol/turnPagination.js";
@@ -587,7 +588,8 @@ export class Lineages {
     // under its own id.
     const { thread } = await connection.upstream.request("thread/read", { threadId: source.threadId });
     if (segments.length === 1 && !existsSync(thread.path)) {
-      const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd: thread.cwd, model: null, effort: null, fast: false, permissionMode: "default", plan: false }), publicId);
+      const nativeAccess = this.gateway.config.nativeMcp ? { nativeAccess: this.gateway.meta.nativeMcpAccess(publicId) ?? {} } : {};
+      const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd: thread.cwd, model: null, effort: null, fast: false, permissionMode: "default", plan: false, ...nativeAccess }), publicId);
       for (const viewer of viewers) this.gateway.subscribe(publicId, viewer);
       this.gateway.titles.track(publicId);
       tell("thread/settings/updated", { threadId: publicId, threadSettings: this.gateway.claude.threadSettings(session.settings) });
@@ -605,7 +607,12 @@ export class Lineages {
     // The goal goes on with the chat's next backend: stock pursues it no more (a paused one it doesn't; clearing it
     // would blink the goal away for every client until the switch ends).
     if (goal?.status === "active") await connection.upstream.request("thread/goal/clear", { threadId: source.threadId });
-    const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd: stock.cwd, model: null, effort: null, fast: false, ...permissions }));
+    const nativeAccess = this.gateway.config.nativeMcp ? { nativeAccess: nativeAccessFrom({
+      ...stock, ...(stock.activePermissionProfile?.id
+        ? { sandbox: undefined, permissions: stock.activePermissionProfile.id }
+        : { sandboxPolicy: stock.sandbox }),
+    }, this.gateway.meta.nativeMcpAccess(publicId)) } : {};
+    const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd: stock.cwd, model: null, effort: null, fast: false, ...permissions, ...nativeAccess }));
     // A backend from its first record on: its transcript is on disk before the lineage lists it.
     this.newBackends.add(session.threadId);
     for (const viewer of viewers) this.gateway.subscribe(session.threadId, viewer);

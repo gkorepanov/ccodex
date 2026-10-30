@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import type { NativeMcpAccess } from "./claude/nativeAccess.js";
 
 export type Provider = "codex" | "claude";
 
@@ -37,6 +38,8 @@ export interface MetaData {
   plans?: Record<string, Plan>;
   /** Paused goals of Claude chats: Claude's `/goal` has no pause, so pausing clears it there and keeps it here. */
   pausedGoals?: Record<string, { objective: string; createdAt: number; updatedAt: number }>;
+  /** Original native access for Claude chats and provider switches; absent entries use stock defaults. */
+  nativeMcpAccess?: Record<string, NativeMcpAccess>;
 }
 
 /**
@@ -52,7 +55,7 @@ export class Meta {
     const raw = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as Partial<MetaData> : {};
     this.data = {
       lineages: raw.lineages ?? {}, archived: raw.archived ?? [], sections: raw.sections ?? {},
-      sectionOrder: raw.sectionOrder ?? {}, claudeDefaults: raw.claudeDefaults ?? null, plans: raw.plans ?? {}, pausedGoals: raw.pausedGoals ?? {},
+      sectionOrder: raw.sectionOrder ?? {}, claudeDefaults: raw.claudeDefaults ?? null, plans: raw.plans ?? {}, pausedGoals: raw.pausedGoals ?? {}, nativeMcpAccess: raw.nativeMcpAccess ?? {},
     };
     this.reindex();
   }
@@ -171,6 +174,17 @@ export class Meta {
     delete this.data.sections[threadId];
     delete this.data.plans![threadId];
     delete this.data.pausedGoals![threadId];
+    delete this.data.nativeMcpAccess![threadId];
+    this.save();
+  }
+
+  public nativeMcpAccess(threadId: string): NativeMcpAccess | undefined {
+    return this.data.nativeMcpAccess![threadId];
+  }
+
+  public setNativeMcpAccess(threadId: string, access: NativeMcpAccess): void {
+    if (JSON.stringify(this.data.nativeMcpAccess![threadId] ?? {}) === JSON.stringify(access)) return;
+    this.data.nativeMcpAccess![threadId] = structuredClone(access);
     this.save();
   }
 

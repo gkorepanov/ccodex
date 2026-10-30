@@ -20,7 +20,9 @@ import { isNarration, messageText, readTranscriptRecords, type UserRecord } from
 import { userText } from "./native/summary.js";
 import { claudeEffort, DELEGATION_OFF, DELEGATION_ON, ULTRA } from "./delegation.js";
 import { foreignOwner, peerKey, peerMessageItem, peerOrigin, sentMessageItem, subagentFiles, type Peers } from "./peers.js";
-import { baseOptions, claudeMode } from "./sdk.js";
+import { baseOptions, claudeMode, codexPermissions } from "./sdk.js";
+import { NativeMcpBridge, nativeMcpTransport } from "./nativeMcp.js";
+import type { NativeMcpAccess } from "./nativeAccess.js";
 import { endedBackground, killedCommand, proposedChanges, startTool, stoppedCommand, updateToolInput, type ActiveTool, type BackgroundEnd } from "./toolMapper.js";
 import type { ClaudeThreads } from "./threads.js";
 import { visualizeOptions } from "./visualize.js";
@@ -35,6 +37,7 @@ export interface SessionSettings {
   permissionMode: PermissionMode;
   /** Codex plan mode (the collaboration mode). */
   plan: boolean;
+  nativeAccess?: NativeMcpAccess;
 }
 
 interface ActiveTurn {
@@ -197,6 +200,7 @@ export class ClaudeSession {
   public lastUsage: TokenUsageBreakdown = EMPTY_USAGE;
   public liveModel: string | null = null;
   private sdk?: Query;
+  private nativeMcp?: NativeMcpBridge;
   /** Last sign of life: a message from Claude, a prompt, a command. */
   public activeAt = Date.now();
   /** Claude's scheduled wakeups (CronCreate, ScheduleWakeup, /loop) as of the last turn's end: the process must stay. */
@@ -245,6 +249,7 @@ export class ClaudeSession {
     this.resumeAt = options.resumeAt;
     this.delegating = host.summary(threadId)?.delegating ?? false;
     this.keepPlan();
+    if (host.config.nativeMcp && settings.nativeAccess) host.gateway.meta.setNativeMcpAccess(threadId, settings.nativeAccess);
   }
 
   /** Claude's transcript records only its plan mode and the model it plans on: from plan mode on, the chat's own settings
@@ -317,6 +322,8 @@ export class ClaudeSession {
     this.warm.closed = true;
     this.warm.query?.close();
     this.warm = undefined;
+    this.nativeMcp?.close();
+    this.nativeMcp = undefined;
   }
 
   private ensureQuery(): Query {
@@ -337,9 +344,20 @@ export class ClaudeSession {
   private options(): Options {
     const settings = this.settings;
     const effort = claudeEffort(this.host.effort(settings));
+    if (this.host.config.nativeMcp && !this.nativeMcp) {
+      this.nativeMcp = new NativeMcpBridge(() => ({
+        threadId: this.host.gateway.meta.rewrites.get(this.threadId) ?? this.threadId, turnId: this.turn?.id ?? null,
+        model: `${this.host.config.modelPrefix}${this.liveModel ?? this.settings.model ?? "default"}`,
+        cwd: this.settings.cwd, runtimeWorkspaceRoots: [this.settings.cwd], plan: this.settings.plan,
+        access: this.settings.nativeAccess ?? {},
+        ...codexPermissions(this.settings.permissionMode, this.settings.cwd),
+      }), (method, params) => this.host.gateway.serverRequest(this.threadId, method, params),
+      (onRequest) => nativeMcpTransport(this.host.gateway.connectionSocket(), onRequest));
+    }
     return {
       ...baseOptions(this.host.config),
       ...visualizeOptions(this.host.visualizePlugin, this.threadId),
+      ...(this.nativeMcp ? { mcpServers: { codex_native: this.nativeMcp.mcpServer } } : {}),
       cwd: settings.cwd,
       ...(settings.model ? { model: settings.model } : {}),
       ...(effort ? { effort: effort as never } : {}),
@@ -391,6 +409,8 @@ export class ClaudeSession {
       if (this.turn) this.turn.error ??= `Claude stopped${failure}`;
     }
     if (this.sdk !== sdk) return;
+    this.nativeMcp?.close();
+    this.nativeMcp = undefined;
     // Claude stopped before it wrote anything (its first turn failed): the next turn starts the session anew.
     if (failure && !this.transcriptPath()) this.exists = false;
     // Context Claude never took (it stopped, or never started) fails whoever waits on it.
@@ -415,6 +435,8 @@ export class ClaudeSession {
     this.inbox?.close();
     this.inbox = undefined;
     sdk?.close();
+    this.nativeMcp?.close();
+    this.nativeMcp = undefined;
     return this.consumed;
   }
 
@@ -579,10 +601,13 @@ export class ClaudeSession {
 
   private async applyTurnSettings(params: JsonObject): Promise<void> {
     const update: JsonObject = {};
-    for (const key of ["model", "effort", "serviceTier", "approvalPolicy", "approvalsReviewer", "sandboxPolicy", "permissions", "collaborationMode"]) {
+    const keys = ["model", "effort", "serviceTier", "approvalPolicy", "approvalsReviewer", "sandboxPolicy", "permissions", "collaborationMode"];
+    // Native tools follow the turn's own access; a new directory must reach updateSettings for them to refresh.
+    if (this.host.config.nativeMcp) keys.push("sandbox", "runtimeWorkspaceRoots", "cwd", "config", "disabledPluginIds");
+    else if (params.cwd) this.settings.cwd = params.cwd;
+    for (const key of keys) {
       if (params[key] !== undefined && params[key] !== null) update[key] = params[key];
     }
-    if (params.cwd) this.settings.cwd = params.cwd;
     if (Object.keys(update).length) await this.updateSettings(update);
   }
 
@@ -593,6 +618,8 @@ export class ClaudeSession {
     const previous = this.settings;
     this.settings = next;
     this.keepPlan();
+    if (this.host.config.nativeMcp && next.nativeAccess) this.host.gateway.meta.setNativeMcpAccess(this.threadId, next.nativeAccess);
+    if (next.cwd !== previous.cwd || next.plan !== previous.plan || JSON.stringify(next.nativeAccess) !== JSON.stringify(previous.nativeAccess)) this.nativeMcp?.refresh();
     // Like stock, every client with the chat open learns the change (Desktop's composer follows it).
     this.emit("thread/settings/updated", { threadId: this.threadId, threadSettings: this.host.threadSettings(next) });
     if (this.sdk) {

@@ -33,6 +33,8 @@ export interface Config {
   readonly improveModelsFormatting: boolean;
   /** Codex's bundled visualize skill (while enabled in Codex) in Claude chats too (`claude_visualize`). */
   readonly claudeVisualize: boolean;
+  /** Stock Codex MCP tools in Claude chats too, beside Claude's own MCP servers (`native_mcp`). */
+  readonly nativeMcp: boolean;
 }
 
 export const DEFAULT_RENAME_PROMPT = `Create a concise, vivid, memorable title for the task.
@@ -195,5 +197,6 @@ export function loadConfig(): Config {
     delegateCodex: expandHome(process.env.CCODEX_DELEGATE_CODEX ?? file.delegate_codex ?? codex),
     improveModelsFormatting: file.improve_models_formatting_for_codex_app ?? true,
     claudeVisualize: file.claude_visualize ?? true,
+    nativeMcp: file.native_mcp === true,
   };
 }

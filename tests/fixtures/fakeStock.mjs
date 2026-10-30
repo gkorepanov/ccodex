@@ -117,6 +117,7 @@ const handlers = {
   },
   "thread/start": (connection, params) => {
     const thread = newThread(params);
+    if (params.sandbox === "read-only") thread.sandbox = { type: "readOnly", networkAccess: false };
     thread.subscribers = new Set([connection]);
     thread.instructions.push(params.developerInstructions ?? null);
     broadcast("thread/started", { thread: summary(thread) });
