@@ -16,7 +16,7 @@ export interface FakeClaudeLog {
 /** A signature with the block kind Claude's server gives a narration (the rest of a real one is encrypted). */
 const NARRATION_SIGNATURE = Buffer.from("\x08\x04\x12\x11\x0a\x0f\x42\x09narration", "latin1").toString("base64");
 
-export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string; spawnError: string | null; compactError: string | null; hold: Promise<void> | null; goalHold: Promise<void> | null; backgroundMs: number; modelsHold: Promise<void> | null; refusedModel: string | null; usageDown: boolean; fastOff: boolean } = {
+export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) => string; spawnError: string | null; compactError: string | null; hold: Promise<void> | null; goalHold: Promise<void> | null; backgroundMs: number; modelsHold: Promise<void> | null; contextHold: Promise<void> | null; refusedModel: string | null; usageDown: boolean; fastOff: boolean } = {
   prompts: [],
   options: [],
   calls: [],
@@ -33,6 +33,7 @@ export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) 
   backgroundMs: 500,
   /** Set: the models probe answers only once it settles. */
   modelsHold: null,
+  contextHold: null,
   /** Set: Claude lists this model but refuses to switch to it (the account or organization may not use it). */
   refusedModel: null,
   /** Set: claude.ai's usage endpoint fails, Claude's `/usage` data has no windows. */
@@ -50,6 +51,7 @@ export const fakeClaude: FakeClaudeLog & { reset(): void; reply: (text: string) 
     this.goalHold = null;
     this.backgroundMs = 500;
     this.modelsHold = null;
+    this.contextHold = null;
     this.refusedModel = null;
     this.usageDown = false;
     this.fastOff = false;
@@ -655,7 +657,7 @@ export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<Message>;
   const iterator = run();
   return Object.assign(iterator, {
     initializationResult: () => Promise.resolve({}),
-    supportedModels: () => (fakeClaude.modelsHold ?? Promise.resolve()).then(() => MODELS),
+    supportedModels: () => (fakeClaude.modelsHold ?? Promise.resolve()).then(() => structuredClone(MODELS)),
     supportedCommands: () => Promise.resolve([{ name: "review-pr", description: "Review a PR", argumentHint: "<n>" }]),
     usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: () => Promise.resolve({
       rate_limits_available: true,
@@ -681,7 +683,10 @@ export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<Message>;
       return record("backgroundTasks")(toolUseId).then(() => backgrounded);
     },
     // Like Claude with CLAUDE_CODE_AUTO_COMPACT_WINDOW=400000: Haiku's own window is smaller.
-    getContextUsage: () => Promise.resolve({ maxTokens: String(options.model).includes("haiku") ? 200_000 : 400_000 }),
+    getContextUsage: () => {
+      fakeClaude.calls.push({ method: "getContextUsage", args: [] });
+      return (fakeClaude.contextHold ?? Promise.resolve()).then(() => ({ maxTokens: String(options.model).includes("haiku") ? 200_000 : 400_000 }));
+    },
     setModel: (model: string) => {
       if (model === fakeClaude.refusedModel) return Promise.reject(new Error(`Model '${model}' is restricted by your organization's settings.`));
       options.model = model;

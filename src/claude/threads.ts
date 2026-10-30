@@ -809,23 +809,41 @@ export class ClaudeThreads {
     }
   }
 
-  /** Asks Claude for its models and keeps them for the next start. */
-  private async probeModels(): Promise<JsonObject[]> {
-    const models = await withProbeQuery(this.config, undefined, async (probe) => {
-      const models: ClaudeModel[] = await probe.supportedModels();
-      // Claude's own context budget per model: its window, capped by settings such as CLAUDE_CODE_AUTO_COMPACT_WINDOW.
-      // A model Claude lists but does not switch to here (an account or organization restriction, a failed check)
-      // stays listed as Claude lists it, with the default window.
-      for (const model of models) {
-        model.contextWindow = await probe.setModel(model.value)
-          .then(() => probe.getContextUsage({ detail: "summary" }))
-          .then((usage) => usage.maxTokens, () => undefined);
-      }
-      return models;
+  /** Publish the catalog first; the same never-prompted query fills optional context details in the background. */
+  private probeModels(): Promise<JsonObject[]> {
+    return new Promise((resolve, reject) => {
+      let published = false;
+      void withProbeQuery(this.config, undefined, async (probe) => {
+        const models: ClaudeModel[] = await probe.supportedModels();
+        for (const model of models) {
+          model.contextWindow ??= this.contextWindows.get(modelCatalogValue(model))
+            ?? (model.resolvedModel ? this.contextWindows.get(normalizeClaudeModelIdentifier(model.resolvedModel)) : undefined);
+        }
+        const basic = this.useModels(models);
+        const saved = this.saveModels(models);
+        published = true;
+        resolve(basic);
+        // A restricted model or a failed context lookup must not remove a model Claude already listed.
+        for (const model of models) {
+          model.contextWindow = await probe.setModel(model.value)
+            .then(() => probe.getContextUsage({ detail: "summary" }))
+            .then((usage) => usage.maxTokens, () => model.contextWindow);
+        }
+        this.useModels(models);
+        // Finish the base write before replacing it with the enriched snapshot.
+        await saved;
+        await this.saveModels(models);
+      }).catch((error: unknown) => {
+        if (published) this.logger.warn("claude.models.details.unavailable", { error: String(error) });
+        else reject(error);
+      });
     });
+  }
+
+  private async saveModels(models: ClaudeModel[]): Promise<void> {
     const temporary = `${this.modelsPath}.${process.pid}.tmp`;
-    void writeFile(temporary, JSON.stringify({ version: packageVersion(), models }), { mode: 0o600 }).then(() => rename(temporary, this.modelsPath)).catch(() => undefined);
-    return this.useModels(models);
+    await writeFile(temporary, JSON.stringify({ version: packageVersion(), models }), { mode: 0o600 })
+      .then(() => rename(temporary, this.modelsPath)).catch(() => undefined);
   }
 
   private useModels(models: ClaudeModel[]): JsonObject[] {
