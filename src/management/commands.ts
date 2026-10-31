@@ -13,6 +13,7 @@ import { installCliPathAgent, uninstallCliPathAgent, type CliPathAgentInstall } 
 import { relayBinary } from "../gateway/remote.js";
 import { atomicSymlink, atomicWrite } from "./files.js";
 import { compareSemver } from "./shimSelect.js";
+import { setupNode } from "./node.js";
 
 const execute = promisify(execFile);
 const PACKAGE = "@gkorepanov/ccodex";
@@ -206,10 +207,11 @@ export async function setup(args: readonly string[]): Promise<number> {
     if (code !== 0) throw new Error(`Migrating CCodex 0.4 threads failed (exit ${code}); nothing was activated.`);
   }
   const previous = readManifest();
+  const nodeExecutable = await setupNode();
   atomicSymlink(join("versions", version), paths.current);
   const shimHashes: Record<string, string> = {};
   for (const name of ["codex", "ccodex"] as const) {
-    const content = shim(name, process.execPath);
+    const content = shim(name, nodeExecutable);
     atomicWrite(join(paths.bin, name), content, 0o755);
     shimHashes[name] = sha256(content);
   }
@@ -229,7 +231,7 @@ export async function setup(args: readonly string[]): Promise<number> {
     shimHashes,
     ...(remoteCodexShim ? { remoteCodexShim } : {}),
     ...(desktopCliPath ? { desktopCliPath } : {}),
-    nodeExecutable: process.execPath,
+    nodeExecutable,
     installedAt: new Date().toISOString(),
   };
   atomicWrite(paths.manifest, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
