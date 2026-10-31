@@ -201,6 +201,7 @@ export class ClaudeSession {
   public liveModel: string | null = null;
   private sdk?: Query;
   private nativeMcp?: NativeMcpBridge;
+  private nativeSettingsUpdate: Promise<void> = Promise.resolve();
   /** Last sign of life: a message from Claude, a prompt, a command. */
   public activeAt = Date.now();
   /** Claude's scheduled wakeups (CronCreate, ScheduleWakeup, /loop) as of the last turn's end: the process must stay. */
@@ -611,17 +612,28 @@ export class ClaudeSession {
     if (Object.keys(update).length) await this.updateSettings(update);
   }
 
-  public async updateSettings(params: JsonObject): Promise<void> {
+  public updateSettings(params: JsonObject): Promise<void> {
+    if (!this.host.config.nativeMcp) return this.applySettings(params);
+    // Calculate each update from the last accepted settings, even while another SDK request is pending.
+    const update = this.nativeSettingsUpdate.then(() => this.applySettings(params));
+    this.nativeSettingsUpdate = update.catch(() => undefined);
+    return update;
+  }
+
+  private async applySettings(params: JsonObject): Promise<void> {
     const next = this.host.settingsFrom(params, this.settings);
     const changed = JSON.stringify(next) !== JSON.stringify(this.settings);
     if (!changed) return;
     const previous = this.settings;
-    this.settings = next;
-    this.keepPlan();
-    if (this.host.config.nativeMcp && next.nativeAccess) this.host.gateway.meta.setNativeMcpAccess(this.threadId, next.nativeAccess);
-    if (next.cwd !== previous.cwd || next.plan !== previous.plan || JSON.stringify(next.nativeAccess) !== JSON.stringify(previous.nativeAccess)) this.nativeMcp?.refresh();
-    // Like stock, every client with the chat open learns the change (Desktop's composer follows it).
-    this.emit("thread/settings/updated", { threadId: this.threadId, threadSettings: this.host.threadSettings(next) });
+    const publish = () => {
+      this.settings = next;
+      this.keepPlan();
+      if (this.host.config.nativeMcp && next.nativeAccess) this.host.gateway.meta.setNativeMcpAccess(this.threadId, next.nativeAccess);
+      if (next.cwd !== previous.cwd || next.plan !== previous.plan || JSON.stringify(next.nativeAccess) !== JSON.stringify(previous.nativeAccess)) this.nativeMcp?.refresh();
+      // Like stock, every client with the chat open learns the change (Desktop's composer follows it).
+      this.emit("thread/settings/updated", { threadId: this.threadId, threadSettings: this.host.threadSettings(next) });
+    };
+    if (!this.host.config.nativeMcp) publish();
     if (this.sdk) {
       if (next.model !== previous.model) await this.sdk.setModel(next.model ?? undefined);
       // The CLI settles the mode per model (no auto mode on Haiku falls back to default): a new model re-applies it.
@@ -631,6 +643,8 @@ export class ClaudeSession {
         await this.sdk.applyFlagSettings({ effortLevel: claudeEffort(effort) as never, fastMode: next.fast });
       }
     }
+    // Native calls retain committed authority until Claude accepts every part of the update.
+    if (this.host.config.nativeMcp) publish();
   }
 
   // ---- turn bookkeeping ----
