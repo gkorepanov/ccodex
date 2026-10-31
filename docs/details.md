@@ -66,8 +66,10 @@ mcp-server`, removed from Codex in `0.154`, is served by CCodex on top of `codex
 - macOS: sets `CODEX_CLI_PATH` for the local App (`launchctl setenv` plus a login
   LaunchAgent `dev.ccodex.codex-cli-path`), so the App starts CCodex instead of its bundled
   `codex`. The shims prefer a supported Node from `/Applications/ChatGPT.app` or
-  `~/Applications/ChatGPT.app`; without one they keep setup's Node. The signed `.app`
-  is never touched, so its auto-updates keep working.
+  `~/Applications/ChatGPT.app`; without one they keep setup's Node. With one, setup's
+  Node stays their fallback if the app loses its own, and its directory stays on their
+  PATH for `npm` and what `npm i -g` put there. The signed `.app` is never touched, so
+  its auto-updates keep working.
 - Claude Code: sets `cleanupPeriodDays: 36500` in `~/.claude/settings.json` when unset
   (Claude deletes transcripts older than 30 days by default, and with them your Claude
   chats), and installs the `codex-wrapper` agent and the `codex` MCP server (user scope).

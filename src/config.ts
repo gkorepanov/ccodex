@@ -173,7 +173,9 @@ export function loadConfig(): Config {
   const configPath = expandHome(process.env.CCODEX_CONFIG ?? join(home, "config.toml"));
   const file = existsSync(configPath) ? parse(readFileSync(configPath, "utf8")) as Record<string, any> : {};
   const configuredCodex = process.env.CCODEX_CODEX ?? file.codex_binary as string | undefined;
-  const codex = configuredCodex ? resolve(expandHome(configuredCodex)) : findInstalledCodex(home);
+  // Desktop's Node brings no codex onto PATH, and a Desktop launch runs Desktop's CLI anyway: don't stop before that choice.
+  const codex = configuredCodex ? resolve(expandHome(configuredCodex))
+    : findInstalledCodex(home) ?? (process.platform === "darwin" ? desktopCodex() : undefined);
   if (!codex) throw new Error("No `codex` found on PATH. Install it with `npm i -g @openai/codex` or set codex_binary in ~/.ccodex/config.toml.");
   const renamePrompt = typeof file.rename_prompt === "string" && file.rename_prompt.trim() ? file.rename_prompt.trim() : undefined;
   return {
