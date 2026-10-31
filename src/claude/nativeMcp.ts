@@ -21,7 +21,7 @@ export interface NativeMcpTransport {
   request(method: string, params: Record<string, any>): Promise<any>;
   close(): void;
 }
-type Interaction = (method: string, params: Record<string, any>) => Promise<unknown>;
+type Interaction = (method: string, params: Record<string, any>, signal?: AbortSignal) => Promise<unknown>;
 const INTERACTIONS = new Set([
   "mcpServer/elicitation/request", "item/tool/requestUserInput", "tool/requestUserInput",
   "item/commandExecution/requestApproval", "item/fileChange/requestApproval",
@@ -80,6 +80,7 @@ export class NativeMcpBridge {
   private serial: Promise<unknown> = Promise.resolve();
   private closed = false;
   private callContext?: NativeMcpContext;
+  private callAbort?: AbortController;
 
   public constructor(
     private readonly context: () => NativeMcpContext,
@@ -113,11 +114,14 @@ export class NativeMcpBridge {
     }
   }
 
-  private async requestFromStock(method: string, params: Record<string, any>): Promise<unknown> {
+  private async requestFromStock(method: string, params: Record<string, any>, connection: NativeMcpTransport): Promise<unknown> {
     const owner = this.callContext;
-    if (!owner || !INTERACTIONS.has(method)) throw new Error("Unsupported or unowned native interaction.");
+    const abort = this.callAbort;
+    if (this.connection !== connection || !owner || !abort || !INTERACTIONS.has(method)) throw new Error("Unsupported or unowned native interaction.");
+    abort.signal.throwIfAborted();
     this.assertOwner(owner);
-    const result = await this.onRequest(method, { ...params, threadId: owner.threadId, turnId: owner.turnId });
+    const result = await this.onRequest(method, { ...params, threadId: owner.threadId, turnId: owner.turnId }, abort.signal);
+    abort.signal.throwIfAborted();
     this.assertOwner(owner);
     return result;
   }
@@ -127,7 +131,7 @@ export class NativeMcpBridge {
     const sandbox = nativeSandbox(context);
     if (this.connection && this.policyKey !== key) this.invalidate();
     if (!this.connection) {
-      const connection = this.transport((method, params) => this.requestFromStock(method, params));
+      const connection: NativeMcpTransport = this.transport((method, params) => this.requestFromStock(method, params, connection));
       this.connection = connection;
       this.policyKey = key;
       try {
@@ -205,6 +209,7 @@ export class NativeMcpBridge {
         this.assertOwner(context);
         if (signal?.aborted) throw new Error("Native MCP call cancelled.");
         this.callContext = context;
+        this.callAbort = new AbortController();
         const result = await connection.request("mcpServer/tool/call", {
           threadId: this.nativeThread, server: selected.server, tool: selected.tool, arguments: params.arguments ?? {},
           _meta: { ...params._meta, "openai/threadId": context.threadId, "openai/turnId": context.turnId, "x-codex-turn-metadata": {
@@ -215,11 +220,18 @@ export class NativeMcpBridge {
         if (signal?.aborted) throw new Error("Native MCP call cancelled.");
         return Object.fromEntries(Object.entries(result).filter(([, value]) => value !== null));
       } catch (error) { this.invalidate(); throw error; }
-      finally { this.callContext = undefined; signal?.removeEventListener("abort", cancel); }
+      finally {
+        this.callAbort?.abort();
+        this.callAbort = undefined;
+        this.callContext = undefined;
+        signal?.removeEventListener("abort", cancel);
+      }
     });
   }
 
   private invalidate(): void {
+    this.callAbort?.abort();
+    this.callAbort = undefined;
     this.connection?.close();
     this.connection = undefined;
     this.nativeThread = undefined;

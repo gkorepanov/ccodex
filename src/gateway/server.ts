@@ -134,12 +134,16 @@ export class Gateway {
   }
 
   /** Server→client request on a Claude thread: every subscriber sees it, the first answer wins. */
-  public serverRequest<T = any>(threadId: string, method: string, params: unknown): Promise<T> {
+  public serverRequest<T = any>(threadId: string, method: string, params: unknown, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) return Promise.reject(new Error("Request cancelled."));
     const id = `ccodex:${++this.nextServerRequest}`;
-    return new Promise<T>((resolve, reject) => {
+    const cancel = () => this.resolveServerRequest({ id, error: { message: "Request cancelled." } });
+    const result = new Promise<T>((resolve, reject) => {
       this.serverRequests.set(id, { threadId, method, params, resolve: resolve as (value: unknown) => void, reject });
+      signal?.addEventListener("abort", cancel, { once: true });
       for (const connection of this.subscriptions.get(threadId) ?? []) connection.request(id, method, params);
     });
+    return result.finally(() => signal?.removeEventListener("abort", cancel));
   }
 
   public cancelServerRequests(threadId: string): void {

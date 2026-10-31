@@ -40,7 +40,7 @@ function newThread(params, extra = {}) {
 
 function settings(thread) {
   return {
-    model: thread.model, modelProvider: "openai", serviceTier: null, disabledPluginIds: [], cwd: thread.cwd,
+    model: thread.model, modelProvider: "openai", serviceTier: null, disabledPluginIds: thread.disabledPluginIds ?? [], cwd: thread.cwd,
     runtimeWorkspaceRoots: [thread.cwd], instructionSources: [], approvalPolicy: thread.approvalPolicy, approvalsReviewer: "user",
     sandbox: thread.sandbox, activePermissionProfile: null, reasoningEffort: null, multiAgentMode: "explicitRequestOnly",
   };

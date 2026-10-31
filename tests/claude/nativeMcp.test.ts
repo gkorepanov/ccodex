@@ -1,21 +1,28 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { NativeMcpBridge, nativeToolName, type NativeMcpContext, type NativeMcpTransport } from "../../src/claude/nativeMcp.js";
+import type { Connection } from "../../src/gateway/connection.js";
+import { Gateway } from "../../src/gateway/server.js";
+import { Logger } from "../../src/log.js";
+import { testConfig } from "../fixtures/config.js";
 
 const context = (): NativeMcpContext => ({
   threadId: "claude-owner", turnId: "turn-1", model: "claude:sonnet", cwd: "/work", runtimeWorkspaceRoots: ["/work"],
   approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy: { type: "readOnly", networkAccess: false }, plan: false,
 });
 const definition = { name: "read.profile", description: "Read a profile", inputSchema: { type: "object", required: ["id"], properties: { id: { type: "string" } } }, annotations: { readOnlyHint: true }, _meta: { origin: "native" } };
-function fixture() {
+function fixture(onRequest?: (method: string, params: any, signal?: AbortSignal) => Promise<unknown>) {
   let current = context();
   const requests: { method: string; params: any }[] = [];
   let callback: (method: string, params: any) => Promise<unknown>;
   let closed = 0;
   let connections = 0;
   let action: (() => Promise<any>) | undefined;
-  const bridge = new NativeMcpBridge(() => current, async (_method, params) => ({ action: "decline", echoed: params }), (onRequest) => {
+  const bridge = new NativeMcpBridge(() => current, onRequest ?? (async (_method, params) => ({ action: "decline", echoed: params })), (onRequest) => {
     callback = onRequest;
     connections++;
     const id = `helper-${connections}`;
@@ -148,6 +155,48 @@ describe("native MCP bridge", () => {
     f.setAction(async () => ({ content: [{ type: "text", text: "recovered" }] }));
     await expect(f.bridge.call({ name: nativeToolName("github", "read") })).resolves.toHaveProperty("content");
     expect(f.connections).toBe(2); f.bridge.close();
+  });
+
+  it.each(["refresh", "abort", "close"] as const)("cancels only its native interaction on %s", async (reason) => {
+    const root = mkdtempSync(join(tmpdir(), "native-interaction-"));
+    const gateway = new Gateway(testConfig({ dataDir: root }), join(root, "gateway.sock"), new Logger("error"));
+    const prompts: { id: string; method: string }[] = [];
+    const events: any[] = [];
+    gateway.subscribe("claude-owner", {
+      request: (id: string, method: string) => prompts.push({ id, method }),
+      send: (frame: string) => events.push(JSON.parse(frame)),
+    } as unknown as Connection);
+    const unrelated = gateway.serverRequest("claude-owner", "tool/requestUserInput", {}).catch(error => error);
+    const f = fixture((method, params, signal) => gateway.serverRequest("claude-owner", method, params, signal));
+    const abort = new AbortController();
+    let started!: () => void;
+    const forwarded = new Promise<void>(resolve => { started = resolve; });
+    f.setAction(async () => {
+      const interaction = f.callback("mcpServer/elicitation/request", { mode: "form" });
+      started();
+      await interaction;
+      return { content: [] };
+    });
+    const running = f.bridge.call({ name: nativeToolName("github", "read") }, abort.signal).catch(error => error);
+    try {
+      await forwarded;
+      const native = prompts.find(prompt => prompt.method === "mcpServer/elicitation/request")!;
+      if (reason === "abort") abort.abort();
+      else f.bridge[reason]();
+      const replayed: string[] = [];
+      gateway.subscribe("claude-owner", {
+        request: (_id: string, method: string) => replayed.push(method), send: () => undefined,
+      } as unknown as Connection);
+      expect(replayed).toEqual(["tool/requestUserInput"]);
+      expect(events).toContainEqual({ method: "serverRequest/resolved", params: { threadId: "claude-owner", requestId: native.id } });
+      expect(await running).toBeInstanceOf(Error);
+    } finally {
+      gateway.cancelServerRequests("claude-owner");
+      f.bridge.close();
+      await running;
+      await unrelated;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("limits plan mode to tools explicitly marked read-only", async () => {

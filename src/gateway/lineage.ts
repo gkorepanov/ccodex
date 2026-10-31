@@ -675,6 +675,10 @@ export class Lineages {
       ...(params.permissions || params.sandboxPolicy ? {} : { permissions: permissions.activePermissionProfile.id }),
     });
     const threadId: string = started.thread.id;
+    if (settings.nativeAccess?.disabledPluginIds) {
+      await connection.upstream.request("thread/settings/update", { threadId, disabledPluginIds: settings.nativeAccess.disabledPluginIds });
+      started.disabledPluginIds = [...settings.nativeAccess.disabledPluginIds];
+    }
     await connection.upstream.request("thread/inject_items", {
       threadId,
       items: [{ type: "message", role: "user", content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\n${summary}` }] }],

@@ -351,7 +351,7 @@ export class ClaudeSession {
         cwd: this.settings.cwd, runtimeWorkspaceRoots: [this.settings.cwd], plan: this.settings.plan,
         access: this.settings.nativeAccess ?? {},
         ...codexPermissions(this.settings.permissionMode, this.settings.cwd),
-      }), (method, params) => this.host.gateway.serverRequest(this.threadId, method, params),
+      }), (method, params, signal) => this.host.gateway.serverRequest(this.threadId, method, params, signal),
       (onRequest) => nativeMcpTransport(this.host.gateway.connectionSocket(), onRequest));
     }
     return {

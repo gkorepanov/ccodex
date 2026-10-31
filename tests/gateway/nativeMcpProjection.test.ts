@@ -79,6 +79,18 @@ describe("Claude native MCP projection", () => {
     } finally { stock.mockRestore(); }
   });
 
+  it("keeps disabled plugins when switching Claude back to GPT", async () => {
+    gateway = await startTestGateway({ nativeMcp: true, claudeVisualize: false });
+    const client = await gateway.connect();
+    const { thread } = await client.request("thread/start", {
+      model: "claude:claude-opus-5-5", cwd: gateway.root, disabledPluginIds: ["private@personal"],
+    });
+    await client.turn(thread.id, "first");
+    await client.turn(thread.id, "continue using GPT", { model: "gpt-6-luna" });
+    expect(client.notifications("thread/settings/updated", thread.id).at(-1)?.params.threadSettings.disabledPluginIds).toEqual(["private@personal"]);
+    expect((await client.request("thread/resume", { threadId: thread.id })).disabledPluginIds).toEqual(["private@personal"]);
+  });
+
   it("uses successful GPT settings changes when the first message switches to Claude", async () => {
     gateway = await startTestGateway({ nativeMcp: true, claudeVisualize: false });
     const client = await gateway.connect();
