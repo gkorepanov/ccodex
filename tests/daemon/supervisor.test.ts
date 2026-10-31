@@ -1,8 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   daemonStateDirectory,
   processMatches,
@@ -14,6 +15,9 @@ import {
   withGatewayStartupFence,
 } from "../../src/daemon/supervisor.js";
 
+// Keep real filesystem operations, with a configurable export for the interleaving test.
+vi.mock("node:fs", async (importOriginal) => ({ ...await importOriginal<typeof import("node:fs")>() }));
+
 const temporary: string[] = [];
 const originalEnv = { ...process.env };
 const spawned: ChildProcess[] = [];
@@ -24,6 +28,7 @@ const temp = () => {
 };
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const child of spawned.splice(0)) {
     try { child.kill("SIGKILL"); } catch { /* already stopped */ }
   }
@@ -198,5 +203,145 @@ describe("daemon supervisor", () => {
     rmSync(recovery, { recursive: true });
     await waiter;
     expect(entered).toBe(true);
+  });
+
+  it("does not expire a recovery whose owner is still alive", async () => {
+    const directory = temp();
+    const lockDirectory = join(directory, "daemon.lock.hybrid");
+    mkdirSync(lockDirectory);
+    writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({ pid: 999_999_999, processStartTime: "dead", token: "stale" }));
+    const recovery = `${lockDirectory}.recovery`;
+    mkdirSync(recovery);
+    const owner = { pid: process.pid, processStartTime: processStartTime(process.pid)!, token: "live-recovery" };
+    writeFileSync(join(recovery, `${owner.token}.json`), JSON.stringify(owner));
+    const longAgo = new Date(Date.now() - 60_000);
+    utimesSync(recovery, longAgo, longAgo);
+    let entered = false;
+    const waiter = withDaemonLock(directory, async () => { entered = true; });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(entered).toBe(false);
+      expect(existsSync(join(recovery, `${owner.token}.json`))).toBe(true);
+    } finally {
+      rmSync(recovery, { recursive: true, force: true });
+      await waiter;
+    }
+  });
+
+  it("does not delete a recovery that replaced the abandoned marker after stat", async () => {
+    const directory = temp();
+    const lockDirectory = join(directory, "daemon.lock.hybrid");
+    mkdirSync(lockDirectory);
+    writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({ pid: 999_999_999, processStartTime: "dead", token: "stale" }));
+    const recovery = `${lockDirectory}.recovery`;
+    mkdirSync(recovery);
+    const longAgo = new Date(Date.now() - 60_000);
+    utimesSync(recovery, longAgo, longAgo);
+    const replacement = { pid: process.pid, processStartTime: processStartTime(process.pid)!, token: "replacement-recovery" };
+    const stat = fs.statSync;
+    let replaced = false;
+    vi.spyOn(fs, "statSync").mockImplementation(((path, options) => {
+      const result = stat(path, options);
+      if (path === recovery && !replaced) {
+        replaced = true;
+        rmSync(recovery, { recursive: true });
+        mkdirSync(recovery);
+        writeFileSync(join(recovery, `${replacement.token}.json`), JSON.stringify(replacement));
+      }
+      return result;
+    }) as typeof fs.statSync);
+    let entered = false;
+    const waiter = withDaemonLock(directory, async () => { entered = true; });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(replaced).toBe(true);
+      expect(entered).toBe(false);
+      expect(existsSync(join(recovery, `${replacement.token}.json`))).toBe(true);
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(recovery, { recursive: true, force: true });
+      await waiter;
+    }
+  });
+
+  it("recovers a fresh recovery marker after its recorded owner exits", async () => {
+    const directory = temp();
+    const lockDirectory = join(directory, "daemon.lock.hybrid");
+    mkdirSync(lockDirectory);
+    writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({ pid: 999_999_999, processStartTime: "dead", token: "stale" }));
+    const recovery = `${lockDirectory}.recovery`;
+    mkdirSync(recovery);
+    const owner = { pid: 999_999_999, processStartTime: "dead", token: "dead-recovery" };
+    writeFileSync(join(recovery, `${owner.token}.json`), JSON.stringify(owner));
+    await withDaemonLock(directory, async () => undefined);
+    expect(readdirSync(directory)).toEqual(["daemon.lock"]);
+  }, 2_000);
+
+  it("does not remove a new recovery while finishing cleanup of a dead owner", async () => {
+    const directory = temp();
+    const lockDirectory = join(directory, "daemon.lock.hybrid");
+    mkdirSync(lockDirectory);
+    writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({ pid: 999_999_999, processStartTime: "dead", token: "stale" }));
+    const recovery = `${lockDirectory}.recovery`;
+    mkdirSync(recovery);
+    const dead = { pid: 999_999_999, processStartTime: "dead", token: "dead-recovery" };
+    const deadPath = join(recovery, `${dead.token}.json`);
+    writeFileSync(deadPath, JSON.stringify(dead));
+    const replacement = { pid: process.pid, processStartTime: processStartTime(process.pid)!, token: "replacement-recovery" };
+    const remove = fs.rmSync;
+    let replaced = false;
+    vi.spyOn(fs, "rmSync").mockImplementation((path, options) => {
+      remove(path, options);
+      if (path === deadPath && !replaced) {
+        replaced = true;
+        remove(recovery, { recursive: true });
+        mkdirSync(recovery);
+        writeFileSync(join(recovery, `${replacement.token}.json`), JSON.stringify(replacement));
+      }
+    });
+    let entered = false;
+    const waiter = withDaemonLock(directory, async () => { entered = true; });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(replaced).toBe(true);
+      expect(entered).toBe(false);
+      expect(existsSync(join(recovery, `${replacement.token}.json`))).toBe(true);
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(recovery, { recursive: true, force: true });
+      await waiter;
+    }
+  });
+
+  it("yields when another recovery publishes its owner first", async () => {
+    const directory = temp();
+    const lockDirectory = join(directory, "daemon.lock.hybrid");
+    mkdirSync(lockDirectory);
+    writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({ pid: 999_999_999, processStartTime: "dead", token: "stale" }));
+    const recovery = `${lockDirectory}.recovery`;
+    const replacement = { pid: process.pid, processStartTime: processStartTime(process.pid)!, token: "winning-recovery" };
+    const rename = fs.renameSync;
+    let published = false;
+    vi.spyOn(fs, "renameSync").mockImplementation((source, destination) => {
+      if (destination === recovery && !published) {
+        published = true;
+        mkdirSync(recovery);
+        writeFileSync(join(recovery, `${replacement.token}.json`), JSON.stringify(replacement));
+      }
+      rename(source, destination);
+    });
+    let entered = false;
+    const waiter = withDaemonLock(directory, async () => { entered = true; });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(published).toBe(true);
+      expect(entered).toBe(false);
+      expect(readdirSync(recovery)).toEqual([`${replacement.token}.json`]);
+      expect(readdirSync(directory).some((name) => name.endsWith(".tmp"))).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(recovery, { recursive: true, force: true });
+      await waiter;
+    }
   });
 });

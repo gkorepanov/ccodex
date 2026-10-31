@@ -9,6 +9,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -327,27 +328,70 @@ function readLockOwner(path: string): LockOwner | undefined {
   }
 }
 
-function recoverLock(lockDirectory: string): void {
-  const recovery = `${lockDirectory}.recovery`;
+function removeEmptyDirectory(path: string): void {
   try {
-    mkdirSync(recovery, { mode: 0o700 });
+    rmdirSync(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    // Recovery is instant: a marker this old lost its process, and left alone it would wedge the lock for good.
+    if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+  }
+}
+
+function lockOwnerExited(owner: LockOwner): boolean {
+  const startTime = processStartTime(owner.pid);
+  // A failed identity lookup for a live PID is not evidence that its owner exited.
+  return startTime === undefined ? !processExists(owner.pid) : startTime !== owner.processStartTime;
+}
+
+function releaseRecovery(recovery: string, token: string): void {
+  rmSync(join(recovery, `${token}.json`), { force: true });
+  // Another recovery may already have replaced the empty directory. Never remove its owner file.
+  removeEmptyDirectory(recovery);
+}
+
+function recoverLock(lockDirectory: string, processOwner: LockOwner): void {
+  const recovery = `${lockDirectory}.recovery`;
+  let entries: string[] | undefined;
+  try {
+    entries = readdirSync(recovery);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (entries !== undefined) {
+    if (entries.length === 1) {
+      const owner = readLockOwner(join(recovery, entries[0]!));
+      if (owner && entries[0] === `${owner.token}.json` && lockOwnerExited(owner)) releaseRecovery(recovery, owner.token);
+      return;
+    }
+    if (entries.length !== 0) return;
+    // Older versions left anonymous, empty markers. A new marker is always nonempty,
+    // so rmdir cannot delete one that replaced this abandoned marker after stat.
     const modified = statSync(recovery, { throwIfNoEntry: false })?.mtimeMs;
-    if (modified !== undefined && Date.now() - modified >= START_TIMEOUT_MS) rmSync(recovery, { recursive: true, force: true });
+    if (modified !== undefined && Date.now() - modified >= START_TIMEOUT_MS) removeEmptyDirectory(recovery);
     return;
+  }
+  const owner = { ...processOwner, token: randomUUID() };
+  const staging = `${recovery}.${owner.token}.tmp`;
+  try {
+    mkdirSync(staging, { mode: 0o700 });
+    writeFileSync(join(staging, `${owner.token}.json`), JSON.stringify(owner), { mode: 0o600 });
+    // Publish the complete owner with the directory; a live recovery is never empty.
+    renameSync(staging, recovery);
+  } catch (error) {
+    if (["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) return;
+    throw error;
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
   }
   try {
     const owner = readLockOwner(`${lockDirectory}/owner.json`);
     // The owner may release it meanwhile: gone is free.
     const modified = statSync(lockDirectory, { throwIfNoEntry: false })?.mtimeMs;
     const age = modified === undefined ? 0 : Date.now() - modified;
-    if ((!owner && age >= START_TIMEOUT_MS) || (owner && !processMatches(owner))) {
+    if ((!owner && age >= START_TIMEOUT_MS) || (owner && lockOwnerExited(owner))) {
       rmSync(lockDirectory, { recursive: true, force: true });
     }
   } finally {
-    rmSync(recovery, { recursive: true, force: true });
+    releaseRecovery(recovery, owner.token);
   }
 }
 
@@ -370,7 +414,7 @@ export async function withDaemonLock<T>(stateDirectory: string, operation: () =>
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      recoverLock(lockDirectory);
+      recoverLock(lockDirectory, owner);
       if (Date.now() >= deadline) throw new Error(`timed out waiting for daemon operation lock ${lockFile}`);
       await sleep(POLL_MS);
     }
