@@ -155,6 +155,9 @@ export class Connection {
     }
     const handler = this.route(message.method, message.params ?? {});
     if (!handler) {
+      if (this.gateway.config.nativeMcp && message.method === "thread/settings/update") {
+        this.nativeStarts.set(message.id, structuredClone(message.params ?? {}));
+      }
       this.forward(text);
       return;
     }
@@ -190,12 +193,12 @@ export class Connection {
     if (rewritten !== undefined) this.send(rewritten);
   }
 
-  /** Launch overrides arrive at the original GPT chat, before a later picker switch creates Claude's backend. */
+  /** Keep successful GPT launch/settings changes for a later picker switch to Claude. */
   private rememberNativeAccess(id: RequestId, result: unknown): void {
     const params = this.nativeStarts.get(id);
     this.nativeStarts.delete(id);
-    const threadId = (result as JsonObject | undefined)?.thread?.id;
-    if (!params || typeof threadId !== "string" || this.gateway.isClaudeThread(threadId)) return;
+    const threadId = (result as JsonObject | undefined)?.thread?.id ?? params?.threadId;
+    if (!params || result === undefined || typeof threadId !== "string" || this.gateway.isClaudeThread(threadId)) return;
     const publicId = this.gateway.meta.rewrites.get(threadId) ?? threadId;
     this.gateway.meta.setNativeMcpAccess(publicId, nativeAccessFrom(params, this.gateway.meta.nativeMcpAccess(publicId)));
   }

@@ -256,7 +256,11 @@ export class Lineages {
       await connection.upstream.request("thread/resume", { threadId: segment.threadId, excludeTurns: true, developerInstructions: connection.developerInstructions });
     }
     this.track(connection, method, segment.threadId);
-    return connection.upstream.request(method, backendParams);
+    const result = await connection.upstream.request(method, backendParams);
+    if (this.gateway.config.nativeMcp && method === "thread/settings/update") {
+      this.gateway.meta.setNativeMcpAccess(params.threadId, nativeAccessFrom(params, this.gateway.meta.nativeMcpAccess(params.threadId)));
+    }
+    return result;
   }
 
   // ---- history ----
@@ -665,6 +669,7 @@ export class Lineages {
     const permissions = codexPermissions(settings.permissionMode, settings.cwd);
     const started = await this.startBackend(connection, {
       model: requestedModel(params), cwd: settings.cwd, developerInstructions: connection.developerInstructions,
+      ...(settings.nativeAccess?.config ? { config: settings.nativeAccess.config } : {}),
       approvalPolicy: params.approvalPolicy ?? permissions.approvalPolicy,
       approvalsReviewer: params.approvalsReviewer ?? permissions.approvalsReviewer,
       ...(params.permissions || params.sandboxPolicy ? {} : { permissions: permissions.activePermissionProfile.id }),

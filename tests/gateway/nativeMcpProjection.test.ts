@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fakeClaude, fakeQuery, fakeStartup } from "../fixtures/fakeClaude.js";
 import { startTestGateway, type TestGateway } from "./harness.js";
+import { StockClient } from "../../src/gateway/stock.js";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", async (original) => ({
   ...await original<object>(), query: fakeQuery, startup: fakeStartup,
@@ -62,6 +63,72 @@ describe("Claude native MCP projection", () => {
     const meta = JSON.parse(readFileSync(join(gateway.config.dataDir, "meta.json"), "utf8"));
     expect(meta.nativeMcpAccess[thread.id]).toMatchObject({ sandbox: "read-only", config });
     expect(meta.lineages[thread.id]).toBeUndefined();
+  });
+
+  it("retains App launch config when switching Claude back to GPT", async () => {
+    gateway = await startTestGateway({ nativeMcp: true, claudeVisualize: false });
+    const client = await gateway.connect();
+    const config = { 'plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled': true };
+    const { thread } = await client.request("thread/start", { model: "claude:claude-opus-5-5", cwd: gateway.root, config });
+    await client.turn(thread.id, "first");
+    const stock = vi.spyOn(StockClient.prototype, "request");
+    try {
+      await client.turn(thread.id, "continue using GPT", { model: "gpt-6-luna" });
+      const started = stock.mock.calls.find(([method, params]) => method === "thread/start" && (params as { model?: string } | undefined)?.model === "gpt-6-luna");
+      expect(started?.[1]).toMatchObject({ config });
+    } finally { stock.mockRestore(); }
+  });
+
+  it("uses successful GPT settings changes when the first message switches to Claude", async () => {
+    gateway = await startTestGateway({ nativeMcp: true, claudeVisualize: false });
+    const client = await gateway.connect();
+    const { thread } = await client.request("thread/start", { model: "gpt-6-luna", cwd: gateway.root, permissions: ":danger-full-access" });
+    const sandboxPolicy = { type: "readOnly", networkAccess: false };
+    await client.request("thread/settings/update", { threadId: thread.id, sandboxPolicy, disabledPluginIds: ["private@personal"] });
+    await client.turn(thread.id, "continue with Claude", { model: "claude:claude-opus-5-5" });
+    const meta = JSON.parse(readFileSync(join(gateway.config.dataDir, "meta.json"), "utf8"));
+    expect(meta.nativeMcpAccess[thread.id]).toEqual({ sandboxPolicy, disabledPluginIds: ["private@personal"] });
+  });
+
+  it("does not remember rejected stock settings changes", async () => {
+    gateway = await startTestGateway({ nativeMcp: true, claudeVisualize: false });
+    const client = await gateway.connect();
+    await client.request("thread/start", { model: "gpt-6-luna", cwd: gateway.root });
+    await expect(client.request("thread/settings/update", { threadId: "missing", permissions: ":danger-full-access" })).rejects.toThrow(/thread not found/);
+    const path = join(gateway.config.dataDir, "meta.json");
+    const meta = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+    expect(meta.nativeMcpAccess?.missing).toBeUndefined();
+  });
+
+  it.each([
+    { cancel: {}, expected: { sandbox: "read-only" } },
+    {
+      cancel: { sandboxPolicy: { type: "readOnly", networkAccess: false }, disabledPluginIds: ["restricted@personal"] },
+      expected: { sandboxPolicy: { type: "readOnly", networkAccess: false }, disabledPluginIds: ["restricted@personal"] },
+    },
+  ])("keeps only applied settings after a cancelled provider switch (%#)", async ({ cancel, expected }) => {
+    gateway = await startTestGateway({ nativeMcp: true, claudeVisualize: false });
+    const client = await gateway.connect();
+    const { thread } = await client.request("thread/start", { model: "gpt-6-luna", cwd: gateway.root, sandbox: "read-only" });
+    await client.request("thread/settings/update", { threadId: thread.id, model: "gpt-6-luna" });
+    await client.request("thread/settings/update", { threadId: thread.id, model: "claude:claude-opus-5-5", permissions: ":danger-full-access", disabledPluginIds: ["cancelled@personal"] });
+    await client.request("thread/settings/update", { threadId: thread.id, model: "gpt-6-luna", ...cancel });
+    await client.turn(thread.id, "use Claude with the unchanged rights", { model: "claude:claude-opus-5-5" });
+    const meta = JSON.parse(readFileSync(join(gateway.config.dataDir, "meta.json"), "utf8"));
+    expect(meta.nativeMcpAccess[thread.id]).toEqual(expected);
+  });
+
+  it("reports the disabled plugins applied to Claude on start, updates, resume and fork", async () => {
+    gateway = await startTestGateway({ nativeMcp: true, claudeVisualize: false });
+    const client = await gateway.connect();
+    const started = await client.request("thread/start", { model: "claude:claude-opus-5-5", cwd: gateway.root, disabledPluginIds: ["first@personal"] });
+    expect(started.disabledPluginIds).toEqual(["first@personal"]);
+    const id = started.thread.id;
+    await client.turn(id, "hello");
+    await client.request("thread/settings/update", { threadId: id, disabledPluginIds: ["second@personal"] });
+    expect(client.notifications("thread/settings/updated", id).at(-1)?.params.threadSettings.disabledPluginIds).toEqual(["second@personal"]);
+    expect((await client.request("thread/resume", { threadId: id })).disabledPluginIds).toEqual(["second@personal"]);
+    expect((await client.request("thread/fork", { threadId: id })).disabledPluginIds).toEqual(["second@personal"]);
   });
 
   it("keeps the previous SDK configuration when native MCP is disabled", async () => {

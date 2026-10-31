@@ -72,6 +72,26 @@ describe("native MCP bridge", () => {
     f.bridge.close();
   });
 
+  it("rejects queued calls from an ended turn before they can use the next turn's authority", async () => {
+    const f = fixture();
+    let started!: () => void;
+    let release!: () => void;
+    const active = new Promise<void>(resolve => { started = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    f.setAction(async () => { started(); await blocked; return { content: [] }; });
+    const first = f.bridge.call({ name: nativeToolName("app", "write") }).catch(error => error);
+    await active;
+    const queued = f.bridge.call({ name: nativeToolName("app", "write") }).catch(error => error);
+    f.setContext({ ...f.current, turnId: "turn-2" });
+    release();
+    expect(await first).toBeInstanceOf(Error);
+    expect(await queued).toBeInstanceOf(Error);
+    expect(f.requests.filter(request => request.method === "mcpServer/tool/call")).toHaveLength(1);
+    f.setAction(async () => ({ content: [] }));
+    await expect(f.bridge.call({ name: nativeToolName("app", "write") })).resolves.toEqual({ content: [] });
+    f.bridge.close();
+  });
+
   it("rotates the private helper when permissions change", async () => {
     const f = fixture(); await f.bridge.tools();
     f.setContext({ ...f.current, sandboxPolicy: { type: "dangerFullAccess" }, approvalPolicy: "never" });

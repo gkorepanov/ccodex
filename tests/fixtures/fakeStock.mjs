@@ -135,6 +135,13 @@ const handlers = {
     };
   },
   "thread/read": (_connection, params) => ({ thread: params.includeTurns ? full(threads.get(params.threadId)) : summary(threads.get(params.threadId)) }),
+  "thread/settings/update": (_connection, params) => {
+    const thread = threads.get(params.threadId);
+    if (!thread) throw Object.assign(new Error(`thread not found: ${params.threadId}`), { code: -32600 });
+    if (params.sandboxPolicy) thread.sandbox = structuredClone(params.sandboxPolicy);
+    if (params.disabledPluginIds) thread.disabledPluginIds = [...params.disabledPluginIds];
+    return {};
+  },
   "thread/list": (_connection, params) => {
     const list = [...threads.values()].filter((thread) => !thread.ephemeral && thread.archived === (params.archived ?? false)
       && (params.sectionId === undefined || (params.sectionId === null ? !pinned.includes(thread.id) : pinned.includes(thread.id))))

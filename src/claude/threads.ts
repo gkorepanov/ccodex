@@ -605,7 +605,7 @@ export class ClaudeThreads {
       model: `${this.config.modelPrefix}${settings.model ?? this.defaultModel ?? "default"}`,
       modelProvider: "claude",
       serviceTier: settings.fast ? "fast" : null,
-      disabledPluginIds: [],
+      disabledPluginIds: this.config.nativeMcp ? settings.nativeAccess?.disabledPluginIds ?? [] : [],
       cwd: settings.cwd,
       runtimeWorkspaceRoots: [settings.cwd],
       instructionSources: [],
@@ -621,7 +621,7 @@ export class ClaudeThreads {
   public threadSettings(settings: SessionSettings): JsonObject {
     const response = this.settingsResponse(settings);
     return {
-      disabledPluginIds: [],
+      disabledPluginIds: response.disabledPluginIds,
       cwd: settings.cwd,
       approvalPolicy: response.approvalPolicy,
       approvalsReviewer: response.approvalsReviewer,

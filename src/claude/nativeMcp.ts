@@ -190,12 +190,12 @@ export class NativeMcpBridge {
   }
 
   public call(params: { name: string; arguments?: Record<string, unknown>; _meta?: Record<string, unknown> }, signal?: AbortSignal): Promise<Record<string, any>> {
+    const context = structuredClone(this.context());
     return this.run(async () => {
       const cancel = () => this.invalidate();
       signal?.addEventListener("abort", cancel, { once: true });
       try {
         if (signal?.aborted) throw new Error("Native MCP call cancelled.");
-        const context = this.context();
         this.assertOwner(context);
         const connection = await this.ensureThread(context);
         if (!this.inventory.has(params.name)) await this.discover(connection, context);
