@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -168,5 +168,35 @@ describe("daemon supervisor", () => {
     writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({ pid: 999_999_999, processStartTime: "dead", token: "stale" }));
     await withDaemonLock(directory, async () => undefined);
     expect(readdirSync(directory)).toEqual(["daemon.lock"]);
+  });
+
+  it("recovers a stale lock whose recovery marker lost its process", async () => {
+    const directory = temp();
+    const lockDirectory = join(directory, "daemon.lock.hybrid");
+    mkdirSync(lockDirectory, { recursive: true });
+    writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({ pid: 999_999_999, processStartTime: "dead", token: "stale" }));
+    const recovery = `${lockDirectory}.recovery`;
+    mkdirSync(recovery);
+    const longAgo = new Date(Date.now() - 60_000);
+    utimesSync(recovery, longAgo, longAgo);
+    await withDaemonLock(directory, async () => undefined);
+    expect(readdirSync(directory)).toEqual(["daemon.lock"]);
+  }, 2_000);
+
+  it("leaves a fresh recovery marker to the process holding it", async () => {
+    const directory = temp();
+    const lockDirectory = join(directory, "daemon.lock.hybrid");
+    mkdirSync(lockDirectory, { recursive: true });
+    writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({ pid: 999_999_999, processStartTime: "dead", token: "stale" }));
+    const recovery = `${lockDirectory}.recovery`;
+    mkdirSync(recovery);
+    let entered = false;
+    const waiter = withDaemonLock(directory, async () => { entered = true; });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(entered).toBe(false);
+    expect(existsSync(recovery)).toBe(true);
+    rmSync(recovery, { recursive: true });
+    await waiter;
+    expect(entered).toBe(true);
   });
 });
