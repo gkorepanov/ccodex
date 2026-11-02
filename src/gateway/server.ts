@@ -9,6 +9,7 @@ import { Logger, RpcRecorder } from "../log.js";
 import { Meta } from "../meta.js";
 import { invalidRequest, RpcFailure, type JsonObject } from "../protocol/codex.js";
 import { Catalog } from "./catalog.js";
+import { Attachments } from "./attachments.js";
 import { Connection } from "./connection.js";
 import { Lineages } from "./lineage.js";
 import { RemoteControl } from "./remote.js";
@@ -295,6 +296,17 @@ export class Gateway {
 
   private registerHandlers(): void {
     const on = (method: string, handler: Handler) => this.handlers.set(method, handler);
+    const attachments = new Attachments(this);
+    for (const method of ["thread/attachment/add", "thread/attachment/list", "thread/attachment/remove", "thread/attachmentOwner/list"]) {
+      on(method, (connection, params) => attachments.handle(connection, method, params));
+    }
+    on("thread/delete", async (connection, params) => {
+      const handler = this.threadHandler(connection, "thread/delete", params);
+      const result = await (handler ? handler(connection, params) : connection.upstream.request("thread/delete", params));
+      // A shared transcript can survive deleting its public chat; its attachments must not.
+      await attachments.clear(connection, params.threadId);
+      return result;
+    });
     on("initialize", async (connection, params) => {
       connection.clientName = params?.clientInfo?.name;
       const result = await connection.upstream.request("initialize", params);

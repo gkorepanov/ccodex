@@ -81,6 +81,8 @@ export class NativeMcpBridge {
   private closed = false;
   private callContext?: NativeMcpContext;
   private callAbort?: AbortController;
+  private workspaceCall = false;
+  private readonly workspaceUpdates: (() => Promise<void>)[] = [];
 
   public constructor(
     private readonly context: () => NativeMcpContext,
@@ -193,6 +195,14 @@ export class NativeMcpBridge {
     });
   }
 
+  /** App worktree tools update their owning chat before returning; rotate the helper after that result settles. */
+  public deferWorkingDirectoryUpdate(params: Record<string, unknown>, apply: () => Promise<void>): boolean {
+    if (!this.callContext || !this.workspaceCall || typeof params.cwd !== "string"
+      || Object.keys(params).some(key => key !== "threadId" && key !== "cwd")) return false;
+    this.workspaceUpdates.push(apply);
+    return true;
+  }
+
   public call(params: { name: string; arguments?: Record<string, unknown>; _meta?: Record<string, unknown> }, signal?: AbortSignal): Promise<Record<string, any>> {
     const context = structuredClone(this.context());
     return this.run(async () => {
@@ -210,6 +220,7 @@ export class NativeMcpBridge {
         if (signal?.aborted) throw new Error("Native MCP call cancelled.");
         this.callContext = context;
         this.callAbort = new AbortController();
+        this.workspaceCall = selected.server === "codex_app" && ["create_worktree", "attach_worktree", "restore_worktree"].includes(selected.tool);
         const result = await connection.request("mcpServer/tool/call", {
           threadId: this.nativeThread, server: selected.server, tool: selected.tool, arguments: params.arguments ?? {},
           _meta: { ...params._meta, "openai/threadId": context.threadId, "openai/turnId": context.turnId, "x-codex-turn-metadata": {
@@ -224,7 +235,9 @@ export class NativeMcpBridge {
         this.callAbort?.abort();
         this.callAbort = undefined;
         this.callContext = undefined;
+        this.workspaceCall = false;
         signal?.removeEventListener("abort", cancel);
+        for (const apply of this.workspaceUpdates.splice(0)) await apply();
       }
     });
   }

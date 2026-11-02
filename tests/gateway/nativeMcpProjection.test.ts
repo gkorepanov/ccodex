@@ -5,10 +5,14 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { fakeClaude, fakeQuery, fakeStartup } from "../fixtures/fakeClaude.js";
 import { startTestGateway, type TestGateway } from "./harness.js";
 import { StockClient } from "../../src/gateway/stock.js";
+import { NativeSessionCatalog } from "../../src/claude/native/catalog.js";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", async (original) => ({
   ...await original<object>(), query: fakeQuery, startup: fakeStartup,
 }));
+// Fake SDK sessions have no real command processes to sample on the host.
+vi.mock("../../src/claude/processes.js", async (original) => ({ ...await original<object>(), sessionProcesses: () => [] }));
+vi.spyOn(NativeSessionCatalog.prototype, "watch").mockReturnValue(() => {});
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const claudeHome = process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "ct-claude-"));
 const codexHome = process.env.CODEX_HOME = mkdtempSync(join(tmpdir(), "ct-codex-"));

@@ -19,6 +19,8 @@ export interface Plan {
 }
 
 export interface MetaData {
+  /** Attachments owned by Claude's public chat row; Codex rows keep theirs in stock. */
+  threadAttachments?: Record<string, ThreadAttachment[]>;
   /**
    * Threads that switched provider: public id → segments, oldest first. The public id is one of the segments
    * (the first one; for a fork taken in a later segment, the forked backend).
@@ -42,6 +44,14 @@ export interface MetaData {
   nativeMcpAccess?: Record<string, NativeMcpAccess>;
 }
 
+export interface ThreadAttachment {
+  id: string;
+  attachmentType: string;
+  identityKey: string;
+  payload: unknown;
+  createdAt: number;
+}
+
 /**
  * `~/.ccodex/state/meta.json`: tiny, optional. Missing file or key = defaults. The gateway is the only
  * writer; each write goes to a temp file renamed over the original.
@@ -55,12 +65,20 @@ export class Meta {
     const raw = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as Partial<MetaData> : {};
     this.data = {
       lineages: raw.lineages ?? {}, archived: raw.archived ?? [], sections: raw.sections ?? {},
-      sectionOrder: raw.sectionOrder ?? {}, claudeDefaults: raw.claudeDefaults ?? null, plans: raw.plans ?? {}, pausedGoals: raw.pausedGoals ?? {}, nativeMcpAccess: raw.nativeMcpAccess ?? {},
+      sectionOrder: raw.sectionOrder ?? {}, claudeDefaults: raw.claudeDefaults ?? null, plans: raw.plans ?? {}, pausedGoals: raw.pausedGoals ?? {}, nativeMcpAccess: raw.nativeMcpAccess ?? {}, threadAttachments: raw.threadAttachments ?? {},
     };
     this.reindex();
   }
 
   public get lineages(): Readonly<Record<string, readonly Segment[]>> { return this.data.lineages; }
+
+  public get threadAttachments(): Readonly<Record<string, readonly ThreadAttachment[]>> { return this.data.threadAttachments!; }
+
+  public setThreadAttachments(threadId: string, attachments: ThreadAttachment[]): void {
+    if (attachments.length) this.data.threadAttachments![threadId] = structuredClone(attachments);
+    else delete this.data.threadAttachments![threadId];
+    this.save();
+  }
 
   public lineage(publicId: string): readonly Segment[] | undefined { return this.data.lineages[publicId]; }
 
@@ -175,6 +193,7 @@ export class Meta {
     delete this.data.plans![threadId];
     delete this.data.pausedGoals![threadId];
     delete this.data.nativeMcpAccess![threadId];
+    delete this.data.threadAttachments![threadId];
     this.save();
   }
 
@@ -190,6 +209,10 @@ export class Meta {
 
   /** Archive flag, section and order of a thread listed under another id from now on. */
   private rename(from: string, to: string): void {
+    if (from in this.data.threadAttachments!) {
+      this.data.threadAttachments![to] = this.data.threadAttachments![from]!;
+      delete this.data.threadAttachments![from];
+    }
     this.data.archived = this.data.archived.map((id) => id === from ? to : id);
     if (from in this.data.sections) {
       this.data.sections[to] = this.data.sections[from]!;

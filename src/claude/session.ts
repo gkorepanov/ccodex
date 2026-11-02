@@ -613,6 +613,7 @@ export class ClaudeSession {
   }
 
   public updateSettings(params: JsonObject): Promise<void> {
+    if (this.nativeMcp?.deferWorkingDirectoryUpdate(params, () => this.updateSettings(params))) return Promise.resolve();
     if (!this.host.config.nativeMcp) return this.applySettings(params);
     // Calculate each update from the last accepted settings, even while another SDK request is pending.
     const update = this.nativeSettingsUpdate.then(() => this.applySettings(params));

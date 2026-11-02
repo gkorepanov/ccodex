@@ -11,6 +11,7 @@ import { WebSocketServer } from "ws";
 const listen = process.argv[process.argv.indexOf("--listen") + 1];
 const socketPath = listen.slice("unix://".length);
 const threads = new Map();
+const attachments = new Map();
 /** Like stock: a thread's rollout file is written with its first message (or injected items), not at its start. */
 const rollouts = mkdtempSync(join(tmpdir(), "fake-stock-"));
 const materialize = (thread) => { if (!existsSync(thread.path)) writeFileSync(thread.path, ""); };
@@ -135,6 +136,25 @@ const handlers = {
     };
   },
   "thread/read": (_connection, params) => ({ thread: params.includeTurns ? full(threads.get(params.threadId)) : summary(threads.get(params.threadId)) }),
+  "thread/attachment/add": (_connection, params) => {
+    if (!threads.has(params.threadId)) throw new Error("thread not found");
+    const key = JSON.stringify([params.threadId, params.attachmentType, params.identityKey]);
+    const existing = attachments.get(key);
+    if (existing) return { outcome: "existing", attachment: existing.attachment };
+    const { threadId, ...fields } = params;
+    const attachment = { ...fields, id: randomUUID(), createdAt: now() };
+    attachments.set(key, { threadId, attachment });
+    return { outcome: "created", attachment };
+  },
+  "thread/attachment/list": (_connection, params) => {
+    const { data, nextCursor } = paginate([...attachments.values()].filter(a => a.threadId === params.threadId).map(a => a.attachment), params);
+    return { data, nextCursor };
+  },
+  "thread/attachment/remove": (_connection, params) => { attachments.delete(JSON.stringify([params.threadId, params.attachmentType, params.identityKey])); return {}; },
+  "thread/attachmentOwner/list": (_connection, params) => paginate([...attachments.values()]
+    .filter(a => a.attachment.attachmentType === params.attachmentType && a.attachment.identityKey === params.identityKey && threads.has(a.threadId))
+    .map(a => ({ threadId: a.threadId, archived: threads.get(a.threadId).archived }))
+    .filter(a => params.archived == null || a.archived === params.archived), params),
   "thread/settings/update": (_connection, params) => {
     const thread = threads.get(params.threadId);
     if (!thread) throw Object.assign(new Error(`thread not found: ${params.threadId}`), { code: -32600 });

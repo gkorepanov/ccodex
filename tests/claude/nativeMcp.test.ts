@@ -15,7 +15,7 @@ const context = (): NativeMcpContext => ({
   approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy: { type: "readOnly", networkAccess: false }, plan: false,
 });
 const definition = { name: "read.profile", description: "Read a profile", inputSchema: { type: "object", required: ["id"], properties: { id: { type: "string" } } }, annotations: { readOnlyHint: true }, _meta: { origin: "native" } };
-function fixture(onRequest?: (method: string, params: any, signal?: AbortSignal) => Promise<unknown>) {
+function fixture(onRequest?: (method: string, params: any, signal?: AbortSignal) => Promise<unknown>, worktree = false) {
   let current = context();
   const requests: { method: string; params: any }[] = [];
   let callback: (method: string, params: any) => Promise<unknown>;
@@ -31,7 +31,7 @@ function fixture(onRequest?: (method: string, params: any, signal?: AbortSignal)
         requests.push({ method, params });
         if (method === "thread/start") return { thread: { id } };
         if (method === "mcpServerStatus/list") return params.cursor
-          ? { data: [{ name: "app", pluginId: "disabled@personal", tools: { write: { ...definition, name: "write", annotations: { readOnlyHint: false } } } }], nextCursor: null }
+          ? { data: [{ name: worktree ? "codex_app" : "app", pluginId: "disabled@personal", tools: { [worktree ? "create_worktree" : "write"]: { ...definition, name: "write", annotations: { readOnlyHint: false } } } }], nextCursor: null }
           : { data: [{ name: "github", tools: { read: definition, ui: { ...definition, _meta: { ui: { visibility: ["app"] } } } } }], nextCursor: "page-2" };
         if (method === "mcpServer/tool/call") return action ? action() : { content: [{ type: "text", text: "native result" }], structuredContent: null, isError: false };
         return {};
@@ -43,6 +43,41 @@ function fixture(onRequest?: (method: string, params: any, signal?: AbortSignal)
 }
 
 describe("native MCP bridge", () => {
+  it("settles the worktree result before applying its directory change and rotating the helper", async () => {
+    const f = fixture(undefined, true);
+    f.setAction(async () => {
+      expect(f.bridge.deferWorkingDirectoryUpdate({ threadId: "claude-owner", cwd: "/worktree" }, async () => {
+        f.setContext({ ...f.current, cwd: "/worktree" });
+        f.bridge.refresh();
+      })).toBe(true);
+      expect(f.current.cwd).toBe("/work");
+      return { content: [{ type: "text", text: "created" }] };
+    });
+    await expect(f.bridge.call({ name: nativeToolName("codex_app", "create_worktree") })).resolves.toHaveProperty("content");
+    expect(f.current.cwd).toBe("/worktree");
+    f.setAction(async () => ({ content: [] }));
+    await f.bridge.call({ name: nativeToolName("github", "read") });
+    expect(f.connections).toBe(2);
+    f.bridge.close();
+  });
+
+  it("never defers permission changes or directory changes from unrelated tools", async () => {
+    const f = fixture(undefined, true);
+    const apply = async () => { throw new Error("must not be deferred"); };
+    expect(f.bridge.deferWorkingDirectoryUpdate({ cwd: "/elsewhere" }, apply)).toBe(false);
+    f.setAction(async () => {
+      expect(f.bridge.deferWorkingDirectoryUpdate({ cwd: "/elsewhere", permissions: ":danger-full-access" }, apply)).toBe(false);
+      return { content: [] };
+    });
+    await f.bridge.call({ name: nativeToolName("codex_app", "create_worktree") });
+    f.setAction(async () => {
+      expect(f.bridge.deferWorkingDirectoryUpdate({ cwd: "/elsewhere" }, apply)).toBe(false);
+      return { content: [] };
+    });
+    await f.bridge.call({ name: nativeToolName("github", "read") });
+    f.bridge.close();
+  });
+
   it("exposes paginated schemas and metadata through a real SDK MCP transport", async () => {
     const f = fixture();
     const client = new Client({ name: "test", version: "1" });
