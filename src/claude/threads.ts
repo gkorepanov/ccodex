@@ -809,10 +809,14 @@ export class ClaudeThreads {
     }
   }
 
-  /** Asks Claude for its models and keeps them for the next start. */
-  private async probeModels(): Promise<JsonObject[]> {
-    const models = await withProbeQuery(this.config, undefined, async (probe) => {
+  /**
+   * Asks Claude for its models and keeps them for the next start. The list is out as soon as Claude gives it: each
+   * model's context window then takes a request of its own (about a second a model), and a slow one must not lose it.
+   */
+  private probeModels(): Promise<JsonObject[]> {
+    return new Promise((resolve, reject) => void withProbeQuery(this.config, undefined, async (probe) => {
       const models: ClaudeModel[] = await probe.supportedModels();
+      resolve(this.useModels(models));
       // Claude's own context budget per model: its window, capped by settings such as CLAUDE_CODE_AUTO_COMPACT_WINDOW.
       // A model Claude lists but does not switch to here (an account or organization restriction, a failed check)
       // stays listed as Claude lists it, with the default window.
@@ -821,11 +825,10 @@ export class ClaudeThreads {
           .then(() => probe.getContextUsage({ detail: "summary" }))
           .then((usage) => usage.maxTokens, () => undefined);
       }
-      return models;
-    });
-    const temporary = `${this.modelsPath}.${process.pid}.tmp`;
-    void writeFile(temporary, JSON.stringify({ version: packageVersion(), models }), { mode: 0o600 }).then(() => rename(temporary, this.modelsPath)).catch(() => undefined);
-    return this.useModels(models);
+      this.useModels(models);
+      const temporary = `${this.modelsPath}.${process.pid}.tmp`;
+      await writeFile(temporary, JSON.stringify({ version: packageVersion(), models }), { mode: 0o600 }).then(() => rename(temporary, this.modelsPath));
+    }).catch(reject));
   }
 
   private useModels(models: ClaudeModel[]): JsonObject[] {
