@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -166,6 +166,18 @@ describe("daemon supervisor", () => {
     const lockDirectory = join(directory, "daemon.lock.hybrid");
     mkdirSync(lockDirectory, { recursive: true });
     writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({ pid: 999_999_999, processStartTime: "dead", token: "stale" }));
+    await withDaemonLock(directory, async () => undefined);
+    expect(readdirSync(directory)).toEqual(["daemon.lock"]);
+  });
+
+  it("recovers a stale lock past the marker of a recovery killed inside", async () => {
+    const directory = temp();
+    const lockDirectory = join(directory, "daemon.lock.hybrid");
+    mkdirSync(lockDirectory, { recursive: true });
+    writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({ pid: 999_999_999, processStartTime: "dead", token: "stale" }));
+    mkdirSync(`${lockDirectory}.recovery`);
+    const longAgo = new Date(Date.now() - 60_000);
+    utimesSync(`${lockDirectory}.recovery`, longAgo, longAgo);
     await withDaemonLock(directory, async () => undefined);
     expect(readdirSync(directory)).toEqual(["daemon.lock"]);
   });

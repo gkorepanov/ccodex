@@ -333,6 +333,9 @@ function recoverLock(lockDirectory: string): void {
     mkdirSync(recovery, { mode: 0o700 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // A recovery takes milliseconds: an old marker is one whose process was killed inside (SIGKILL skips the finally).
+    const modified = statSync(recovery, { throwIfNoEntry: false })?.mtimeMs;
+    if (modified !== undefined && Date.now() - modified >= START_TIMEOUT_MS) rmSync(recovery, { recursive: true, force: true });
     return;
   }
   try {
