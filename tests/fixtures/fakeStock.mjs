@@ -11,6 +11,7 @@ import { WebSocketServer } from "ws";
 const listen = process.argv[process.argv.indexOf("--listen") + 1];
 const socketPath = listen.slice("unix://".length);
 const threads = new Map();
+const attachments = new Map();
 /** Like stock: a thread's rollout file is written with its first message (or injected items), not at its start. */
 const rollouts = mkdtempSync(join(tmpdir(), "fake-stock-"));
 const materialize = (thread) => { if (!existsSync(thread.path)) writeFileSync(thread.path, ""); };
@@ -40,7 +41,7 @@ function newThread(params, extra = {}) {
 
 function settings(thread) {
   return {
-    model: thread.model, modelProvider: "openai", serviceTier: null, disabledPluginIds: [], cwd: thread.cwd,
+    model: thread.model, modelProvider: "openai", serviceTier: null, disabledPluginIds: thread.disabledPluginIds ?? [], cwd: thread.cwd,
     runtimeWorkspaceRoots: [thread.cwd], instructionSources: [], approvalPolicy: thread.approvalPolicy, approvalsReviewer: "user",
     sandbox: thread.sandbox, activePermissionProfile: null, reasoningEffort: null, multiAgentMode: "explicitRequestOnly",
   };
@@ -117,6 +118,7 @@ const handlers = {
   },
   "thread/start": (connection, params) => {
     const thread = newThread(params);
+    if (params.sandbox === "read-only") thread.sandbox = { type: "readOnly", networkAccess: false };
     thread.subscribers = new Set([connection]);
     thread.instructions.push(params.developerInstructions ?? null);
     broadcast("thread/started", { thread: summary(thread) });
@@ -134,6 +136,32 @@ const handlers = {
     };
   },
   "thread/read": (_connection, params) => ({ thread: params.includeTurns ? full(threads.get(params.threadId)) : summary(threads.get(params.threadId)) }),
+  "thread/attachment/add": (_connection, params) => {
+    if (!threads.has(params.threadId)) throw new Error("thread not found");
+    const key = JSON.stringify([params.threadId, params.attachmentType, params.identityKey]);
+    const existing = attachments.get(key);
+    if (existing) return { outcome: "existing", attachment: existing.attachment };
+    const { threadId, ...fields } = params;
+    const attachment = { ...fields, id: randomUUID(), createdAt: now() };
+    attachments.set(key, { threadId, attachment });
+    return { outcome: "created", attachment };
+  },
+  "thread/attachment/list": (_connection, params) => {
+    const { data, nextCursor } = paginate([...attachments.values()].filter(a => a.threadId === params.threadId).map(a => a.attachment), params);
+    return { data, nextCursor };
+  },
+  "thread/attachment/remove": (_connection, params) => { attachments.delete(JSON.stringify([params.threadId, params.attachmentType, params.identityKey])); return {}; },
+  "thread/attachmentOwner/list": (_connection, params) => paginate([...attachments.values()]
+    .filter(a => a.attachment.attachmentType === params.attachmentType && a.attachment.identityKey === params.identityKey && threads.has(a.threadId))
+    .map(a => ({ threadId: a.threadId, archived: threads.get(a.threadId).archived }))
+    .filter(a => params.archived == null || a.archived === params.archived), params),
+  "thread/settings/update": (_connection, params) => {
+    const thread = threads.get(params.threadId);
+    if (!thread) throw Object.assign(new Error(`thread not found: ${params.threadId}`), { code: -32600 });
+    if (params.sandboxPolicy) thread.sandbox = structuredClone(params.sandboxPolicy);
+    if (params.disabledPluginIds) thread.disabledPluginIds = [...params.disabledPluginIds];
+    return {};
+  },
   "thread/list": (_connection, params) => {
     const list = [...threads.values()].filter((thread) => !thread.ephemeral && thread.archived === (params.archived ?? false)
       && (params.sectionId === undefined || (params.sectionId === null ? !pinned.includes(thread.id) : pinned.includes(thread.id))))

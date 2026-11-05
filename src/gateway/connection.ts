@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { withFormatting } from "../instructions.js";
+import { nativeAccessFrom } from "../claude/nativeAccess.js";
 import type { Provider } from "../meta.js";
 import { rpcError, type JsonObject, type RequestId } from "../protocol/codex.js";
 import type { Gateway } from "./server.js";
@@ -31,6 +32,7 @@ export class Connection {
   /** The developer instructions this client last sent; the stock threads the gateway starts or resumes for it get them too. */
   public developerInstructions?: string;
   private closed = false;
+  private readonly nativeStarts = new Map<RequestId, JsonObject>();
   /** What the client sent past its handshake before the gateway was ready, in order. */
   private backlog?: string[] = [];
 
@@ -84,6 +86,7 @@ export class Connection {
 
   public respond(id: RequestId, result: unknown): void {
     this.ephemeralRequests.delete(id);
+    this.rememberNativeAccess(id, result);
     this.send(JSON.stringify({ id, result }));
   }
 
@@ -95,6 +98,7 @@ export class Connection {
   private close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.nativeStarts.clear();
     this.gateway.detach(this);
     this.gateway.recorder.connection("closed", this.id);
     if (this.client.readyState === WebSocket.OPEN) this.client.close();
@@ -146,14 +150,21 @@ export class Connection {
       this.forward(text);
       return;
     }
+    if (this.gateway.config.nativeMcp && INSTRUCTED_METHODS.has(message.method)) {
+      this.nativeStarts.set(message.id, structuredClone(message.params ?? {}));
+    }
     const handler = this.route(message.method, message.params ?? {});
     if (!handler) {
+      if (this.gateway.config.nativeMcp && message.method === "thread/settings/update") {
+        this.nativeStarts.set(message.id, structuredClone(message.params ?? {}));
+      }
       this.forward(text);
       return;
     }
     handler(this, message.params ?? {}).then(
       (result) => this.respond(message.id, result),
       (error: unknown) => {
+        this.nativeStarts.delete(message.id);
         this.gateway.logger.warn("request.failed", { method: message.method, error: String(error) });
         this.send(JSON.stringify({ id: message.id, error: rpcError(error) }));
       },
@@ -173,8 +184,22 @@ export class Connection {
   }
 
   private onStockText(text: string): void {
+    if (this.nativeStarts.size) {
+      const message = JSON.parse(text) as JsonObject;
+      if (message.method === undefined) this.rememberNativeAccess(message.id, message.result);
+    }
     if (this.ephemeralRequests.size && text.startsWith("{\"id\"")) this.ephemeralRequests.delete((JSON.parse(text) as JsonObject).id);
     const rewritten = this.gateway.fromBackendFrame(this, text);
     if (rewritten !== undefined) this.send(rewritten);
+  }
+
+  /** Keep successful GPT launch/settings changes for a later picker switch to Claude. */
+  private rememberNativeAccess(id: RequestId, result: unknown): void {
+    const params = this.nativeStarts.get(id);
+    this.nativeStarts.delete(id);
+    const threadId = (result as JsonObject | undefined)?.thread?.id ?? params?.threadId;
+    if (!params || result === undefined || typeof threadId !== "string" || this.gateway.isClaudeThread(threadId)) return;
+    const publicId = this.gateway.meta.rewrites.get(threadId) ?? threadId;
+    this.gateway.meta.setNativeMcpAccess(publicId, nativeAccessFrom(params, this.gateway.meta.nativeMcpAccess(publicId)));
   }
 }

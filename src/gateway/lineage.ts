@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { codexPermissions, permissionSettings } from "../claude/sdk.js";
+import { nativeAccessFrom } from "../claude/nativeAccess.js";
 import type { Provider, Segment } from "../meta.js";
 import { invalidRequest, requestedModel, type JsonObject, type Thread, type Turn } from "../protocol/codex.js";
 import { historyCursors, occurrencesPage, paginateItems, paginateTurns, startedTurn, turnCursor, turnView } from "../protocol/turnPagination.js";
@@ -255,7 +256,11 @@ export class Lineages {
       await connection.upstream.request("thread/resume", { threadId: segment.threadId, excludeTurns: true, developerInstructions: connection.developerInstructions });
     }
     this.track(connection, method, segment.threadId);
-    return connection.upstream.request(method, backendParams);
+    const result = await connection.upstream.request(method, backendParams);
+    if (this.gateway.config.nativeMcp && method === "thread/settings/update") {
+      this.gateway.meta.setNativeMcpAccess(params.threadId, nativeAccessFrom(params, this.gateway.meta.nativeMcpAccess(params.threadId)));
+    }
+    return result;
   }
 
   // ---- history ----
@@ -587,7 +592,8 @@ export class Lineages {
     // under its own id.
     const { thread } = await connection.upstream.request("thread/read", { threadId: source.threadId });
     if (segments.length === 1 && !existsSync(thread.path)) {
-      const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd: thread.cwd, model: null, effort: null, fast: false, permissionMode: "default", plan: false }), publicId);
+      const nativeAccess = this.gateway.config.nativeMcp ? { nativeAccess: this.gateway.meta.nativeMcpAccess(publicId) ?? {} } : {};
+      const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd: thread.cwd, model: null, effort: null, fast: false, permissionMode: "default", plan: false, ...nativeAccess }), publicId);
       for (const viewer of viewers) this.gateway.subscribe(publicId, viewer);
       this.gateway.titles.track(publicId);
       tell("thread/settings/updated", { threadId: publicId, threadSettings: this.gateway.claude.threadSettings(session.settings) });
@@ -605,7 +611,12 @@ export class Lineages {
     // The goal goes on with the chat's next backend: stock pursues it no more (a paused one it doesn't; clearing it
     // would blink the goal away for every client until the switch ends).
     if (goal?.status === "active") await connection.upstream.request("thread/goal/clear", { threadId: source.threadId });
-    const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd: stock.cwd, model: null, effort: null, fast: false, ...permissions }));
+    const nativeAccess = this.gateway.config.nativeMcp ? { nativeAccess: nativeAccessFrom({
+      ...stock, ...(stock.activePermissionProfile?.id
+        ? { sandbox: undefined, permissions: stock.activePermissionProfile.id }
+        : { sandboxPolicy: stock.sandbox }),
+    }, this.gateway.meta.nativeMcpAccess(publicId)) } : {};
+    const session = this.gateway.claude.create(this.gateway.claude.settingsFrom(params, { cwd: stock.cwd, model: null, effort: null, fast: false, ...permissions, ...nativeAccess }));
     // A backend from its first record on: its transcript is on disk before the lineage lists it.
     this.newBackends.add(session.threadId);
     for (const viewer of viewers) this.gateway.subscribe(session.threadId, viewer);
@@ -658,11 +669,16 @@ export class Lineages {
     const permissions = codexPermissions(settings.permissionMode, settings.cwd);
     const started = await this.startBackend(connection, {
       model: requestedModel(params), cwd: settings.cwd, developerInstructions: connection.developerInstructions,
+      ...(settings.nativeAccess?.config ? { config: settings.nativeAccess.config } : {}),
       approvalPolicy: params.approvalPolicy ?? permissions.approvalPolicy,
       approvalsReviewer: params.approvalsReviewer ?? permissions.approvalsReviewer,
       ...(params.permissions || params.sandboxPolicy ? {} : { permissions: permissions.activePermissionProfile.id }),
     });
     const threadId: string = started.thread.id;
+    if (settings.nativeAccess?.disabledPluginIds) {
+      await connection.upstream.request("thread/settings/update", { threadId, disabledPluginIds: settings.nativeAccess.disabledPluginIds });
+      started.disabledPluginIds = [...settings.nativeAccess.disabledPluginIds];
+    }
     await connection.upstream.request("thread/inject_items", {
       threadId,
       items: [{ type: "message", role: "user", content: [{ type: "input_text", text: `${SUMMARY_PREFIX}\n${summary}` }] }],
