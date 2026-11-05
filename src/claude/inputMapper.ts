@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, resolve } from "node:path";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { invalidParams, type JsonObject, type UserInput } from "../protocol/codex.js";
+import { invalidParams, type JsonObject, type ThreadItem, type UserInput } from "../protocol/codex.js";
 import { decodeClaudeSkillChips } from "./sdk.js";
 
 const mediaTypes: Record<string, string> = {
@@ -77,6 +77,21 @@ export function turnInput(params: JsonObject): UserInput[] {
     else if (item?.type === "input_image" && typeof item.image_url === "string") delivered.push({ type: "image", url: item.image_url });
   }
   return normalizeUserInput([...delivered, ...(params.input ?? [])]);
+}
+
+const DELEGATION = /^<codex_delegation>[\s\S]*<\/codex_delegation>$/u;
+
+/**
+ * A prompt as the chat shows it. A message another thread sent (its `<codex_delegation>` envelope) shows as stock shows
+ * it, the output of `send_message_to_thread`: Desktop draws only that as "Sent by … from another chat", linking to it,
+ * and shows nothing for a user message with the envelope.
+ */
+export function promptItem(id: string, clientId: string | null, input: UserInput[]): ThreadItem {
+  const [only] = input;
+  const text = input.length === 1 && only?.type === "text" ? only.text.trim() : "";
+  return DELEGATION.test(text)
+    ? { type: "functionCallOutput", id, name: "send_message_to_thread", namespace: "codex_app", output: text }
+    : { type: "userMessage", id, clientId, content: input };
 }
 
 export function inputText(input: readonly UserInput[]): string {

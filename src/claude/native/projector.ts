@@ -3,6 +3,7 @@ import { isAbsolute, resolve } from "node:path";
 import type { JsonValue, Thread, ThreadItem, TokenUsageBreakdown, Turn, UserInput } from "../../protocol/codex.js";
 import { parseCommands } from "../commandActions.js";
 import { CODEX_MCP_TOOLS, codexMcpItems } from "../codexRollout.js";
+import { promptItem } from "../inputMapper.js";
 import { normalizeClaudeModelIdentifier } from "../modelSelection.js";
 import { NO_PEERS, peerMessageItem, peerOrigin, sentMessageItem, subagentFiles, type PeerDirectory, type Peers } from "../peers.js";
 import {
@@ -599,7 +600,7 @@ function projectTurns(
     const peer = peerOrigin(prompt?.origin);
     const items: ThreadItem[] = peer ? [peerMessageItem(prompt!.uuid, peer, userText(prompt!), peers)]
       : hiddenCommand || !prompt ? []
-      : [{ type: "userMessage", id: prompt.uuid, clientId: null, content: input }];
+      : [promptItem(prompt.uuid, null, input)];
     const responses = new Map<string, AssistantRecord[]>();
     for (const record of turnRecords) {
       if (record.type !== "assistant") continue;
@@ -637,7 +638,7 @@ function projectTurns(
         } else if (attachment?.type === "queued_command" && (attachment.commandMode === "prompt" || object(attachment.origin)?.kind === "coordinator")
           && (typeof attachment.prompt === "string" || Array.isArray(attachment.prompt))) {
           const id = string(attachment.source_uuid) ?? record.uuid;
-          items.push({ type: "userMessage", id, clientId: id, content: userInputs({ message: { content: attachment.prompt } } as UserRecord) });
+          items.push(promptItem(id, id, userInputs({ message: { content: attachment.prompt } } as UserRecord)));
         }
       }
     }

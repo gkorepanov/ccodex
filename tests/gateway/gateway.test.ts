@@ -87,17 +87,21 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(list.data.map((row: any) => row.id)).toContain(threadId);
   });
 
-  it("gives Claude a message another thread sent (Desktop's send_message_to_thread: no input, the message as the turn's tool output), live and in history", async () => {
+  it("gives Claude a message another thread sent (Desktop's send_message_to_thread: no input, the message as the turn's tool output), shown as stock shows it, live and in history", async () => {
     const threadId = await claudeThread();
     const message = "<codex_delegation>\n  <source_thread_id>01a0a0a4-30bb-7e10-a3ac-a3a839ea2640</source_thread_id>\n  <input>deploy is done</input>\n</codex_delegation>";
     const { turn } = await client.request("turn/start", { threadId, input: [], toolOutput: { name: "send_message_to_thread", namespace: "codex_app", output: message } });
     await client.waitFor("turn/completed", (params) => params.turn.id === turn.id);
     expect(fakeClaude.prompts.map((prompt) => prompt.text)).toEqual([message]);
+    // Desktop draws it as "Sent by … from another chat" only as this tool output; a user message with it shows nothing.
+    const shown = { type: "functionCallOutput", id: turn.id, name: "send_message_to_thread", namespace: "codex_app", output: message };
+    expect(client.notifications("item/completed", threadId).map((notification) => notification.params.item).filter((item) => item.type !== "agentMessage")).toEqual([shown]);
     const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
-    expect(itemsOf(thread.turns)).toEqual([`user:${message}`, `agent:claude: ${message}`]);
+    expect(thread.turns[0].items[0]).toEqual(shown);
+    expect(itemsOf(thread.turns)).toEqual(["functionCallOutput", `agent:claude: ${message}`]);
   });
 
-  it("gives Claude a message another thread sent while its turn runs (a tool output of content items), shown with a client id (Desktop shows a message of a turn after its first only with it)", async () => {
+  it("gives Claude a message another thread sent while its turn runs (a tool output of content items), shown as stock shows it", async () => {
     const threadId = await claudeThread();
     let approve!: () => void;
     client.onRequest = () => new Promise((resolve) => { approve = () => resolve({ decision: "accept" }); });
@@ -111,8 +115,8 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     await client.request("turn/start", { threadId, input: [], toolOutput: { name: "send_message_to_thread", namespace: "codex_app", output } });
     approve();
     await vi.waitFor(() => expect(fakeClaude.prompts.map((prompt) => prompt.text)).toEqual(["this needs approval", message]));
-    const shown = await client.waitFor("item/completed", (params) => params.threadId === threadId && params.item.type === "userMessage" && params.item.content[0]?.text === message);
-    expect(shown.item.clientId).toBe(shown.item.id);
+    const shown = await client.waitFor("item/completed", (params) => params.threadId === threadId && params.item.type === "functionCallOutput");
+    expect(shown.item).toMatchObject({ name: "send_message_to_thread", namespace: "codex_app", output: message });
   });
 
   it("shows a session made in the claude CLI at once, with its whole history in Desktop's pages", async () => {

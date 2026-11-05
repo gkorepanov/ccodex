@@ -7,6 +7,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { claudeHome } from "../config.js";
 import type { ThreadItem } from "../protocol/codex.js";
+import { promptItem } from "./inputMapper.js";
 import { parentPid } from "./processes.js";
 
 /** Which sessions sent and got cross-session messages (`msg_id`), as their transcripts tell. */
@@ -108,8 +109,8 @@ function peerBody(origin: Fields, recordText: string): string {
 const escape = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
 /**
- * A message another agent sent, as Desktop shows one another thread sent ("Sent by Codex from another task", linking
- * to it): its `<codex_delegation>` user message. Without a known thread, a plain message saying so.
+ * A message another agent sent, as Desktop shows one another thread sent ("Sent by … from another chat", linking to
+ * it): its `<codex_delegation>` envelope (`promptItem`). Without a known thread, a plain message saying so.
  */
 export function peerMessageItem(id: string, origin: Fields, recordText: string, peers: Peers): ThreadItem {
   const body = peerBody(origin, recordText);
@@ -118,7 +119,7 @@ export function peerMessageItem(id: string, origin: Fields, recordText: string, 
   const message = source
     ? ["<codex_delegation>", `  <source_thread_id>${escape(source)}</source_thread_id>`, `  <input>${escape(body)}</input>`, "</codex_delegation>"].join(" ")
     : `Message from ${name ? `Claude agent ${name}` : "another Claude agent"} (CCodex does not know its chat):\n\n${body}`;
-  return { type: "userMessage", id, clientId: null, content: [{ type: "text", text: message, text_elements: [] }] };
+  return promptItem(id, null, [{ type: "text", text: message, text_elements: [] }]);
 }
 
 /**

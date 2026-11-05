@@ -28,6 +28,7 @@ export type FileUpdateChange = {
 
 export type ThreadItem =
   | { type: "userMessage"; id: string; clientId: string | null; content: UserInput[] }
+  | { type: "functionCallOutput"; id: string; name: string; namespace: string | null; output: string }
   | {
       type: "agentMessage"; id: string; text: string; phase: string | null; memoryCitation: null;
       delivery?: unknown; questions?: unknown;

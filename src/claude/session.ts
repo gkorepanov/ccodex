@@ -13,7 +13,7 @@ import { startedTurn } from "../protocol/turnPagination.js";
 import {
   CODEX_MCP_TOOLS, codexMcpItem, tailCodexRollout, type CodexTurnContext,
 } from "./codexRollout.js";
-import { claudeContent, inputText, normalizeUserInput, turnInput, userMessage } from "./inputMapper.js";
+import { claudeContent, inputText, normalizeUserInput, promptItem, turnInput, userMessage } from "./inputMapper.js";
 import { completedToolItem } from "./native/projector.js";
 import { ANSWER_CHARS, assistantBlockItemId, continuationTurnId } from "./native/ids.js";
 import { isNarration, messageText, readTranscriptRecords, type UserRecord } from "./native/records.js";
@@ -437,9 +437,8 @@ export class ClaudeSession {
     // Claude takes it as a prompt of its own, not into the turn that waits for its sub-agents.
     if (this.turn?.waiting) this.completeTurn(true);
     if (this.turn) {
-      // Claude folds a message sent mid-turn into the running turn, like a steer. Desktop shows a message of a turn after
-      // its first only with a client id; one another thread sent comes with none, and history gives it the message's id.
-      this.pendingInputs.set(uuid, { input, clientId: params.clientUserMessageId ?? uuid, hidden });
+      // Claude folds a message sent mid-turn into the running turn, like a steer.
+      this.pendingInputs.set(uuid, { input, clientId: params.clientUserMessageId ?? null, hidden });
       this.ensureQuery();
       this.inbox!.push(userMessage(content, uuid));
       return startedTurn(this.liveTurn()!);
@@ -634,7 +633,7 @@ export class ClaudeSession {
       if (!announced) this.emit("turn/started", { threadId: this.threadId, turn: startedTurn(turn) });
       this.emit("thread/status/changed", { threadId: this.threadId, status: { type: "active", activeFlags: [] } });
       if (!hidden) {
-        const item: ThreadItem = { type: "userMessage", id, clientId, content: input };
+        const item = promptItem(id, clientId, input);
         this.itemStarted(item);
         this.itemCompleted(item);
       }
@@ -808,7 +807,7 @@ export class ClaudeSession {
     if (!this.turn) return this.ensureTurn(uuid);
     this.pendingInputs.delete(uuid!);
     if (pending.hidden) return;
-    const item: ThreadItem = { type: "userMessage", id: uuid!, clientId: pending.clientId, content: pending.input };
+    const item = promptItem(uuid!, pending.clientId, pending.input);
     this.itemStarted(item);
     this.itemCompleted(item);
   }
