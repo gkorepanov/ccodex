@@ -65,7 +65,9 @@ mcp-server`, removed from Codex in `0.154`, is served by CCodex on top of `codex
   `~/.ccodex/backups/remote-codex` and stays the Codex CCodex runs.
 - macOS: sets `CODEX_CLI_PATH` for the local App (`launchctl setenv` plus a login
   LaunchAgent `dev.ccodex.codex-cli-path`), so the App starts CCodex instead of its bundled
-  `codex`. The signed `.app` is never touched, so its auto-updates keep working.
+  `codex`. The signed `.app` is never touched, so its auto-updates keep working. That `codex`
+  runs on the App's own Node (`Contents/Resources/cua_node`): the App gives its tools (chats'
+  `codex_app` tools, Browser Use) only to processes signed as it is.
 - Claude Code: sets `cleanupPeriodDays: 36500` in `~/.claude/settings.json` when unset
   (Claude deletes transcripts older than 30 days by default, and with them your Claude
   chats), and installs the `codex-wrapper` agent and the `codex` MCP server (user scope).

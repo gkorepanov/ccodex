@@ -54,7 +54,18 @@ function readManifest(): Manifest | undefined {
 const sha256 = (content: string | Buffer) => createHash("sha256").update(content).digest("hex");
 const quote = (value: string) => `'${value.replaceAll("'", "'\"'\"'")}'`;
 
-function shim(name: "codex" | "ccodex", node: string): string {
+export function shim(name: "codex" | "ccodex", node: string, platform = process.platform): string {
+  // On macOS the App's tools pipe (chats' codex_app tools, Browser Use) trusts only processes signed as the App is: the
+  // codex it starts runs on the App's own Node, setup's staying on PATH (codex and tools npm installed beside it).
+  const appNode = name === "codex" && platform === "darwin" ? `for app in /Applications/ChatGPT.app "$HOME/Applications/ChatGPT.app"; do
+  if [ -x "$app/Contents/Resources/cua_node/bin/node" ]; then
+    CCODEX_NODE="$app/Contents/Resources/cua_node/bin/node"
+    PATH="\${PATH:-}:"${quote(dirname(node))}
+    export PATH
+    break
+  fi
+done
+` : "";
   const prelude = `#!/bin/sh
 set -eu
 if [ "\${CCODEX_SHIM_ACTIVE:-}" = 1 ]; then
@@ -64,7 +75,7 @@ fi
 CCODEX_SHIM_ACTIVE=1
 CCODEX_HOME=\${CCODEX_HOME:-"$HOME/.ccodex"}
 CCODEX_NODE=${quote(node)}
-if [ ! -x "$CCODEX_NODE" ]; then
+${appNode}if [ ! -x "$CCODEX_NODE" ]; then
   CCODEX_NODE=$(command -v node 2>/dev/null || true)
 fi
 if [ -z "$CCODEX_NODE" ] || [ ! -x "$CCODEX_NODE" ]; then
