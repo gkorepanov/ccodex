@@ -151,6 +151,8 @@ describe("Claude going on after an answer: a turn of its own, as history shows i
     const threadId = await chat();
     const first = await answered(threadId, "delegate in background: APPLE");
     const waiting = await client.waitFor("turn/started", (params) => params.threadId === threadId && params.turn.id !== first, 500);
+    // Desktop steers a follow-up into a running turn; this refusal makes it send the message as a new turn instead.
+    await expect(client.request("turn/steer", { threadId, input: [{ type: "text", text: "and meanwhile?", text_elements: [] }], expectedTurnId: waiting.turn.id })).rejects.toThrow(/^no active turn to steer$/);
     await client.request("thread/queue/add", { threadId, input: [{ type: "text", text: "and meanwhile?", text_elements: [] }] });
     expect((await client.request("thread/queue/list", { threadId })).data).toEqual([]);
     await client.waitFor("turn/completed", (params) => params.turn.id === waiting.turn.id && params.turn.status === "completed", 500);

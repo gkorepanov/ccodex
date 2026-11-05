@@ -1404,6 +1404,13 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(client.notifications("turn/started", threadId).map((message) => message.params.turn.id)).toEqual([turn.id]);
   });
 
+  it("gives Claude a message another chat sent as a tool's output (Desktop's send_message_to_thread)", async () => {
+    const threadId = await claudeThread();
+    const output = "<codex_delegation> <source_thread_id>other</source_thread_id> <input>ping</input> </codex_delegation>";
+    await client.turn(threadId, "", { input: [], toolOutput: { name: "send_message_to_thread", namespace: "codex_app", output } });
+    expect(fakeClaude.prompts.at(-1)!.text).toBe(output);
+  });
+
   it("shows Claude's compaction from its start, like stock; one that fails stays unfinished", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "first");
@@ -1412,6 +1419,9 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     const started = compactions("item/started");
     expect(started).toHaveLength(1);
     expect(compactions("item/completed")).toEqual(started);
+    // History names it as live did: Desktop would show it twice otherwise.
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(thread.turns.flatMap((turn: any) => turn.items).filter((item: any) => item.type === "contextCompaction").map((item: any) => item.id)).toEqual(started);
     await client.turn(threadId, "second");
     fakeClaude.compactError = "Error during compaction: summarization produced empty response";
     await client.turn(threadId, "/compact");

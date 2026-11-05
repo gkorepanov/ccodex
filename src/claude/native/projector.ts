@@ -17,7 +17,7 @@ import {
   type BackgroundEnd,
 } from "../toolMapper.js";
 import { selectHistory, type SelectedHistory } from "./history.js";
-import { ANSWER_CHARS, assistantBlockItemId, continuationTurnId } from "./ids.js";
+import { ANSWER_CHARS, assistantBlockItemId, compactionItem, continuationTurnId } from "./ids.js";
 import {
   isCompactBoundary,
   isNarration,
@@ -627,7 +627,7 @@ function projectTurns(
         const text = record.content.replace(/<\/?local-command-std(?:out|err)>/gu, "").trim();
         // Claude's own word on `/goal` ("Goal set: …"): Codex clients show goals themselves.
         if (text && record.commandRun?.command !== "goal") items.push({ type: "agentMessage", id: record.uuid, text, phase: "commentary", memoryCitation: null });
-      } else if (isCompactBoundary(record)) items.push({ type: "contextCompaction", id: record.uuid });
+      } else if (isCompactBoundary(record)) items.push(compactionItem(id, items));
       else if (record.type === "attachment") {
         // A message sent mid-turn: Claude folds it into the running turn.
         const attachment = object(record.attachment);
@@ -664,7 +664,8 @@ function projectTurns(
   turns.forEach((turn, index) => {
     const previous = turns[index - 1];
     if (!previous || turn.items.length || previous.items.at(-1)?.type !== "contextCompaction") return;
-    turn.items.push(previous.items.pop()!);
+    previous.items.pop();
+    turn.items.push(compactionItem(turn.id, turn.items));
   });
   return turns;
 }
