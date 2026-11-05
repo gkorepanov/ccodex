@@ -13,7 +13,7 @@ import { startedTurn } from "../protocol/turnPagination.js";
 import {
   CODEX_MCP_TOOLS, codexMcpItem, tailCodexRollout, type CodexTurnContext,
 } from "./codexRollout.js";
-import { claudeContent, inputText, normalizeUserInput, userMessage } from "./inputMapper.js";
+import { claudeContent, inputText, normalizeUserInput, promptItem, turnInput, userMessage } from "./inputMapper.js";
 import { completedToolItem } from "./native/projector.js";
 import { ANSWER_CHARS, assistantBlockItemId, continuationTurnId } from "./native/ids.js";
 import { isNarration, messageText, readTranscriptRecords, type UserRecord } from "./native/records.js";
@@ -424,7 +424,7 @@ export class ClaudeSession {
     // Two processes writing one transcript fork it: whatever the other one writes next is lost to the chat.
     const owner = this.turn ? undefined : foreignOwner(this.host.config.claudeHome, this.threadId);
     if (owner) throw invalidRequest(`This chat is open in another Claude process (pid ${owner}): close it there or wait until it ends.`);
-    const input = normalizeUserInput(params.input ?? []);
+    const input = turnInput(params);
     const goal = /^\/goal\s+(\S[\s\S]*)/u.exec(inputText(input))?.[1]!.trim();
     if (goal) this.goalObjective = goal === "clear" ? null : goal;
     const uuid: string = params.turnId ?? randomUUID();
@@ -633,7 +633,7 @@ export class ClaudeSession {
       if (!announced) this.emit("turn/started", { threadId: this.threadId, turn: startedTurn(turn) });
       this.emit("thread/status/changed", { threadId: this.threadId, status: { type: "active", activeFlags: [] } });
       if (!hidden) {
-        const item: ThreadItem = { type: "userMessage", id, clientId, content: input };
+        const item = promptItem(id, clientId, input);
         this.itemStarted(item);
         this.itemCompleted(item);
       }
@@ -807,7 +807,7 @@ export class ClaudeSession {
     if (!this.turn) return this.ensureTurn(uuid);
     this.pendingInputs.delete(uuid!);
     if (pending.hidden) return;
-    const item: ThreadItem = { type: "userMessage", id: uuid!, clientId: pending.clientId, content: pending.input };
+    const item = promptItem(uuid!, pending.clientId, pending.input);
     this.itemStarted(item);
     this.itemCompleted(item);
   }

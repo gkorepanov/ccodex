@@ -41,7 +41,8 @@ function registry(sessions: Array<Record<string, unknown> | string>): string {
   return home;
 }
 const peers = (home: string, known?: Parameters<typeof directory>[0], children = new Set<string>()): Peers => ({ directory: directory(known), children, home });
-const text = (item: ThreadItem) => item.type === "userMessage" && item.content[0]?.type === "text" ? item.content[0].text : undefined;
+const text = (item: ThreadItem) => item.type === "functionCallOutput" ? item.output
+  : item.type === "userMessage" && item.content[0]?.type === "text" ? item.content[0].text : undefined;
 
 describe("messages between Claude agents", () => {
   it("shows a message another session sent as its own turn, sent by that session's chat", async () => {
@@ -51,7 +52,9 @@ describe("messages between Claude agents", () => {
     ];
     const projection = await projectTranscript({ sessionId: "receiver", path: "/tmp/r.jsonl", records, peers: directory({ senders: { "msg-1": SENDER } }) });
     expect(projection.turns.map((turn) => turn.id)).toEqual(["prompt", "peer"]);
-    expect(projection.turns[1]!.items.map((item) => item.type)).toEqual(["userMessage", "agentMessage"]);
+    // As stock shows a message another thread sent: Desktop draws it as "Sent by … from another chat" only so.
+    expect(projection.turns[1]!.items.map((item) => item.type)).toEqual(["functionCallOutput", "agentMessage"]);
+    expect(projection.turns[1]!.items[0]).toMatchObject({ name: "send_message_to_thread", namespace: "codex_app" });
     expect(text(projection.turns[1]!.items[0]!)).toBe(delegation(SENDER, "What is your code word?"));
     expect(projection.thread.preview).toBe("Remember MANGO");
   });
@@ -78,7 +81,7 @@ describe("messages between Claude agents", () => {
       queued, reply("done", "queued", "Done", 5),
     ];
     const projection = await projectTranscript({ sessionId: "receiver", path: "/tmp/r.jsonl", records, peers: directory({ senders: { "msg-1": SENDER } }) });
-    expect(projection.turns.map((turn) => turn.items.map((item) => item.type))).toEqual([["userMessage", "commandExecution", "userMessage", "agentMessage"]]);
+    expect(projection.turns.map((turn) => turn.items.map((item) => item.type))).toEqual([["userMessage", "commandExecution", "functionCallOutput", "agentMessage"]]);
     expect(projection.turns[0]!.items[2]).toMatchObject({ id: "command" });
     expect(text(projection.turns[0]!.items[2]!)).toBe(delegation(SENDER, "PING-MID"));
   });
