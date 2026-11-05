@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, resolve } from "node:path";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { invalidParams, type UserInput } from "../protocol/codex.js";
+import { invalidParams, type JsonObject, type UserInput } from "../protocol/codex.js";
 import { decodeClaudeSkillChips } from "./sdk.js";
 
 const mediaTypes: Record<string, string> = {
@@ -58,6 +58,25 @@ export function normalizeUserInput(input: readonly UserInput[]): UserInput[] {
   return input.map((item) => item.type === "text"
     ? { type: "text", text: item.text, text_elements: item.text_elements ?? [] }
     : item);
+}
+
+/**
+ * A turn's input. Desktop delivers a message another thread sent (`send_message_to_thread`, a new thread's first
+ * prompt) as the turn's `toolOutput` with no input: Claude has no tool call to answer, so it gets the output as the
+ * message, the `<codex_delegation>` envelope included (it names the thread to answer).
+ */
+export function turnInput(params: JsonObject): UserInput[] {
+  const output = params.toolOutput?.output;
+  const items: JsonObject[] = typeof output === "string" ? [{ type: "input_text", text: output }] : Array.isArray(output) ? output : [];
+  const delivered: UserInput[] = [];
+  for (const item of items) {
+    const last = delivered.at(-1);
+    // Adjacent texts as one, as history gives them back: Desktop shows the envelope as another thread's message only whole.
+    if (item?.type === "input_text" && last?.type === "text") last.text += `\n${String(item.text)}`;
+    else if (item?.type === "input_text") delivered.push({ type: "text", text: String(item.text) });
+    else if (item?.type === "input_image" && typeof item.image_url === "string") delivered.push({ type: "image", url: item.image_url });
+  }
+  return normalizeUserInput([...delivered, ...(params.input ?? [])]);
 }
 
 export function inputText(input: readonly UserInput[]): string {

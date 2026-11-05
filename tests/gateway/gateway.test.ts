@@ -87,6 +87,34 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(list.data.map((row: any) => row.id)).toContain(threadId);
   });
 
+  it("gives Claude a message another thread sent (Desktop's send_message_to_thread: no input, the message as the turn's tool output), live and in history", async () => {
+    const threadId = await claudeThread();
+    const message = "<codex_delegation>\n  <source_thread_id>01a0a0a4-30bb-7e10-a3ac-a3a839ea2640</source_thread_id>\n  <input>deploy is done</input>\n</codex_delegation>";
+    const { turn } = await client.request("turn/start", { threadId, input: [], toolOutput: { name: "send_message_to_thread", namespace: "codex_app", output: message } });
+    await client.waitFor("turn/completed", (params) => params.turn.id === turn.id);
+    expect(fakeClaude.prompts.map((prompt) => prompt.text)).toEqual([message]);
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: true });
+    expect(itemsOf(thread.turns)).toEqual([`user:${message}`, `agent:claude: ${message}`]);
+  });
+
+  it("gives Claude a message another thread sent while its turn runs (a tool output of content items), shown with a client id (Desktop shows a message of a turn after its first only with it)", async () => {
+    const threadId = await claudeThread();
+    let approve!: () => void;
+    client.onRequest = () => new Promise((resolve) => { approve = () => resolve({ decision: "accept" }); });
+    await client.request("turn/start", { threadId, input: text("this needs approval") });
+    await vi.waitFor(() => expect(approve).toBeDefined());
+    const output = [
+      { type: "input_text", text: "<codex_delegation>\n  <source_thread_id>01a0a0a4-30bb-7e10-a3ac-a3a839ea2640</source_thread_id>" },
+      { type: "input_text", text: "  <input>stop the rollout</input>\n</codex_delegation>" },
+    ];
+    const message = output.map((item) => item.text).join("\n");
+    await client.request("turn/start", { threadId, input: [], toolOutput: { name: "send_message_to_thread", namespace: "codex_app", output } });
+    approve();
+    await vi.waitFor(() => expect(fakeClaude.prompts.map((prompt) => prompt.text)).toEqual(["this needs approval", message]));
+    const shown = await client.waitFor("item/completed", (params) => params.threadId === threadId && params.item.type === "userMessage" && params.item.content[0]?.text === message);
+    expect(shown.item.clientId).toBe(shown.item.id);
+  });
+
   it("shows a session made in the claude CLI at once, with its whole history in Desktop's pages", async () => {
     const directory = join(process.env.CLAUDE_CONFIG_DIR!, "projects", "-cli");
     mkdirSync(directory, { recursive: true });

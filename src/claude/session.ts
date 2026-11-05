@@ -13,7 +13,7 @@ import { startedTurn } from "../protocol/turnPagination.js";
 import {
   CODEX_MCP_TOOLS, codexMcpItem, tailCodexRollout, type CodexTurnContext,
 } from "./codexRollout.js";
-import { claudeContent, inputText, normalizeUserInput, userMessage } from "./inputMapper.js";
+import { claudeContent, inputText, normalizeUserInput, turnInput, userMessage } from "./inputMapper.js";
 import { completedToolItem } from "./native/projector.js";
 import { ANSWER_CHARS, assistantBlockItemId, continuationTurnId } from "./native/ids.js";
 import { isNarration, messageText, readTranscriptRecords, type UserRecord } from "./native/records.js";
@@ -424,7 +424,7 @@ export class ClaudeSession {
     // Two processes writing one transcript fork it: whatever the other one writes next is lost to the chat.
     const owner = this.turn ? undefined : foreignOwner(this.host.config.claudeHome, this.threadId);
     if (owner) throw invalidRequest(`This chat is open in another Claude process (pid ${owner}): close it there or wait until it ends.`);
-    const input = normalizeUserInput(params.input ?? []);
+    const input = turnInput(params);
     const goal = /^\/goal\s+(\S[\s\S]*)/u.exec(inputText(input))?.[1]!.trim();
     if (goal) this.goalObjective = goal === "clear" ? null : goal;
     const uuid: string = params.turnId ?? randomUUID();
@@ -437,8 +437,9 @@ export class ClaudeSession {
     // Claude takes it as a prompt of its own, not into the turn that waits for its sub-agents.
     if (this.turn?.waiting) this.completeTurn(true);
     if (this.turn) {
-      // Claude folds a message sent mid-turn into the running turn, like a steer.
-      this.pendingInputs.set(uuid, { input, clientId: params.clientUserMessageId ?? null, hidden });
+      // Claude folds a message sent mid-turn into the running turn, like a steer. Desktop shows a message of a turn after
+      // its first only with a client id; one another thread sent comes with none, and history gives it the message's id.
+      this.pendingInputs.set(uuid, { input, clientId: params.clientUserMessageId ?? uuid, hidden });
       this.ensureQuery();
       this.inbox!.push(userMessage(content, uuid));
       return startedTurn(this.liveTurn()!);
