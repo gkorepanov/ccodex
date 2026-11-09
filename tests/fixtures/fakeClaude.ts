@@ -578,7 +578,7 @@ async function* answer(prompt: Message, options: Message, transcript: Transcript
   yield base(sessionId, { type: "stream_event", event: { type: "content_block_start", index: textIndex, content_block: { type: "text", text: "" } } });
   yield base(sessionId, { type: "stream_event", event: { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text: reply } } });
   yield base(sessionId, { type: "stream_event", event: { type: "message_stop" } });
-  const assistant = { type: "assistant", message: { id: messageId, role: "assistant", model, content: [{ type: "text", text: reply }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 3 } } };
+  const assistant = { type: "assistant", message: { id: messageId, role: "assistant", model, content: [{ type: "text", text: reply }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 3, ...(text.startsWith("big chat") ? { cache_read_input_tokens: 250_000 } : {}) } } };
   // Like the CLI: the record names the effort the model ran at (unset: its own default; Haiku has none).
   const effort = options.effort ?? (model.includes("haiku") ? undefined : "medium");
   transcript.write({ ...assistant, apiBlockIndex: textIndex, ...(effort ? { effort } : {}) });

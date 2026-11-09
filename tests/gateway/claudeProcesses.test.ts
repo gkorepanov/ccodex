@@ -41,7 +41,7 @@ describe("Claude processes: started ahead of a prompt, gone when nobody uses the
     fakeClaude.reset();
     commands.read = () => [];
     commands.killed.length = 0;
-    gateway = await startTestGateway();
+    gateway = await startTestGateway({ claudeIdleCompactionHoldMs: 1500 });
     client = await gateway.connect();
   });
   afterEach(async () => { await gateway.stop(); });
@@ -116,5 +116,13 @@ describe("Claude processes: started ahead of a prompt, gone when nobody uses the
     await client.turn(thread.id, "again");
     expect(fakeClaude.options.at(-1)).toMatchObject({ resume: thread.id });
     expect(fakeClaude.prompts.at(-1)).toMatchObject({ sessionId: thread.id, text: "again" });
+  });
+
+  it("keeps the process of a 200K+ token chat longer, for Claude's summary written while it is idle", async () => {
+    const { thread } = await client.request("thread/start", { model: "claude:claude-opus-5-5", cwd: "/work" });
+    await client.turn(thread.id, "big chat");
+    await sleep(800);
+    expect(processClosed(thread.id)).toBe(false);
+    await vi.waitFor(() => expect(processClosed(thread.id)).toBe(true), { timeout: 3_000, interval: 50 });
   });
 });

@@ -51,6 +51,12 @@ const WINDOW_MINUTES: Record<string, number> = { five_hour: 300, seven_day: 10_0
  * unless a command it runs still works (e2e shortens the wait).
  */
 const IDLE_MS = Number(process.env.CCODEX_E2E_IDLE_MS) || 30 * 60_000;
+/**
+ * A chat of 200K+ tokens keeps its quiet process longer (`claude_idle_compaction_hold_hours`), as Claude Code's terminal
+ * keeps one: about an hour quiet, Claude summarizes such a chat (idle compaction) and uses the summary, held in the
+ * process, at the next prompt.
+ */
+const IDLE_COMPACT_TOKENS = 200_000;
 /** How long an earlier chat stays open before its process is started ahead of a prompt (tests shorten it). */
 const RESUME_WARM_MS = Number(process.env.CCODEX_E2E_RESUME_WARM_MS) || 10_000;
 /** Claude processes kept at most (each holds its session in memory: 250–550 MB); tests lower it. */
@@ -168,21 +174,22 @@ export class ClaudeThreads {
     }));
     const own = (session: ClaudeSession) => processes?.filter((process) => process.session === session.threadId).map((process) => process.pid);
     const computing = (pids: number[] | undefined) => pids?.some((pid) => now - this.cpuSeen.get(pid)!.at < IDLE_MS) ?? false;
-    const idle = IDLE_MS < 60_000 ? `${IDLE_MS / 1000} s` : `${Math.round(IDLE_MS / 60_000)} min`;
+    const spell = (ms: number) => ms < 60_000 ? `${ms / 1000} s` : `${Math.round(ms / 60_000)} min`;
     for (const session of sessions) {
       const pids = own(session);
       if (computing(pids)) continue;
+      const hold = session.lastUsage.inputTokens >= IDLE_COMPACT_TOKENS ? this.config.claudeIdleCompactionHoldMs : IDLE_MS;
       if (session.waitingOnTasks && pids?.length) {
-        this.act(session, "claude.tasks.hung", `stopped its background tasks: their commands used no CPU for ${idle}`, pids);
+        this.act(session, "claude.tasks.hung", `stopped its background tasks: their commands used no CPU for ${spell(IDLE_MS)}`, pids);
         void session.stopTasks().catch(() => killProcesses(pids));
-      } else if (session.quiet(now, IDLE_MS) && !this.gateway.subscribers(session.threadId).size) {
-        this.act(session, "claude.unloaded", `unloaded the chat: nobody had it open and it was quiet for ${idle}`, pids);
+      } else if (session.quiet(now, hold) && !this.gateway.subscribers(session.threadId).size) {
+        this.act(session, "claude.unloaded", `unloaded the chat: nobody had it open and it was quiet for ${spell(hold)}`, pids);
         this.sessions.delete(session.threadId);
         void session.unload().then(() => killProcesses(pids ?? []));
         this.gateway.emit(session.threadId, "thread/status/changed", { threadId: session.threadId, status: { type: "notLoaded" } });
         this.gateway.emit(session.threadId, "thread/closed", { threadId: session.threadId });
-      } else if (session.loaded && session.quiet(now, IDLE_MS)) {
-        this.closeProcess(session, pids, `closed its Claude process: quiet for ${idle}; the next prompt starts it again`);
+      } else if (session.loaded && session.quiet(now, hold)) {
+        this.closeProcess(session, pids, `closed its Claude process: quiet for ${spell(hold)}; the next prompt starts it again`);
       }
     }
     const running = sessions.filter((session) => session.loaded);
