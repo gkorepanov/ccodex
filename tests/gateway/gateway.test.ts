@@ -537,6 +537,18 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(await client.request("thread/resume", { threadId })).toMatchObject({ serviceTier: null });
   });
 
+  it("keeps Fast picked for Fable 5.2, which Claude takes only as picked in the running session: on a chat's start and on a switch to it", async () => {
+    const { thread } = await client.request("thread/start", { model: "claude:fable", cwd: "/work", serviceTier: "fast" });
+    await client.turn(thread.id, "one");
+    const switched = await claudeThread();
+    await client.turn(switched, "one", { serviceTier: "fast" });
+    await client.turn(switched, "two", { model: "claude:fable" });
+    for (const threadId of [thread.id, switched]) {
+      expect(client.notifications("thread/settings/updated", threadId).map((message) => message.params.threadSettings.serviceTier)).not.toContain(null);
+      expect(await client.request("thread/resume", { threadId })).toMatchObject({ serviceTier: "fast" });
+    }
+  });
+
   it("runs a Claude chat with no effort chosen at the effort the picker shows for its model, not Claude's own default", async () => {
     const opus = (await client.request("model/list", {})).data.find((model: any) => model.id === CLAUDE);
     const threadId = await claudeThread();

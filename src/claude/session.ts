@@ -327,6 +327,8 @@ export class ClaudeSession {
     else this.discardWarm();
     const sdk = ready ? ready.query(this.inbox) : query({ prompt: this.inbox, options: this.options() });
     this.sdk = sdk;
+    // Claude takes Fast on Fable 5.2 only as picked in the running session, with a model: the chat's pick is made there.
+    if (this.settings.fast) void sdk.applyFlagSettings({ fastMode: true, model: this.settings.model ?? "default" }).catch(() => undefined);
     this.exists = true;
     if (this.resumeAt) this.host.resumedAtLeaf(this.threadId);
     this.resumeAt = undefined;
@@ -602,8 +604,8 @@ export class ClaudeSession {
       // The CLI settles the mode per model (no auto mode on Haiku falls back to default): a new model re-applies it.
       if (claudeMode(next) !== claudeMode(previous) || next.model !== previous.model) await this.sdk.setPermissionMode(claudeMode(next));
       const effort = this.host.effort(next);
-      if (effort !== this.host.effort(previous) || next.fast !== previous.fast) {
-        await this.sdk.applyFlagSettings({ effortLevel: claudeEffort(effort) as never, fastMode: next.fast });
+      if (effort !== this.host.effort(previous) || next.fast !== previous.fast || (next.fast && next.model !== previous.model)) {
+        await this.sdk.applyFlagSettings({ effortLevel: claudeEffort(effort) as never, fastMode: next.fast, ...(next.fast ? { model: next.model ?? "default" } : {}) });
       }
     }
   }
