@@ -53,7 +53,9 @@ CCodex's `codex`, one stock app-server serves every GPT chat unchanged, and `cla
 chats run on the Claude Agent SDK with Claude's transcripts in `~/.claude/projects` as
 their only source of truth. The only state CCodex adds is an optional
 `~/.ccodex/state/meta.json` (provider-switch history, archive flags and sections of Claude
-chats). Plain `codex …` commands (TUI, `exec`, `login`) run your installed Codex; `codex
+chats). CCodex never deletes a chat for good: a deleted Claude chat, one emptied by an edit of
+its first message, and a provider switch a revert undoes go to `~/.ccodex/state/trash/` with
+their meta.json entries, until you empty it by hand. Plain `codex …` commands (TUI, `exec`, `login`) run your installed Codex; `codex
 mcp-server`, removed from Codex in `0.154`, is served by CCodex on top of `codex exec`.
 
 ## What setup changes

@@ -6,6 +6,7 @@ import { invalidRequest, requestedModel, type JsonObject, type Thread, type Turn
 import { historyCursors, occurrencesPage, paginateItems, paginateTurns, startedTurn, turnCursor, turnView } from "../protocol/turnPagination.js";
 import type { Connection } from "./connection.js";
 import type { Gateway } from "./server.js";
+import { toTrash } from "../trash.js";
 
 /** Codex's own `templates/compact/prompt.md` and `summary_prefix.md`. */
 export const COMPACT_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
@@ -512,7 +513,13 @@ export class Lineages {
     for (const segment of dropped) {
       if (Object.values(this.gateway.meta.lineages).some((other) => other.some((entry) => entry.threadId === segment.threadId))) continue;
       if (segment.provider === "claude") await this.gateway.claude.discard(segment.threadId);
-      else await this.gateway.stock.request("thread/delete", { threadId: segment.threadId }).catch(() => undefined);
+      else {
+        // Deleted only once its rollout is copied into the trash: CCodex never deletes a chat for good.
+        const path: string | undefined = await this.gateway.stock.request("thread/read", { threadId: segment.threadId }).then(({ thread }) => thread.path, () => undefined);
+        if (!path || !existsSync(path)) continue;
+        toTrash(this.gateway.config.dataDir, segment.threadId, { copied: [path] }, this.gateway.meta.entries(segment.threadId));
+        await this.gateway.stock.request("thread/delete", { threadId: segment.threadId }).catch(() => undefined);
+      }
     }
     const turns = await this.stitchedTurns(kept);
     const row = await this.thread(rowSegment);

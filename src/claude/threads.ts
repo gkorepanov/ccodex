@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { deleteSession, forkSession, renameSession, type ModelInfo, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
+import { forkSession, renameSession, type ModelInfo, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { v7 as uuidv7 } from "uuid";
 import type { Config } from "../config.js";
 import type { Connection } from "../gateway/connection.js";
@@ -25,6 +25,7 @@ import { killProcesses, sessionProcesses, type SessionProcess } from "./processe
 import { ClaudeSession, type SessionSettings } from "./session.js";
 import { stockVisualizeSkill, writeVisualizePlugin } from "./visualize.js";
 import type { Meta } from "../meta.js";
+import { toTrash } from "../trash.js";
 
 interface SideThread {
   readonly id: string;
@@ -114,7 +115,15 @@ export class ClaudeThreads {
       void this.probeModels().then((models) => { this.models_ = Promise.resolve(models); }, () => undefined);
     } else void this.models().catch(() => undefined);
     await this.catalog.refresh();
-    this.gateway.meta.prune((segment) => segment.provider === "codex" || this.catalog.get(segment.threadId) !== undefined);
+    // A segment Claude itself deleted (its file in no project folder, not one the scan missed) leaves its lineage;
+    // what meta.json held of that lineage goes to the trash first.
+    const projects = join(this.config.claudeHome, "projects");
+    if (existsSync(projects)) {
+      const folders = readdirSync(projects);
+      this.gateway.meta.prune((segment) => segment.provider === "codex" || this.catalog.get(segment.threadId) !== undefined
+        || folders.some((folder) => existsSync(join(projects, folder, `${segment.threadId}.jsonl`))),
+      (publicId) => toTrash(this.config.dataDir, publicId, {}, this.gateway.meta.entries(publicId)));
+    }
     const known = new Map(this.catalog.sessions().map((summary) => [summary.sessionId, summary.customTitle ?? summary.aiTitle]));
     // Sessions and titles changed outside CCodex (the claude CLI, /rename) show up without a reload.
     const announce = () => {
@@ -1266,15 +1275,22 @@ export class ClaudeThreads {
     killProcesses(pids);
   }
 
-  /** Removes a session with its transcript (also what a failed switch to Claude leaves behind). */
+  /** Removes a session, its transcript into the trash (also what a failed switch to Claude leaves behind). */
   public async discard(threadId: string): Promise<void> {
     await this.sessions.get(threadId)?.unload();
     this.sessions.delete(threadId);
     await this.catalog.refresh();
-    if (this.catalog.get(threadId)) await deleteSession(threadId);
+    this.trash(threadId);
     this.catalog.dropPages(threadId);
     this.gateway.meta.forget(threadId);
     await this.catalog.refresh();
+  }
+
+  /** A transcript and its sub-agents' folder (what Claude's deleteSession removes) into the trash, never deleted. */
+  private trash(threadId: string): void {
+    const summary = this.catalog.get(threadId);
+    if (!summary) return;
+    toTrash(this.config.dataDir, threadId, { moved: [summary.path, summary.path.replace(/\.jsonl$/u, "")] }, this.gateway.meta.entries(threadId));
   }
 
   private async delete(threadId: string): Promise<JsonObject> {
@@ -1331,7 +1347,7 @@ export class ClaudeThreads {
     // Everything rolled back: Claude neither resumes nor starts anew a transcript without messages, so the session
     // starts over under its id with its settings, and its name comes back with its first turn.
     const name = this.catalog.get(threadId)!.customTitle;
-    await deleteSession(threadId);
+    this.trash(threadId);
     this.catalog.dropPages(threadId);
     this.leaves.delete(threadId);
     await this.catalog.refresh();

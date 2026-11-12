@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import type { JsonObject } from "./protocol/codex.js";
 
 export type Provider = "codex" | "claude";
 
@@ -90,11 +91,12 @@ export class Meta {
    * Drops finished segments whose backend is gone: Claude deletes transcripts after `cleanupPeriodDays`. A lineage
    * whose own segment went is listed under its oldest segment kept from then on.
    */
-  public prune(exists: (segment: Segment) => boolean): void {
+  public prune(exists: (segment: Segment) => boolean, dropping: (publicId: string) => void): void {
     let changed = false;
     for (const [publicId, segments] of Object.entries(this.data.lineages)) {
       const kept = segments.filter((segment, index) => index === segments.length - 1 || exists(segment));
       if (kept.length === segments.length) continue;
+      dropping(publicId);
       changed = true;
       delete this.data.lineages[publicId];
       const id = kept.some((segment) => segment.threadId === publicId) ? publicId : kept[0]!.threadId;
@@ -164,6 +166,15 @@ export class Meta {
     if (goal) this.data.pausedGoals![threadId] = goal;
     else delete this.data.pausedGoals![threadId];
     this.save();
+  }
+
+  /** What meta.json holds of a thread (its trash keeps it): archive flag, section, plan, paused goal, lineages. */
+  public entries(threadId: string): JsonObject {
+    return {
+      archived: this.isArchived(threadId), section: this.data.sections[threadId] ?? null, plan: this.data.plans![threadId] ?? null,
+      pausedGoal: this.data.pausedGoals![threadId] ?? null,
+      lineages: Object.fromEntries(Object.entries(this.data.lineages).filter(([id, segments]) => id === threadId || segments.some((segment) => segment.threadId === threadId))),
+    };
   }
 
   public forget(threadId: string): void {

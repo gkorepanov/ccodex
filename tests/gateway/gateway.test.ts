@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fakeClaude, fakeQuery, fakeStartup } from "../fixtures/fakeClaude.js";
 import { startTestGateway, type Client, type TestGateway } from "./harness.js";
@@ -208,6 +208,40 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     // A filter not known here lists no Claude thread either; excluded ones are left out, as stock leaves them.
     expect((await client.request("thread/list", { limit: 200, someFutureFilter: "x" })).data.map((row: any) => row.id)).toEqual(expect.not.arrayContaining(others));
     expect((await client.request("thread/list", { limit: 200, excludedThreadIds: [others[0]] })).data.map((row: any) => row.id)).toEqual(expect.not.arrayContaining([others[0]]));
+  });
+
+  it("never deletes a chat for good: a deleted, emptied by an edit or reverted-away chat goes to the trash, sections with it", async () => {
+    const trash = join(gateway.config.dataDir, "trash");
+    const trashed = () => (existsSync(trash) ? readdirSync(trash) : []).map((name) => ({ name, ...JSON.parse(readFileSync(join(trash, name, "meta.json"), "utf8")) }));
+    const transcript = (threadId: string) => {
+      const projects = join(process.env.CLAUDE_CONFIG_DIR!, "projects");
+      return readFileSync(join(projects, readdirSync(projects).find((key) => existsSync(join(projects, key, `${threadId}.jsonl`)))!, `${threadId}.jsonl`), "utf8");
+    };
+    // Deleted, with its sub-agents' folder and its section.
+    const deleted = await claudeThread();
+    await client.turn(deleted, "ask a codex sub-agent: KIWI");
+    await client.request("thread/section/move", { threadId: deleted, sectionId: "section-pinned", beforeThreadId: null });
+    const before = transcript(deleted);
+    await client.request("thread/delete", { threadId: deleted });
+    const entry = trashed().find((item) => item.threadId === deleted)!;
+    expect(readFileSync(join(trash, entry.name, `${deleted}.jsonl`), "utf8")).toBe(before);
+    expect(existsSync(join(trash, entry.name, deleted, "subagents"))).toBe(true);
+    expect(entry.meta.section).toMatchObject({ sectionId: "section-pinned" });
+    // The first message edited: the old transcript is kept, the chat starts over.
+    const edited = await claudeThread();
+    const { turn } = await client.turn(edited, "apple");
+    const old = transcript(edited);
+    await client.request("thread/revert", { threadId: edited, beforeTurnId: turn.id });
+    expect(readFileSync(join(trash, trashed().find((item) => item.threadId === edited)!.name, `${edited}.jsonl`), "utf8")).toBe(old);
+    // A switch reverted away: the GPT backend's rollout is kept before stock deletes it.
+    const switchedThread = await claudeThread();
+    await client.turn(switchedThread, "first");
+    const { turn: switched } = await client.turn(switchedThread, "second", { model: "gpt-6-luna" });
+    const backend: string = JSON.parse(readFileSync(join(gateway.config.dataDir, "meta.json"), "utf8")).lineages[switchedThread].at(-1).threadId;
+    await client.request("thread/revert", { threadId: switchedThread, beforeTurnId: switched.id });
+    const gpt = trashed().find((item) => item.threadId === backend)!;
+    expect(gpt.copied).toHaveLength(1);
+    expect(existsSync(join(trash, gpt.name, basename(gpt.copied[0])))).toBe(true);
   });
 
   it("keeps a deleted Claude thread gone when Claude writes its closing metadata into the file afterwards", async () => {
@@ -1848,6 +1882,10 @@ describe("lineages Claude cleaned up", () => {
     expect(pinned.data.map((row: any) => row.id)).toEqual([session]);
     const { thread } = await client.request("thread/read", { threadId: session, includeTurns: true });
     expect(itemsOf(thread.turns)).toEqual(["user:after the switch"]);
+    // What meta.json held of the lineage is in the trash.
+    const trash = join(gateway.config.dataDir, "trash");
+    const [kept] = readdirSync(trash).map((name) => JSON.parse(readFileSync(join(trash, name, "meta.json"), "utf8")));
+    expect(kept.meta).toMatchObject({ section: { sectionId: "section-pinned" }, lineages: { [expired]: [{ threadId: expired }, { threadId: session }] } });
   });
 });
 
