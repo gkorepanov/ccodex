@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { forkSession, renameSession, type ModelInfo, type PermissionMode } from "@anthropic-ai/claude-agent-sdk";
@@ -115,15 +115,6 @@ export class ClaudeThreads {
       void this.probeModels().then((models) => { this.models_ = Promise.resolve(models); }, () => undefined);
     } else void this.models().catch(() => undefined);
     await this.catalog.refresh();
-    // A segment Claude itself deleted (its file in no project folder, not one the scan missed) leaves its lineage;
-    // what meta.json held of that lineage goes to the trash first.
-    const projects = join(this.config.claudeHome, "projects");
-    if (existsSync(projects)) {
-      const folders = readdirSync(projects);
-      this.gateway.meta.prune((segment) => segment.provider === "codex" || this.catalog.get(segment.threadId) !== undefined
-        || folders.some((folder) => existsSync(join(projects, folder, `${segment.threadId}.jsonl`))),
-      (publicId) => toTrash(this.config.dataDir, publicId, {}, this.gateway.meta.entries(publicId)));
-    }
     const known = new Map(this.catalog.sessions().map((summary) => [summary.sessionId, summary.customTitle ?? summary.aiTitle]));
     // Sessions and titles changed outside CCodex (the claude CLI, /rename) show up without a reload.
     const announce = () => {

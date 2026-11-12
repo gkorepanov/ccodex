@@ -1857,35 +1857,31 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
 describe("lineages Claude cleaned up", () => {
   afterEach(async () => { await gateway.stop(); });
 
-  it("list a lineage whose own segment's transcript is gone under its oldest segment kept, pinned as before", async () => {
+  it("keeps a lineage whose segment's transcript is gone as it is: the chat is back whole once the transcript is", async () => {
     fakeClaude.reset();
     const expired = "0c0c0c0c-0000-4000-8000-000000000001";
     const session = "0c0c0c0c-0000-4000-8000-000000000002";
     const directory = join(process.env.CLAUDE_CONFIG_DIR!, "projects", "-work");
+    const record = (sessionId: string, uuid: string, content: string, timestamp: string) => `${JSON.stringify({
+      type: "user", uuid, parentUuid: null, sessionId, cwd: "/work", timestamp, origin: { kind: "human" }, message: { role: "user", content },
+    })}\n`;
     mkdirSync(directory, { recursive: true });
-    writeFileSync(join(directory, `${session}.jsonl`), `${JSON.stringify({
-      type: "user", uuid: "n1", parentUuid: null, sessionId: session, cwd: "/work", timestamp: "2026-09-20T00:00:00.000Z",
-      origin: { kind: "human" }, message: { role: "user", content: "after the switch" },
-    })}\n`);
-    gateway = await startTestGateway({}, {
-      lineages: { [expired]: [
-        { provider: "claude", threadId: expired, lastTurnId: "gone" },
-        { provider: "claude", threadId: session, lastTurnId: null },
-      ] },
+    writeFileSync(join(directory, `${session}.jsonl`), record(session, "n1", "after the switch", "2026-09-20T00:00:00.000Z"));
+    const meta = {
+      lineages: { [expired]: [{ provider: "claude", threadId: expired, lastTurnId: "o1" }, { provider: "claude", threadId: session, lastTurnId: null }] },
       sections: { [expired]: { sectionId: "section-pinned", enteredAt: 1 } },
-    });
+    };
+    gateway = await startTestGateway({}, meta);
     client = await gateway.connect();
-    const ids = (await client.request("thread/list", { limit: 200 })).data.map((row: any) => row.id);
-    expect(ids).toContain(session);
-    expect(ids).not.toContain(expired);
+    const ids = async () => (await client.request("thread/list", { limit: 200 })).data.map((row: any) => row.id);
+    expect(await ids()).not.toContain(expired);
+    expect(JSON.parse(readFileSync(join(gateway.config.dataDir, "meta.json"), "utf8"))).toMatchObject(meta);
+    writeFileSync(join(directory, `${expired}.jsonl`), record(expired, "o1", "before the switch", "2026-09-19T00:00:00.000Z"));
+    await vi.waitFor(async () => expect(await ids()).toContain(expired));
     const pinned = await client.request("thread/list", { limit: 50, sectionId: "section-pinned", sortKey: "section_position" });
-    expect(pinned.data.map((row: any) => row.id)).toEqual([session]);
-    const { thread } = await client.request("thread/read", { threadId: session, includeTurns: true });
-    expect(itemsOf(thread.turns)).toEqual(["user:after the switch"]);
-    // What meta.json held of the lineage is in the trash.
-    const trash = join(gateway.config.dataDir, "trash");
-    const [kept] = readdirSync(trash).map((name) => JSON.parse(readFileSync(join(trash, name, "meta.json"), "utf8")));
-    expect(kept.meta).toMatchObject({ section: { sectionId: "section-pinned" }, lineages: { [expired]: [{ threadId: expired }, { threadId: session }] } });
+    expect(pinned.data.map((row: any) => row.id)).toEqual([expired]);
+    const { thread } = await client.request("thread/read", { threadId: expired, includeTurns: true });
+    expect(itemsOf(thread.turns)).toEqual(["user:before the switch", "contextCompaction", "user:after the switch"]);
   });
 });
 

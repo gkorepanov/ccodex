@@ -87,27 +87,6 @@ export class Meta {
     this.save();
   }
 
-  /**
-   * Drops finished segments whose backend is gone: Claude deletes transcripts after `cleanupPeriodDays`. A lineage
-   * whose own segment went is listed under its oldest segment kept from then on.
-   */
-  public prune(exists: (segment: Segment) => boolean, dropping: (publicId: string) => void): void {
-    let changed = false;
-    for (const [publicId, segments] of Object.entries(this.data.lineages)) {
-      const kept = segments.filter((segment, index) => index === segments.length - 1 || exists(segment));
-      if (kept.length === segments.length) continue;
-      dropping(publicId);
-      changed = true;
-      delete this.data.lineages[publicId];
-      const id = kept.some((segment) => segment.threadId === publicId) ? publicId : kept[0]!.threadId;
-      if (id !== publicId) this.rename(publicId, id);
-      if (kept.length > 1 || kept[0]!.threadId !== id) this.data.lineages[id] = kept;
-    }
-    if (!changed) return;
-    this.reindex();
-    this.save();
-  }
-
   public isArchived(threadId: string): boolean { return this.data.archived.includes(threadId); }
 
   public setArchived(threadId: string, archived: boolean): void {
@@ -183,16 +162,6 @@ export class Meta {
     delete this.data.plans![threadId];
     delete this.data.pausedGoals![threadId];
     this.save();
-  }
-
-  /** Archive flag, section and order of a thread listed under another id from now on. */
-  private rename(from: string, to: string): void {
-    this.data.archived = this.data.archived.map((id) => id === from ? to : id);
-    if (from in this.data.sections) {
-      this.data.sections[to] = this.data.sections[from]!;
-      delete this.data.sections[from];
-    }
-    for (const order of Object.values(this.data.sectionOrder)) order.forEach((id, index) => { if (id === from) order[index] = to; });
   }
 
   private reindex(): void {
