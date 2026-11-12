@@ -15,6 +15,11 @@ interface StockCache {
 }
 
 const CACHE_MS = 10_000;
+/** `thread/list` params Claude threads are filtered by (or that don't filter); any other one set lists none of them. */
+const CLAUDE_FILTERS = new Set([
+  "cursor", "limit", "sortKey", "sortDirection", "useStateDbOnly", "excludedThreadIds", "archived", "modelProviders",
+  "sourceKinds", "cwd", "sectionId", "projectId", "parentThreadId", "ancestorThreadId", "searchTerm",
+]);
 
 function sortKey(params: JsonObject): SortKey {
   return params.sortKey === "updated_at" ? "updatedAt" : params.sortKey === "recency_at" ? "recencyAt" : "createdAt";
@@ -57,6 +62,7 @@ export class Catalog {
 
   private claudeMatches(thread: Thread, params: JsonObject): boolean {
     const meta = this.gateway.meta;
+    if (params.excludedThreadIds?.includes(thread.id)) return false;
     if ((params.archived ?? false) !== meta.isArchived(thread.id)) return false;
     if (params.modelProviders?.length && !params.modelProviders.includes("claude")) return false;
     const kinds: string[] | undefined = params.sourceKinds?.length ? params.sourceKinds : undefined;
@@ -79,6 +85,11 @@ export class Catalog {
   }
 
   private async claudeThreads(params: JsonObject): Promise<Thread[]> {
+    // Desktop deletes and archives what a filtered list returns (its "Permanently delete" walks
+    // `attachedToThreadId` lists): a filter set to something Claude threads can't match, or one not known here,
+    // lists no Claude thread rather than all of them. Claude threads have no attachments.
+    const unknown = Object.keys(params).find((key) => !CLAUDE_FILTERS.has(key) && params[key] != null && params[key] !== false && params[key]?.length !== 0);
+    if (unknown) return [];
     const ancestor: string | undefined = params.ancestorThreadId ?? params.parentThreadId ?? undefined;
     const claude = this.gateway.claude;
     let threads = claude.threads();

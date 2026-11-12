@@ -182,6 +182,34 @@ describe("gateway (black box: fake stock + fake Claude)", () => {
     expect(readFileSync(transcript, "utf8")).not.toContain("\"type\":\"api-request\"");
   });
 
+  it("permanently deletes only the Claude thread Desktop deletes: its attached-threads lists hold no Claude thread", async () => {
+    const [target, ...others] = [await claudeThread(), await claudeThread(), await claudeThread()];
+    for (const threadId of [target, ...others]) await client.turn(threadId!, "hello");
+    // Desktop's "Permanently delete": every thread attached to it, walked, each deleted, then the thread itself.
+    const attached = async (threadId: string): Promise<string[]> => {
+      const ids: string[] = [];
+      for (const archived of [false, true]) {
+        let cursor: string | null = null;
+        do {
+          const page: any = await client.request("thread/list", { attachedToThreadId: threadId, archived, cursor, limit: 100, useStateDbOnly: true });
+          ids.push(...page.data.map((row: any) => row.id));
+          cursor = page.nextCursor;
+        } while (cursor);
+      }
+      return ids;
+    };
+    const doomed = [target!];
+    for (let i = 0; i < doomed.length; i++) doomed.push(...(await attached(doomed[i]!)).filter((id) => !doomed.includes(id)));
+    expect(doomed).toEqual([target]);
+    for (const threadId of doomed) await client.request("thread/delete", { threadId });
+    const left = (await client.request("thread/list", { limit: 200 })).data.map((row: any) => row.id);
+    expect(left).not.toContain(target);
+    expect(left).toEqual(expect.arrayContaining(others));
+    // A filter not known here lists no Claude thread either; excluded ones are left out, as stock leaves them.
+    expect((await client.request("thread/list", { limit: 200, someFutureFilter: "x" })).data.map((row: any) => row.id)).toEqual(expect.not.arrayContaining(others));
+    expect((await client.request("thread/list", { limit: 200, excludedThreadIds: [others[0]] })).data.map((row: any) => row.id)).toEqual(expect.not.arrayContaining([others[0]]));
+  });
+
   it("keeps a deleted Claude thread gone when Claude writes its closing metadata into the file afterwards", async () => {
     const threadId = await claudeThread();
     await client.turn(threadId, "hello");
