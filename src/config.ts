@@ -35,6 +35,17 @@ export interface Config {
   readonly claudeVisualize: boolean;
   /** How long a quiet Claude chat of 200K+ tokens keeps its process (`claude_idle_compaction_hold_hours`). */
   readonly claudeIdleCompactionHoldMs: number;
+  /** The tokens of context a Claude chat grows to before Claude compacts it (`claude_auto_compact_window`); unset: Claude's own. */
+  readonly claudeAutoCompactWindow?: number;
+}
+
+/** What Claude Code takes as an auto-compact window (its `autoCompactWindow` setting). */
+const AUTO_COMPACT_WINDOW = { min: 100_000, max: 1_000_000 };
+
+/** `claude_auto_compact_window` as Claude takes it: whole tokens within its range; none for a value that is no window. */
+export function autoCompactWindow(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(AUTO_COMPACT_WINDOW.max, Math.max(AUTO_COMPACT_WINDOW.min, Math.round(value)));
 }
 
 export const DEFAULT_RENAME_PROMPT = `Create a concise, vivid, memorable title for the task.
@@ -177,6 +188,7 @@ export function loadConfig(): Config {
   const configuredCodex = process.env.CCODEX_CODEX ?? file.codex_binary as string | undefined;
   const codex = configuredCodex ? resolve(expandHome(configuredCodex)) : findInstalledCodex(home);
   if (!codex) throw new Error("No `codex` found on PATH. Install it with `npm i -g @openai/codex` or set codex_binary in ~/.ccodex/config.toml.");
+  const claudeAutoCompactWindow = autoCompactWindow(file.claude_auto_compact_window);
   const renamePrompt = typeof file.rename_prompt === "string" && file.rename_prompt.trim() ? file.rename_prompt.trim() : undefined;
   return {
     codex,
@@ -198,5 +210,6 @@ export function loadConfig(): Config {
     improveModelsFormatting: file.improve_models_formatting_for_codex_app ?? true,
     claudeVisualize: file.claude_visualize ?? true,
     claudeIdleCompactionHoldMs: (file.claude_idle_compaction_hold_hours ?? 24) * 3_600_000,
+    ...(claudeAutoCompactWindow ? { claudeAutoCompactWindow } : {}),
   };
 }

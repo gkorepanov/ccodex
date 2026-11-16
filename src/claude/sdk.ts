@@ -24,11 +24,27 @@ export function claudeEnvironment(): Record<string, string | undefined> {
   return env;
 }
 
+/**
+ * Settings CCodex gives every Claude process on top of the user's own. `claude_auto_compact_window` caps the context a
+ * chat grows to before Claude compacts it: a 1M-context model otherwise lets a chat reach about a million tokens, all of
+ * them sent (read from the prompt cache, or written to it anew once it is gone) with each request of each turn. The
+ * models probe gets it too, so the context window the App shows is the one Claude compacts at.
+ */
+export function claudeSettings(config: Config, fast = false): NonNullable<Options["settings"]> | undefined {
+  const settings = {
+    ...(config.claudeAutoCompactWindow ? { autoCompactWindow: config.claudeAutoCompactWindow } : {}),
+    ...(fast ? { fastMode: true } : {}),
+  };
+  return Object.keys(settings).length ? settings : undefined;
+}
+
 export function baseOptions(config: Config): Options {
+  const settings = claudeSettings(config);
   return {
     pathToClaudeCodeExecutable: config.claudeBinary,
     settingSources: ["user", "project", "local"],
     env: claudeEnvironment(),
+    ...(settings ? { settings } : {}),
   };
 }
 
