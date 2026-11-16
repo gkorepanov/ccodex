@@ -113,6 +113,12 @@ Claude's 30-day cleanup deleted come back as text. The 0.4 databases move to
   process (other chats: 30 min). About an hour quiet, Claude summarizes such a chat (idle compaction) and keeps the
   summary in the process for the next message, so the chat doesn't send its whole history again once the prompt cache
   is gone. At most 10 Claude processes run; the one quiet longest closes first.
+- `claude_auto_compact_window` (unset by default) — the context a Claude chat grows to before Claude compacts it, in
+  tokens (`100000` to `1000000`). Without it Claude uses its own window: about a million tokens on a 1M-context model.
+  Each request of a turn sends the whole chat (read from the prompt cache, or written to it anew after an hour quiet
+  or a model change), so a long chat at a smaller window, e.g. `300000`, uses far less of your Claude limits; Claude
+  summarizes it sooner. It applies to CCodex's Claude chats only (not the `claude` CLI); `/cc` and the App's context
+  ring show the chat against it.
 - `rpc_limit_mb` (default `10`) — the most CCodex sends the App in one message or as one command's output (how the
   App shows a remote host's image or video): a bigger answer fails, a bigger notification is dropped, the output stops
   there. One huge message holds up every chat over SSH and can drop the phone's connection. `0` turns it off.

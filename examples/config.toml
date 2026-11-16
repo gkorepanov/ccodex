@@ -24,6 +24,12 @@ claude_visualize = true
 # 10 run, the one quiet longest closing first.
 claude_idle_compaction_hold_hours = 24
 
+# The context a Claude chat grows to before Claude compacts it, in tokens (100000 to 1000000); default: Claude's own,
+# about a million on a 1M-context model. Every request of a turn sends the whole chat (read from the prompt cache, or
+# written to it anew after an hour quiet or a model change), so a long chat at a smaller window uses far less of your
+# Claude limits; Claude summarizes it sooner. It applies to CCodex's Claude chats only, not to the `claude` CLI.
+# claude_auto_compact_window = 300000
+
 # codex_binary = "/path/to/codex"   # default: Desktop's own CLI when this machine's Desktop starts CCodex, else the newest `codex`
 # delegate_codex = "/path/to/codex" # what plain `codex …` (TUI, exec, login) runs; default: codex_binary, else the first `codex` on PATH
 # claude_binary = "/path/to/claude" # default: the Claude Code bundled with the Agent SDK

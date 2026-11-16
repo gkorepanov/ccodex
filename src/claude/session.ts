@@ -20,7 +20,7 @@ import { isNarration, messageText, readTranscriptRecords, type UserRecord } from
 import { userText } from "./native/summary.js";
 import { claudeEffort, DELEGATION_OFF, DELEGATION_ON, ULTRA } from "./delegation.js";
 import { foreignOwner, peerKey, peerMessageItem, peerOrigin, sentMessageItem, subagentFiles, type Peers } from "./peers.js";
-import { baseOptions, claudeMode } from "./sdk.js";
+import { baseOptions, claudeMode, claudeSettings } from "./sdk.js";
 import { endedBackground, killedCommand, proposedChanges, startTool, stoppedCommand, updateToolInput, type ActiveTool, type BackgroundEnd } from "./toolMapper.js";
 import type { ClaudeThreads } from "./threads.js";
 import { visualizeOptions } from "./visualize.js";
@@ -345,7 +345,7 @@ export class ClaudeSession {
       cwd: settings.cwd,
       ...(settings.model ? { model: settings.model } : {}),
       ...(effort ? { effort: effort as never } : {}),
-      ...(settings.fast ? { settings: { fastMode: true } } : {}),
+      ...(settings.fast ? { settings: claudeSettings(this.host.config, true)! } : {}),
       permissionMode: claudeMode(settings),
       // Recorded on the chat's first request and reused until compaction, as Claude Code keeps its system prompt.
       systemPrompt: { type: "preset", preset: "claude_code", append: claudeInstructions(this.host.config.improveModelsFormatting) },
