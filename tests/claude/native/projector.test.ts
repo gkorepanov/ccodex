@@ -62,6 +62,44 @@ function conversation(): TranscriptRecord[] {
 }
 
 describe("native Claude transcript projector", () => {
+  it("projects an absorbed Codex request and linked corrections as one shared turn", async () => {
+    const root = "a".repeat(32), child = "b".repeat(32);
+    const initial = prompt("initial", null, "Existing App task", 1);
+    const running = assistant("running", "initial", "before", [{ type: "text", text: "working" }], 2, "tool_use");
+    const absorbed = (uuid: string, parent: string, job: string, source: string, steer = ""): TranscriptRecord => ({
+      type: "attachment", ...envelope(uuid, parent, 3), attachment: { type: "queued_command", source_uuid: source,
+        origin: { kind: "peer", from: "bridge:codex", body: `[Codex bridge request ${job}]\n${steer ? `[Codex bridge steer ${steer}]\n` : ""}correction` }, prompt: "correction" },
+    });
+    const projection = await projectTranscript({ sessionId: "session", path: "/tmp/session.jsonl", records: [initial, running,
+      absorbed("root-attachment", "running", root, "root-user"), absorbed("child-attachment", "root-attachment", child, "child-user", root),
+      assistant("final", "child-attachment", "after", [{ type: "text", text: "both applied" }], 4, "end_turn"),
+    ] });
+    expect(projection.turns.map((t) => t.id)).toEqual(["initial", "root-user"]);
+    const shared = projection.turns[1]!;
+    expect(shared.items.filter((i) => i.type === "userMessage").map((i) => i.id)).toEqual(["root-user", "child-user"]);
+    expect(shared.status).toBe("completed");
+    expect(shared.items.some((i) => i.type === "agentMessage" && i.text === "both applied")).toBe(true);
+  });
+
+  it("does not let a compact summary consume the preserved peer's prompt identity", async () => {
+    const old = { ...prompt("old", null, "Earlier request", 1), promptId: "old-prompt" };
+    const oldReply = assistant("old-reply", old.uuid, "old-message", [{ type: "text", text: "Earlier reply" }], 2, "end_turn");
+    const peer: UserRecord = { ...prompt("peer", oldReply.uuid, "Shared request", 3), isMeta: true,
+      promptId: "peer-prompt", origin: { kind: "peer", from: "bridge:codex", name: "Codex session bridge", body: "Shared request", msg_id: "shared-job" } };
+    const records: TranscriptRecord[] = [old, oldReply, peer,
+      { type: "system", subtype: "compact_boundary", ...envelope("compact", null, 4), logicalParentUuid: peer.uuid,
+        compactMetadata: { trigger: "auto", preservedMessages: { anchorUuid: "summary", uuids: [old.uuid, oldReply.uuid, peer.uuid] } } },
+      { ...prompt("summary", "compact", "Generated summary", 4), origin: undefined, isCompactSummary: true, promptId: "peer-prompt" },
+      assistant("shared-reply", "summary", "shared-message", [{ type: "text", text: "Shared reply" }], 5, "end_turn"),
+    ];
+    const projection = await projectTranscript({ sessionId: "session", path: "/tmp/session.jsonl", records });
+    const shared = projection.turns.find((turn) => turn.id === peer.uuid);
+    expect(shared).toBeDefined();
+    expect(shared!.status).toBe("completed");
+    expect(shared!.items.some((item) => item.type === "agentMessage" && item.text === "Shared reply")).toBe(true);
+    expect(shared!.items.some((item) => item.type === "agentMessage" && item.text === "Earlier reply")).toBe(false);
+  });
+
   it("keeps a message sent mid-turn (Desktop's steer) in the running turn, like live; a message sent after it starts a turn", async () => {
     const queued = (operation: "enqueue" | "dequeue", content?: string): QueueOperationRecord =>
       ({ type: "queue-operation", operation, sessionId: "session", ...(content ? { content } : {}) });

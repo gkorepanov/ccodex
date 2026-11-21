@@ -415,6 +415,33 @@ function responseBlocks(records: readonly AssistantRecord[]): ResponseBlock[] {
     ({ record, block, index: (record.apiBlockIndex ?? 0) + position, id: blockItemId(record, position) })));
 }
 
+/** Claude App's end-of-turn "next step" box: a question with reply buttons the App shows under the last message. */
+export const WRAP_UP_TOOL = "mcp__ccd_turn__wrap_up";
+const WRAP_UP_ACTION_LABELS: Record<string, string> = {
+  commit: "Commit", create_pr: "Create PR", merge: "Merge", fix_ci: "Fix CI", address_comments: "Address comments",
+  resolve_conflicts: "Resolve conflicts", verify: "Verify", archive: "Archive", new_session: "New session",
+};
+
+/**
+ * The App's buttons as stock's async question (an agent message carrying `questions`): Codex shows the options, and
+ * a pick comes back as an ordinary user message, as a button click does in the App. The wrap-up has already ended
+ * the App's turn, so nothing waits on the answer.
+ */
+export function wrapUpQuestion(toolUseId: string, input: Record<string, unknown> | undefined): ThreadItem[] {
+  const ask = string(input?.ask)?.trim();
+  const actions = Array.isArray(input?.actions) ? input.actions : [];
+  const options = [...new Set(actions.flatMap((action) => {
+    const entry = object(action);
+    const label = string(entry?.label)?.trim() || WRAP_UP_ACTION_LABELS[string(entry?.action) ?? ""];
+    return label ? [label] : [];
+  }))];
+  if (!ask || !options.length) return [];
+  return [{
+    type: "agentMessage", id: `${toolUseId}-ask`, text: ask, phase: "final_answer", memoryCitation: null,
+    delivery: "async", questions: [{ title: ask, options }],
+  }];
+}
+
 function assistantItems(
   records: readonly AssistantRecord[],
   cwd: string,
@@ -450,6 +477,7 @@ function assistantItems(
       // Stopping a background command shows on the command (stock's Ctrl-C), not as a call of its own.
       if (stoppedCommand(completion?.record.toolUseResult)) return [];
       const item = projectTool(block as unknown as ToolUseBlock, index, record, cwd, threadId, completions, peers, ends);
+      if (block.name === WRAP_UP_TOOL) return [item, ...wrapUpQuestion(block.id, object(block.input))];
       if (!CODEX_MCP_TOOLS.has(block.name)) return [item];
       const result = completion?.block.content;
       return [item, ...codexMcpItems(block.id, object(block.input) ?? {}, result === undefined ? undefined : outputText(result), codexCalls)];
@@ -548,6 +576,23 @@ function turnStarts(records: readonly TranscriptChainRecord[], subagentPromptUui
     lastBlock = undefined;
   };
   records.forEach((record, index) => {
+    const absorbed = record.type === "attachment" ? object(record.attachment) : undefined;
+    const origin = absorbed?.type === "queued_command" ? peerOrigin(absorbed.origin) : record.type === "user" ? peerOrigin(record.origin) : undefined;
+    const body = typeof origin?.body === "string" ? origin.body : "";
+    if (origin?.from === "bridge:codex" && /\[Codex bridge request [a-f0-9]{32}\]/u.test(body)) {
+      if (/\[Codex bridge steer [a-f0-9]{32}\]/u.test(body)) {
+        // Explicit correction of an existing shared turn: keep its own user item.
+        answer = false;
+        lastBlock = undefined;
+        return;
+      }
+      if (absorbed) {
+        starts.push({ index, id: string(absorbed.source_uuid) ?? record.uuid });
+        answer = false;
+        lastBlock = undefined;
+        return;
+      }
+    }
     if (record.type === "assistant" && starts.length && !subagentPromptUuid) {
       assistantBlocks(record).forEach((block, position) => {
         if (answer) goOn(index);
@@ -555,7 +600,9 @@ function turnStarts(records: readonly TranscriptChainRecord[], subagentPromptUui
         answer = (messageText(block)?.length ?? 0) >= ANSWER_CHARS;
       });
     }
-    if (record.type !== "user") return;
+    // A compact summary may carry the running peer prompt's ID, but is not a
+    // submission. Consuming it here would merge the preserved peer into an old turn.
+    if (record.type !== "user" || record.isCompactSummary === true) return;
     const previous = promptId;
     promptId = record.promptId ?? promptId;
     if (steered.has(record.uuid)) return;

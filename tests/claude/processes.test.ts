@@ -1,8 +1,7 @@
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { cpuSeconds, killProcesses, sessionProcesses } from "../../src/claude/processes.js";
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 describe("a Claude session's commands", () => {
@@ -15,21 +14,28 @@ describe("a Claude session's commands", () => {
   it("finds the commands still in the session's process tree, not one it detached", async () => {
     const session = `test-${process.pid}-${Date.now()}`;
     const env = { ...process.env, CLAUDE_CODE_SESSION_ID: session, CLAUDE_PID: String(process.pid) };
-    const command = spawn("sleep", ["30"], { env });
-    // `nohup … &` from a shell: the command outlives the shell and is reparented away from the tree.
-    const detached = Number(spawnSync("sh", ["-c", "sleep 30 >/dev/null 2>&1 & echo $!"], { env, encoding: "utf8" }).stdout.trim());
+    // macOS ps hides the environment of its protected system binaries, including /bin/sleep.
+    const args = ["-e", "setTimeout(() => {}, 30_000)"];
+    const command = spawn(process.execPath, args, { env, stdio: "ignore" });
+    let detached: number | undefined;
     try {
-      await sleep(100);
-      const found = sessionProcesses().filter((entry) => entry.session === session).map((entry) => entry.pid);
-      expect(found).toContain(command.pid);
-      expect(found).not.toContain(detached);
+      // When this launcher exits, the command is reparented outside the session's tree.
+      detached = Number(execFileSync(process.execPath, ["-e", `
+        const { spawn } = require("node:child_process");
+        const child = spawn(process.execPath, ${JSON.stringify(args)}, { detached: true, stdio: "ignore" });
+        child.unref();
+        console.log(child.pid);
+      `], { env, encoding: "utf8" }).trim());
+      expect(alive(detached)).toBe(true);
+      const found = () => sessionProcesses().filter((entry) => entry.session === session).map((entry) => entry.pid);
+      await expect.poll(found).toContain(command.pid);
+      expect(found()).not.toContain(detached);
 
       killProcesses([command.pid!]);
-      await sleep(200);
-      expect(alive(command.pid!)).toBe(false);
+      await expect.poll(() => alive(command.pid!)).toBe(false);
     } finally {
       command.kill("SIGKILL");
-      try { process.kill(detached, "SIGKILL"); } catch { /* gone */ }
+      try { if (detached) process.kill(detached, "SIGKILL"); } catch { /* gone */ }
     }
   });
 });
