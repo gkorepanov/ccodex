@@ -1967,6 +1967,35 @@ describe("rpc_limit_mb", () => {
   });
   afterEach(async () => { await gateway.stop(); });
 
+  it("reduces an oversized iOS history page and keeps stock's continuation cursor", async () => {
+    const threadId = await stockThread();
+    await client.request("test/seedHistory", { threadId, turns: [[10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 10_000]] });
+    const mobile = await gateway.connect("codex_chatgpt_ios_remote");
+    const resumed = await mobile.request("thread/resume", { threadId, excludeTurns: true });
+    const pages: Array<string[]> = [];
+    let cursor: string | null = resumed.itemsBackwardsCursor;
+    while (cursor) {
+      const result = await mobile.request("thread/items/list", { threadId, turnId: "turn-0", limit: 100, sortDirection: "desc", cursor });
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(100_000);
+      pages.push(result.data.map((record: any) => record.item.id));
+      expect(pages.length).toBeLessThanOrEqual(4);
+      cursor = result.nextCursor;
+    }
+    expect(pages).toEqual([["item-0-6", "item-0-5", "item-0-4"], ["item-0-3", "item-0-2"], ["item-0-1", "item-0-0"]]);
+  });
+
+  it("keeps the history page direction and rejects individual entries larger than the cap", async () => {
+    const threadId = await stockThread();
+    await client.request("test/seedHistory", { threadId, turns: [[20_000], [20_000], [40_000]] });
+    const first = await client.request("thread/turns/list", { threadId, limit: 10, itemsView: "full", sortDirection: "asc" });
+    expect(first.data.map((turn: any) => turn.id)).toEqual(["turn-0"]);
+    const second = await client.request("thread/turns/list", { threadId, limit: 10, itemsView: "full", sortDirection: "asc", cursor: first.nextCursor });
+    expect(second.data.map((turn: any) => turn.id)).toEqual(["turn-1"]);
+    await expect(client.request("thread/turns/list", {
+      threadId, limit: 10, itemsView: "full", sortDirection: "asc", cursor: second.nextCursor,
+    })).rejects.toThrow("over rpc_limit_mb");
+  });
+
   it("fails an answer over the limit and drops a notification over it; smaller ones pass", async () => {
     await expect(client.request("test/big", { bytes: 200_000 })).rejects.toThrow("CCodex held back this 0.2 MB answer: over rpc_limit_mb (0.1 MB) in ~/.ccodex/config.toml.");
     expect(client.notifications("test/bigNotification")).toEqual([]);
