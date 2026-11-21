@@ -41,12 +41,17 @@ describe("daemon supervisor", () => {
     process.env.CODEX_HYBRID_DAEMON_TOKEN = token;
 
     const release = await publishDaemonChildRecord();
-    // Stock verifies the record by the Linux native identity it checks first: the boot and the start ticks.
-    const startTicks = Number(processStartTime(process.pid)!.slice("linux:".length));
+    const startTime = processStartTime(process.pid);
+    expect(startTime).toBeTruthy();
+    // Stock checks the boot and start ticks on Linux. On macOS it uses the ps start time.
+    const processIdentity = process.platform === "linux" ? {
+      bootId: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
+      startTicks: Number(startTime!.slice("linux:".length)),
+    } : undefined;
     expect(JSON.parse(readFileSync(pidFile, "utf8"))).toEqual({
       pid: process.pid,
-      processStartTime: processStartTime(process.pid),
-      processIdentity: { bootId: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(), startTicks },
+      processStartTime: startTime,
+      ...(processIdentity ? { processIdentity } : {}),
     });
     release();
     expect(existsSync(pidFile)).toBe(false);
