@@ -238,6 +238,19 @@ const handlers = {
   "config/read": () => ({ config: { ...config }, origins: {} }),
   "test/config": () => ({ config: { ...config } }),
   // Test hooks.
+  "test/seedHistory": (_connection, params) => {
+    const thread = threads.get(params.threadId);
+    materialize(thread);
+    thread.turns = params.turns.map((sizes, turnIndex) => ({
+      id: `turn-${turnIndex}`,
+      items: sizes.map((size, itemIndex) => ({
+        type: "agentMessage", id: `item-${turnIndex}-${itemIndex}`, text: "字".repeat(size),
+        phase: "final_answer", memoryCitation: null,
+      })),
+      itemsView: "full", status: "completed", error: null, startedAt: now(), completedAt: now(), durationMs: 1,
+    }));
+    return {};
+  },
   "test/threads": () => ({ threads: [...threads.values()].map((thread) => ({ ...thread, subscribers: thread.subscribers.size })) }),
   // A notification and an answer of the given size (a diff of a huge repository, a big file read).
   "test/big": (connection, params) => {
