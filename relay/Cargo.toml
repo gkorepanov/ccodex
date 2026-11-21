@@ -19,8 +19,7 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 
 # Exact annotated tag object behind npm @openai/codex 0.153.3 / rust-v0.153.3.
 codex-app-server-protocol = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }
-# Vendored at the same ref with OutgoingResponse.result relaxed back to raw
-# serde_json::Value so gateway responses relay byte-for-byte; managed by
+# Vendored at the same ref with raw gateway responses and notifications; managed by
 # scripts/relay-transport.mjs (sync:relay-transport / check:relay-transport).
 codex-app-server-transport = { path = "vendor/app-server-transport" }
 codex-core = { git = "https://github.com/openai/codex.git", rev = "29d1e7f316229cd65c7e4a70476050c14962cf10" }

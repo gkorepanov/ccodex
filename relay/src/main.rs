@@ -6,7 +6,7 @@ use clap::Parser;
 use clap::Subcommand;
 use codex_app_server_protocol::{
     JSONRPCMessage, RemoteControlPairingStartParams, RemoteControlPairingStatusParams,
-    ServerNotification, ServerNotificationEnvelope, ServerRequest,
+    ServerRequest,
 };
 use codex_app_server_transport::{
     CHANNEL_CAPACITY, ConnectionId, OutgoingError, OutgoingMessage, OutgoingResponse,
@@ -141,13 +141,12 @@ fn outgoing_message(message: JSONRPCMessage, emitted_at_ms: Option<i64>) -> Resu
                 .context("gateway emitted an unknown server request")?,
         ),
         JSONRPCMessage::Notification(notification) => {
-            OutgoingMessage::AppServerNotification(ServerNotificationEnvelope {
-                notification: serde_json::from_value::<ServerNotification>(serde_json::to_value(
-                    notification,
-                )?)
-                .context("gateway emitted an unknown server notification")?,
+            // The gateway runs the installed App's app-server. The Relay's pinned
+            // transport schema may predate its notification names or fields.
+            OutgoingMessage::RawAppServerNotification {
+                notification,
                 emitted_at_ms,
-            })
+            }
         }
         JSONRPCMessage::Response(response) => OutgoingMessage::Response(OutgoingResponse {
             id: response.id,
@@ -471,6 +470,41 @@ mod tests {
     }
 
     #[test]
+    fn preserves_new_server_notifications_from_the_gateway() {
+        let params = serde_json::json!({
+            "threadId": "019f6232-67f2-7db2-993b-b89f56d2dc97",
+            "readState": {"firstUnread": {"type": "turn", "turnId": "recent-turn"}, "revision": "r2"}
+        });
+        let notification = JSONRPCMessage::Notification(JSONRPCNotification {
+            method: "thread/readState/changed".into(),
+            params: Some(params.clone()),
+        });
+        let outgoing = outgoing_message(notification, Some(1_234)).unwrap();
+        assert_eq!(
+            serde_json::to_value(outgoing).unwrap(),
+            serde_json::json!({"method":"thread/readState/changed","params":params,"emittedAtMs":1_234})
+        );
+    }
+
+    #[test]
+    fn preserves_new_fields_on_known_live_notifications() {
+        let params = serde_json::json!({
+            "threadId": "019f6232-67f2-7db2-993b-b89f56d2dc97",
+            "threadName": "history probe",
+            "newField": {"flag": true}
+        });
+        let notification = JSONRPCMessage::Notification(JSONRPCNotification {
+            method: "thread/name/updated".into(),
+            params: Some(params.clone()),
+        });
+        let outgoing = outgoing_message(notification, None).unwrap();
+        assert_eq!(
+            serde_json::to_value(outgoing).unwrap(),
+            serde_json::json!({"method":"thread/name/updated","params":params})
+        );
+    }
+
+    #[test]
     fn parses_stock_capture_commands_into_native_actions() {
         let list_script =
             "rg --files /home/gk/.ccodex/current/node_modules/@gkorepanov/ccodex/dist | sed -n '1,240p'";
@@ -536,7 +570,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&incoming).unwrap()["method"],
-                "turn/start"
+                "thread/turns/list"
             );
             websocket
                 .send(Message::Text(
@@ -552,6 +586,26 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+            websocket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "method": "thread/readState/changed",
+                        "params": {
+                            "threadId": "019f6232-67f2-7db2-993b-b89f56d2dc97",
+                            "readState": {"firstUnread": null, "revision": "current"}
+                        },
+                        "emittedAtMs": 1_234
+                    }).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            websocket
+                .send(Message::Text(
+                    serde_json::json!({"id":1,"result":{"data":[{"id":"latest-turn"}],"nextCursor":null}})
+                        .to_string().into(),
+                ))
+                .await
+                .unwrap();
             websocket.close(None).await.unwrap();
         });
         let (to_gateway, from_remote) = mpsc::channel(1);
@@ -564,13 +618,30 @@ mod tests {
             shutdown.clone(),
         ));
         to_gateway
-            .send(serde_json::json!({"id":1,"method":"turn/start","params":{}}).to_string())
+            .send(serde_json::json!({"id":1,"method":"thread/turns/list","params":{}}).to_string())
             .await
             .unwrap();
-        let outgoing = outgoing.recv().await.unwrap();
+        let name_notification = outgoing.recv().await.unwrap();
         assert_eq!(
-            serde_json::to_value(outgoing.message).unwrap()["method"],
+            serde_json::to_value(name_notification.message).unwrap()["method"],
             "thread/name/updated"
+        );
+        let read_notification = outgoing.recv().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(read_notification.message).unwrap(),
+            serde_json::json!({
+                "method":"thread/readState/changed",
+                "params": {
+                    "threadId": "019f6232-67f2-7db2-993b-b89f56d2dc97",
+                    "readState": {"firstUnread":null,"revision":"current"}
+                },
+                "emittedAtMs":1_234
+            })
+        );
+        let history_response = outgoing.recv().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(history_response.message).unwrap(),
+            serde_json::json!({"id":1,"result":{"data":[{"id":"latest-turn"}],"nextCursor":null}})
         );
         server.await.unwrap();
         shutdown.cancel();
