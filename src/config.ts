@@ -23,6 +23,14 @@ export interface Config {
   readonly rpcCaptureMaxBytes: number;
   /** The most a client gets in one message, or as one command's output (`rpc_limit_mb`); 0: no limit. */
   readonly rpcLimitBytes: number;
+  /**
+   * An idle Claude App process that holds a chat (the App keeps one after it opens or imports a chat) is asked to exit
+   * when CCodex is to work on that chat, which then runs here as any other, not through the shared-session bridge
+   * (`claude_app_idle_takeover`). A busy App process is never touched.
+   */
+  readonly claudeAppIdleTakeover: boolean;
+  /** Every Claude chat runs in this permission mode, whatever the client asks or the transcript last recorded; plan mode stays (`claude_permission_mode`). */
+  readonly claudePermissionMode: string | null;
   /** Presence enables CCodex titles; absence keeps stock title behaviour. */
   readonly renamePrompt?: string;
   /** Model that writes titles; default: stock's fast one (…-luna / …-mini), else its default model. */
@@ -192,6 +200,8 @@ export function loadConfig(): Config {
     rpcCapture: process.env.CCODEX_RPC_CAPTURE ? process.env.CCODEX_RPC_CAPTURE === "1" : file.rpc_capture ?? false,
     rpcCaptureMaxBytes: file.rpc_capture_max_bytes ?? 1_073_741_824,
     rpcLimitBytes: (file.rpc_limit_mb ?? 10) * 1_000_000,
+    claudeAppIdleTakeover: file.claude_app_idle_takeover ?? false,
+    claudePermissionMode: file.claude_permission_mode ?? null,
     ...(renamePrompt ? { renamePrompt } : {}),
     ...(file.title_model ? { titleModel: file.title_model as string } : {}),
     delegateCodex: expandHome(process.env.CCODEX_DELEGATE_CODEX ?? file.delegate_codex ?? codex),

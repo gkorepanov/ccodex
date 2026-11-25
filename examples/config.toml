@@ -35,6 +35,11 @@ claude_idle_compaction_hold_hours = 24
 # stops there. Over SSH or on the phone, one huge message holds up every chat. 0: no limit.
 rpc_limit_mb = 10
 
+# Ask an idle Claude App process to leave a chat CCodex is to work on, so the chat runs here, not through the
+# shared-session bridge; and the permission mode every Claude chat runs in, whatever the client asks.
+# claude_app_idle_takeover = true
+# claude_permission_mode = "bypassPermissions"
+
 log_level = "info"
 # Codex App RPC capture under data_dir (rpc.jsonl, mode 0600, rolling; holds prompts and outputs). Off by default.
 rpc_capture = false

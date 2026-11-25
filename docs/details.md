@@ -116,10 +116,56 @@ Claude's 30-day cleanup deleted come back as text. The 0.4 databases move to
 - `rpc_limit_mb` (default `10`) — the most CCodex sends the App in one message or as one command's output (how the
   App shows a remote host's image or video): a bigger answer fails, a bigger notification is dropped, the output stops
   there. One huge message holds up every chat over SSH and can drop the phone's connection. `0` turns it off.
+- `claude_app_idle_takeover` (default `false`) — the Claude App keeps a process on every chat it has opened or
+  imported, idle for hours, and while it lives the chat goes through the shared-session bridge. With this on, an idle
+  App process is asked to exit (SIGTERM) when CCodex is to work on its chat, which then runs here as any other; the
+  App starts its process again when the chat is next used there. A busy App process, a terminal's `claude` and any
+  other owner are never touched.
+- `claude_permission_mode` (unset by default) — every Claude chat runs in this mode (for example
+  `"bypassPermissions"`), whatever the client asks or the transcript last recorded; plan mode stays plan mode.
 - `log_level` — `debug`, `info` (default), `warn`, `error`.
 - `codex_binary`, `delegate_codex`, `claude_binary` — use a specific `codex` or `claude`. Without `codex_binary`, the
   gateway runs Desktop's own Codex CLI when the Desktop on this machine starts it (the one Desktop runs without
   CCodex), otherwise the newest `codex` on the machine; a plain `codex …` in a terminal runs the first one on PATH.
+
+## Local opt-in: share an existing Claude App writer
+
+CCodex can route input for an occupied Claude session to the Claude App process that already owns it. The single-writer guard stays in place. Unoccupied sessions still use the SDK. Retries of an already submitted message use its durable receipt, including after the original owner exits.
+
+The feature is off unless `~/.ccodex/native-peer-bridge.json` contains an explicit configuration:
+
+```json
+{
+  "enabled": true,
+  "python": "/path/to/bridge/python",
+  "script": "/path/to/claude-sessions/scripts/bridge.py",
+  "stateDir": "/path/to/private/claude-sessions-bridge-state"
+}
+```
+
+Set up a compatible local helper before enabling this feature. CCodex needs the helper to support native-only submission with an expected owner PID, durable request IDs, private socket authentication and transcript readback. CCodex rejects input before sending if the owner is missing, changed or unsupported. Use the same private helper state directory across senders to serialize submissions while a receipt is active or unresolved.
+
+Shared input preserves real local sender attribution and the original App's receive/permission policy. It is **not invisible**: source markers and prompt content enter the original conversation and may be sent upstream by the App. No OAuth credentials are copied, no cloud inference API is reimplemented, and no model rewrites the reply in the middle.
+
+The existing process receives input with native priority `next`: a correction joins the current task after the current tool batch completes. It does not force work into the background or interrupt a response. Stable client message IDs deduplicate retries; unknown outcomes are never automatically resent. Native history IDs and client bubble IDs are mapped across read, resume and paging. Replies and tool progress follow the original transcript as the App writes it, rather than a separate token stream.
+
+The shared path accepts text, same-chat image uploads, and inline PNG, JPEG, GIF and WebP data up to 20 MiB per message. Inline images are stored as private files and forwarded as same-chat paths for the original Claude App to read. Model, effort, speed, plan and permission modes, workspace, history edits and stop remain with the original App. App refusal and hold policies remain effective. Let active shared work reach a known terminal state before removing live methods. Keep private receipts and ID bindings for retries and history.
+
+For a shared App turn, `turn/steer` and another ordinary `turn/start` add corrections to that turn. Mobile `thread/queue/add` also defaults to soft steering for an externally owned App session, so a mobile client's normal send does not wait for the whole task to end. Set `softSteerDefault: false` in the sidecar to retain that queue endpoint's old behavior. Previously queued messages are not replayed or drained by this change. GPT and unowned SDK sessions retain their existing queue behavior.
+
+Each correction gets its own stable receipt linked to the original shared job. Dispatch waits for earlier inputs to be acknowledged, preserving order even if worker scheduling differs. An unknown receipt, dead worker or changed App owner prevents another send. A turn that ends before dispatch rejects the correction without replaying it; late rejections are surfaced to the client. Native `attachment/queued_command` absorption records are correlated using their source UUIDs, and linked user bubbles stay in the same shared turn across refresh and paging.
+
+### Receipts across automatic compaction
+
+Compaction summaries can carry the current peer prompt ID before the preserved peer record is replayed. They must not consume that ID when projecting turn boundaries: otherwise a completed shared reply gets merged into an older turn.
+
+The helper changes are in [`scripts/native-peer-receipts.patch`](../scripts/native-peer-receipts.patch). They require the matching `bridge.py` and `test_bridge.py` from the initial shared-session helper. The helper baseline is external to this repository. With that baseline, apply the patch in the helper's `scripts` directory and run its tests in the helper's Python environment. Receipt reconciliation follows preserved-message links and the SDK's current branch. It collects all blocks of the first correlated terminal API message and keeps the result unknown if competing input or incomplete evidence prevents attribution.
+
+A fresh turn automatically checks the original history when an earlier native submission has an unknown result. A correlated terminal reply clears the block, including when the reply arrives after the worker deadline. Claude App input absorbed after a tool result with the same native prompt ID can share that terminal reply. The receipt records that the reply covered local input as well. Until the reply is verified, the block remains in place.
+
+Use `bridge.py reconcile '{"job_id":"existing-job-key"}'` to check an already submitted native job and repair its durable receipt from history. Rejected inputs retain their `failed_before_send` receipts. Their original client message IDs continue to return those receipts after the block clears.
+
+The native bridge supports Claude Desktop Code 2.1.325 and 2.1.326. When the registered App version or socket fails the native protocol preflight, CCodex receives a durable `LIVE_PROTOCOL_UNVERIFIED` rejection. Retrying that client message after a compatibility update returns the same rejection.
 
 ## Troubleshooting
 

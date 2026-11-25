@@ -23,6 +23,8 @@ import { preview, summarizeTranscript, userText, type TranscriptHeader } from ".
 import { claudeMode, codexPermissions, mapClaudeModel, mapSkill, permissionSettings, withProbeQuery } from "./sdk.js";
 import { killProcesses, sessionProcesses, type SessionProcess } from "./processes.js";
 import { ClaudeSession, type SessionSettings } from "./session.js";
+import { nativePeerConfig } from "./nativePeer.js";
+import { foreignOwner, releaseIdleAppOwner } from "./peers.js";
 import { stockVisualizeSkill, writeVisualizePlugin } from "./visualize.js";
 import type { Meta } from "../meta.js";
 import { toTrash } from "../trash.js";
@@ -64,6 +66,9 @@ const RESUME_WARM_MS = Number(process.env.CCODEX_E2E_RESUME_WARM_MS) || 10_000;
 const MAX_PROCESSES = Number(process.env.CCODEX_E2E_MAX_PROCESSES) || 10;
 
 /** A chat's permissions and plan mode from the mode its transcript last recorded (in plan mode, meta.json keeps its own). */
+/** Requests that write to a chat or answer by who owns it; reading history is not one. */
+const TAKEOVER_METHODS = /^(?:turn\/(?:start|steer)|thread\/(?:resume|fork|rollback|revert|compact\/start|settings\/update|queue\/add|goal\/set|goal\/clear|shellCommand)|review\/start)$/u;
+
 function recordedPermissions(threadId: string, recorded: string | null | undefined, meta: Meta): Pick<SessionSettings, "permissionMode" | "plan"> {
   if (recorded !== "plan") return { permissionMode: (recorded ?? "default") as PermissionMode, plan: false };
   const kept = meta.plan(threadId);
@@ -599,7 +604,20 @@ export class ClaudeThreads {
       model: (summary && this.recordedModel(summary)) || this.defaultModel,
       effort: summary ? this.recordedEffort(summary) : null,
       fast: summary?.serviceTier === "fast",
-      ...recordedPermissions(threadId, summary?.permissionMode, this.gateway.meta),
+      ...this.pinned(recordedPermissions(threadId, summary?.permissionMode, this.gateway.meta)),
+    };
+  }
+
+  /** The external writer's recorded settings, without this UI's cached overrides. */
+  public nativeSettings(threadId: string): SessionSettings {
+    const summary = this.catalog.get(threadId);
+    return {
+      cwd: summary?.cwd ?? process.cwd(),
+      model: summary?.model ? this.pickerModel(summary.model) : this.defaultModel,
+      effort: summary?.reasoningEffort ?? null,
+      fast: summary?.serviceTier === "fast",
+      permissionMode: (summary?.permissionMode === "plan" ? "default" : summary?.permissionMode ?? "default") as PermissionMode,
+      plan: summary?.permissionMode === "plan",
     };
   }
 
@@ -655,8 +673,14 @@ export class ClaudeThreads {
       model,
       effort: params.effort ?? params.collaborationMode?.settings?.reasoning_effort ?? current.effort,
       fast: tier === undefined ? current.fast : tier === "fast" || tier === "priority",
-      ...permissionSettings(params, current),
+      ...this.pinned(permissionSettings(params, current)),
     };
+  }
+
+  /** `claude_permission_mode`: the mode every Claude chat runs in, plan mode aside. */
+  private pinned<T extends Pick<SessionSettings, "permissionMode" | "plan">>(settings: T): T {
+    const mode = this.config.claudePermissionMode;
+    return mode && !settings.plan ? { ...settings, permissionMode: mode as PermissionMode } : settings;
   }
 
   // ---- sessions ----
@@ -973,6 +997,15 @@ export class ClaudeThreads {
 
   public async handle(connection: Connection, method: string, params: JsonObject): Promise<unknown> {
     const threadId: string = params.threadId;
+    // Before anything that decides by the chat's owner: an idle App process gives the chat back.
+    if (this.config.claudeAppIdleTakeover && typeof threadId === "string" && TAKEOVER_METHODS.test(method) && !threadId.startsWith("agent-")
+      && !this.sessions.get(threadId)?.sharing) {
+      await releaseIdleAppOwner(this.config.claudeHome, threadId).catch(() => false);
+    }
+    if (["thread/revert", "thread/rollback", "thread/delete", "thread/compact/start", "review/start", "thread/goal/set", "thread/goal/clear"].includes(method)
+      && nativePeerConfig(this.config) && foreignOwner(this.config.claudeHome, threadId)) {
+      throw invalidRequest("The original Claude App still owns this chat. History edits and task controls must be performed there; no App task or history was changed.");
+    }
     const side = threadId ? this.sides.get(threadId) : undefined;
     if (side) return this.handleSide(connection, side, method, params);
     switch (method) {
@@ -1086,7 +1119,9 @@ export class ClaudeThreads {
       case "thread/queue/add": {
         const session = this.session(threadId);
         const queuedSubmission = { id: randomUUID(), input: normalizeUserInput(params.input ?? []), clientUserMessageId: params.clientUserMessageId };
-        if (session.busy && !session.waitingForAgents) session.queued.push(queuedSubmission);
+        const bridge = nativePeerConfig(this.config);
+        const sharedSteering = bridge && bridge.softSteerDefault !== false && foreignOwner(this.config.claudeHome, threadId);
+        if (session.busy && !session.waitingForAgents && !sharedSteering) session.queued.push(queuedSubmission);
         else await session.startTurn({ input: queuedSubmission.input, clientUserMessageId: queuedSubmission.clientUserMessageId });
         this.gateway.emit(threadId, "thread/queue/changed", { threadId });
         return { queuedSubmission };
