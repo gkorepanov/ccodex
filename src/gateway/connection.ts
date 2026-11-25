@@ -3,6 +3,7 @@ import WebSocket from "ws";
 import { withFormatting } from "../instructions.js";
 import type { Provider } from "../meta.js";
 import { rpcError, type JsonObject, type RequestId } from "../protocol/codex.js";
+import { peerFrame } from "../claude/nativePeer.js";
 import type { Gateway } from "./server.js";
 import type { StockClient } from "./stock.js";
 
@@ -56,6 +57,7 @@ export class Connection {
   public send(text: string, raw = false): void {
     if (this.closed || this.client.readyState !== WebSocket.OPEN) return;
     if (!raw) text = this.gateway.lineages.rewrite(text);
+    text = peerFrame(text, this.gateway.config);
     const limit = this.gateway.config.rpcLimitBytes;
     if (limit && Buffer.byteLength(text) > limit) {
       const held = this.overLimit(text, limit);
@@ -106,6 +108,7 @@ export class Connection {
   }
 
   private onClientText(text: string): void {
+    text = peerFrame(text, this.gateway.config, true);
     this.gateway.recorder.frame(this.id, "client_to_gateway", text);
     if (this.backlog && !/^\{(?:"id":[^,]*,)?"method":"initialized?"/u.test(text)) this.backlog.push(text);
     else this.dispatch(text);
