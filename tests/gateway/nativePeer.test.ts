@@ -169,6 +169,36 @@ describe("shared native App writer", () => {
     expect(fakeClaude.prompts.length).toBe(0);
   }, 20000);
 
+  it("joins new input to a shared turn the App is still working on after its watch was lost", async () => {
+    // Long enough for the restart below to finish before the App's reply, on a busy machine too.
+    process.env.FAKE_PEER_DELAY = "6000";process.env.FAKE_PEER_HEARTBEAT = "1";
+    const { root, sid, client } = await fixture();
+    const firstId = randomUUID(), nextId = randomUUID();
+    const first = await client.request("turn/start", { threadId: sid, clientUserMessageId: firstId, input: text("one") });
+    const deadline = Date.now() + 3000;
+    while (!existsSync(join(root, "sends.jsonl")) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    // The gateway restarts mid-turn: nothing watches the turn any more, the App and the bridge worker go on.
+    const config = gateway!.config;
+    await gateway!.stop();
+    gateway = await startTestGateway({ claudeHome: config.claudeHome, productHome: config.productHome, dataDir: config.dataDir, claudeVisualize: false });
+    const again = await gateway.connect();
+    await again.request("thread/resume", { threadId: sid, excludeTurns: true });
+    const joined = await again.request("turn/start", { threadId: sid, clientUserMessageId: nextId, input: text("two") });
+    expect(joined.turn.id).toBe(first.turn.id);
+    const done = await again.waitFor("turn/completed", (p) => p.threadId === sid && p.turn.id === first.turn.id, 20000);
+    expect(done.turn.status).toBe("completed");
+    const sends = readFileSync(join(root, "sends.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(sends.map((send) => send.requestId.split(":").at(-1))).toEqual([firstId, nextId]);
+    const turn = (await again.request("thread/read", { threadId: sid, includeTurns: true })).thread.turns.find((t: any) => t.id === first.turn.id);
+    expect(turn.items.filter((i: any) => i.type === "userMessage").map((i: any) => i.clientId)).toEqual([firstId, nextId]);
+    expect(turn.items.some((i: any) => i.type === "agentMessage" && i.text.includes("one") && i.text.includes("two"))).toBe(true);
+    expect(fakeClaude.prompts.length).toBe(0);
+    // With the turn over, the next message is a turn of its own again.
+    const later = await again.request("turn/start", { threadId: sid, clientUserMessageId: randomUUID(), input: text("three") });
+    expect(later.turn.id).not.toBe(first.turn.id);
+    await vi.waitFor(() => expect(readFileSync(join(root, "sends.jsonl"), "utf8").trim().split("\n")).toHaveLength(3), { timeout: 5000 });
+  }, 40000);
+
   it("preserves unrelated frames and normal RPC identities; maps inclusive cursors both ways", () => {
     const root = mkdtempSync("/tmp/ccx-peer-map-");roots.push(root);const config = testConfig({ dataDir: root });
     const b = preparePeerBinding(randomUUID(), randomUUID(), text("hi"));b.nativeUuid = randomUUID();peerBindings(config).save(b);

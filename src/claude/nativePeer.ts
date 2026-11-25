@@ -11,7 +11,7 @@ import type { UserInput } from "../protocol/codex.js";
 
 export interface NativePeerConfig { enabled: true; python: string; script: string; stateDir?: string; softSteerDefault?: boolean }
 export interface PeerBinding { jobId: string; threadId: string; turnId: string; clientId: string; input: UserInput[]; nativeUuid?: string; verified?: boolean; steerOf?: string; parentTurnId?: string }
-export interface PeerJob { job_id: string; status: string; error?: string; delivery_message_uuid?: string; partial_result?: string; result?: string; transport?: string; expected_native_pid?: number }
+export interface PeerJob { job_id: string; status: string; error?: string; delivery_message_uuid?: string; partial_result?: string; result?: string; transport?: string; expected_native_pid?: number; heartbeat_at?: number }
 const execute = promisify(execFile);
 const mobileAttachmentRoot = "/tmp/codex-remote-attachments";
 const uploadId = /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/iu;

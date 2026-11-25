@@ -15,7 +15,7 @@ if(process.argv[2]==='finish'){
 }else if(fs.existsSync(file))console.log(fs.readFileSync(file,'utf8'));
 else{
  const uuid=crypto.randomUUID(),promptId=crypto.randomUUID(),marker='[Codex bridge request '+jobId+']\n';
- const job={...args,job_id:jobId,status:'running',transport:'native_peer',delivery_message_uuid:uuid};writeJob(file,job);
+ const job={...args,job_id:jobId,status:'running',transport:'native_peer',delivery_message_uuid:uuid,...(process.env.FAKE_PEER_HEARTBEAT?{heartbeat_at:Date.now()/1000}:{})};writeJob(file,job);
  fs.appendFileSync(process.env.FAKE_PEER_SENDS,JSON.stringify({requestId:args.request_id,owner:args.expected_native_pid})+'\n');
  const last=fs.readFileSync(transcript,'utf8').trim().split('\n').map(JSON.parse).findLast(x=>x.uuid);
  const at=new Date().toISOString(),body=marker+(args.steer_of?'[Codex bridge steer '+args.steer_of+']\n':'')+args.prompt;

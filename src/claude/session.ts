@@ -442,6 +442,8 @@ export class ClaudeSession {
       await this.steerPeerTurn(params);
       return startedTurn(this.liveTurn()!);
     }
+    const joined = await this.joinActivePeerTurn(params);
+    if (joined) return joined;
     const previousPeer = [...peerBindings(this.host.config).jobs.values()].find((binding) => binding.threadId === this.threadId
       && binding.clientId === (params.clientUserMessageId ?? params.turnId));
     if (previousPeer?.steerOf) throw invalidRequest("This correction belongs to an earlier shared turn. Read that turn's history; it was not resent.");
@@ -527,6 +529,41 @@ export class ClaudeSession {
     }));
   }
 
+  /**
+   * The watch of a shared turn can end before the turn does (the gateway restarted, the watch gave up): the App is
+   * still working on it and its bridge worker still reports. New input then joins that turn as a correction, as it
+   * would have with the watch alive, rather than being refused as a second turn while the first one runs.
+   */
+  private async joinActivePeerTurn(params: JsonObject): Promise<Turn | undefined> {
+    if (this.peerRun || this.turn || (this.sdk && !this.quiet(Date.now(), 0))) return undefined;
+    const owner = foreignOwner(this.host.config.claudeHome, this.threadId);
+    const bridge = owner ? nativePeerConfig(this.host.config) : undefined;
+    if (!owner || !bridge) return undefined;
+    const clientId = params.clientUserMessageId ?? params.turnId;
+    const store = peerBindings(this.host.config);
+    const mine = [...store.jobs.values()].filter((binding) => binding.threadId === this.threadId);
+    const root = mine.findLast((binding) => !binding.steerOf);
+    // A message this chat already sent keeps its own receipt.
+    if (!root || mine.some((binding) => binding.clientId === clientId)) return undefined;
+    const job = await readPeerJob(bridge, root).catch(() => undefined);
+    if (!job || !["queued", "running"].includes(job.status) || job.expected_native_pid !== owner
+      || typeof job.heartbeat_at !== "number" || Date.now() / 1000 - job.heartbeat_at > 180) return undefined;
+    this.settings = this.host.nativeSettings(this.threadId);
+    const mode = this.host.settingsFrom(params, this.settings).permissionMode === "bypassPermissions" ? "bypassPermissions" : "default";
+    if (this.sdk) await this.unload();
+    this.discardWarm();
+    const steers = new Map(mine.filter((binding) => binding.steerOf === root.jobId)
+      .map((binding) => [binding.jobId, { binding, pending: false }] as const));
+    const run: NonNullable<ClaudeSession["peerRun"]> = { binding: root, bridge, watching: true, items: new Map<string, string>(), steers, originMode: mode };
+    this.peerRun = run;
+    this.state = "running";
+    this.openTurn(root.turnId, root.input, root.clientId, false, false, () => {
+      void this.watchPeerTurn(run, owner, run.originMode, true);
+    });
+    await this.steerPeerTurn(params);
+    return startedTurn(this.liveTurn()!);
+  }
+
   /** Send a correction at the original App's next tool boundary; never interrupt/background its task. */
   private async steerPeerTurn(params: JsonObject): Promise<string> {
     const run = this.peerRun;
@@ -594,9 +631,15 @@ export class ClaudeSession {
       const waiting: ThreadItem = { type: "reasoning", id: `${run.binding.turnId}:native-peer-status`, summary: ["等待原 Claude App 接收；工作中会在工具完成后融入当前任务。"], content: [] };
       this.itemStarted(waiting);
       this.itemCompleted(waiting);
-      const deadline = Date.now() + 920_000;
+      // The bridge worker owns the wait: it stops on silence, owner exit or its own turn limit. This only bounds
+      // a worker that never reports back.
+      const deadline = Date.now() + 21_720_000;
+      let received = false;
       while (run.watching && this.peerRun === run && Date.now() < deadline) {
         const job = await readPeerJob(run.bridge, run.binding);
+        if (["queued", "running"].includes(job.status) && typeof job.heartbeat_at === "number" && Date.now() / 1000 - job.heartbeat_at > 180) {
+          throw new Error("The shared App watcher stopped before a reply; inspect the original chat. No automatic resend.");
+        }
         if (job.delivery_message_uuid) {
           if (run.binding.nativeUuid && run.binding.nativeUuid !== job.delivery_message_uuid) throw new Error("Native App delivery identity changed; inspect the original chat before retrying.");
           run.binding.nativeUuid = job.delivery_message_uuid;
@@ -604,7 +647,11 @@ export class ClaudeSession {
             run.binding.verified = true;
             peerBindings(this.host.config).save(run.binding);
           }
-          this.itemCompleted({ ...waiting, summary: ["原 Claude App 已接收，可继续发送引导补充当前任务。"] });
+          // Once: this loop runs twice a second for the whole turn, and every subscriber (the phone) hears each update.
+          if (!received) {
+            received = true;
+            this.itemCompleted({ ...waiting, summary: ["原 Claude App 已接收，可继续发送引导补充当前任务。"] });
+          }
         }
         let correctionsDone = true;
         for (const entry of run.steers.values()) {
