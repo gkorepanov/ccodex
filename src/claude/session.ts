@@ -183,6 +183,11 @@ export class ClaudeSession {
   private peerRun?: { binding: PeerBinding; bridge: NativePeerConfig; watching: boolean; items: Map<string, string>;
     originMode: string;
     steers: Map<string, { binding: PeerBinding; pending: boolean; rejected?: boolean; error?: string }> };
+  /** A shared App turn is being watched: the App is working on this chat. */
+  public get sharing(): boolean {
+    return this.peerRun !== undefined;
+  }
+
   public turn: ActiveTurn | undefined;
   /** A turn was started here: before that the chat is Desktop's new-chat draft, which stock lists nowhere. */
   public started = false;

@@ -15,6 +15,8 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     rpcCapture: false,
     rpcCaptureMaxBytes: 1_048_576,
     rpcLimitBytes: 10_000_000,
+    claudeAppIdleTakeover: false,
+    claudePermissionMode: null,
     improveModelsFormatting: true,
     claudeVisualize: true,
     claudeIdleCompactionHoldMs: 86_400_000,

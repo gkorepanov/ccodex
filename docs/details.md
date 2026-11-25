@@ -116,6 +116,13 @@ Claude's 30-day cleanup deleted come back as text. The 0.4 databases move to
 - `rpc_limit_mb` (default `10`) — the most CCodex sends the App in one message or as one command's output (how the
   App shows a remote host's image or video): a bigger answer fails, a bigger notification is dropped, the output stops
   there. One huge message holds up every chat over SSH and can drop the phone's connection. `0` turns it off.
+- `claude_app_idle_takeover` (default `false`) — the Claude App keeps a process on every chat it has opened or
+  imported, idle for hours, and while it lives the chat goes through the shared-session bridge. With this on, an idle
+  App process is asked to exit (SIGTERM) when CCodex is to work on its chat, which then runs here as any other; the
+  App starts its process again when the chat is next used there. A busy App process, a terminal's `claude` and any
+  other owner are never touched.
+- `claude_permission_mode` (unset by default) — every Claude chat runs in this mode (for example
+  `"bypassPermissions"`), whatever the client asks or the transcript last recorded; plan mode stays plan mode.
 - `log_level` — `debug`, `info` (default), `warn`, `error`.
 - `codex_binary`, `delegate_codex`, `claude_binary` — use a specific `codex` or `claude`. Without `codex_binary`, the
   gateway runs Desktop's own Codex CLI when the Desktop on this machine starts it (the one Desktop runs without

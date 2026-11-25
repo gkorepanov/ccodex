@@ -3,6 +3,7 @@
  * messages between threads. Best effort throughout: when Claude does not tell where a message came from or went (or
  * tells it differently in a later version), the message shows without its thread; it never breaks the chat.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { claudeHome } from "../config.js";
@@ -72,6 +73,57 @@ export function foreignOwner(home: string, sessionId: string): number | undefine
     return parent !== undefined && parent !== process.pid;
   });
   return owner && Number(owner.pid);
+}
+
+const APP_PARENT = /\/Claude\.app\//u;
+/** How long the App's process must have been idle before it is asked to leave: not one that has just finished a turn. */
+const IDLE_SETTLE_MS = 3_000;
+
+function command(pid: number): string {
+  try {
+    return execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" }).trim();
+  } catch {
+    return "";
+  }
+}
+
+function running(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The Claude App keeps a process on every chat it has opened or imported, idle for hours; while it lives the chat is
+ * not ours to write. An idle one is asked to exit (SIGTERM, as when the App closes the chat): the App starts it again
+ * when the chat is next used there, from the same transcript. True when the chat is free afterwards. Only a process the
+ * App itself started, registered idle for a while, is asked; a busy one, a terminal's claude, or any other owner stays.
+ */
+export async function releaseIdleAppOwner(home: string, sessionId: string, now = Date.now()): Promise<boolean> {
+  const owners: Fields[] = [];
+  runningSession(home, (session) => {
+    if (session.sessionId === sessionId && parentPid(Number(session.pid)) !== process.pid) owners.push(session);
+    return false;
+  });
+  if (!owners.length) return true;
+  for (const owner of owners) {
+    const pid = Number(owner.pid), parent = parentPid(pid);
+    if (owner.entrypoint !== "claude-desktop" || owner.status !== "idle" || !(now - Number(owner.statusUpdatedAt ?? now) >= IDLE_SETTLE_MS)
+      || parent === undefined || !APP_PARENT.test(command(parent))) return false;
+  }
+  for (const owner of owners) {
+    try {
+      process.kill(Number(owner.pid), "SIGTERM");
+    } catch {}
+  }
+  for (let waited = 0; waited < 8_000; waited += 100) {
+    if (owners.every((owner) => !running(Number(owner.pid)))) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
 }
 
 function thread(peers: Peers, sessionId: string | undefined): string | undefined {
