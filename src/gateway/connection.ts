@@ -3,6 +3,7 @@ import WebSocket from "ws";
 import { withFormatting } from "../instructions.js";
 import type { Provider } from "../meta.js";
 import { rpcError, type JsonObject, type RequestId } from "../protocol/codex.js";
+import { slimHistoryImages } from "./remoteImages.js";
 import type { Gateway } from "./server.js";
 import type { StockClient } from "./stock.js";
 
@@ -15,6 +16,27 @@ const THREAD_CONTEXT_METHODS = new Set([
 /** Requests that carry the client's developer instructions (Desktop's app context). */
 const INSTRUCTED_METHODS = new Set(["thread/start", "thread/resume", "thread/fork"]);
 const HISTORY_PAGE_METHODS = new Set(["thread/turns/list", "thread/items/list"]);
+/** Clients on the relay (the phone, chatgpt.com's backend for it): every message costs them data and a radio wakeup. */
+const REMOTE_CLIENT = /^(?:codex-backend|codex_chatgpt_[a-z_]+_remote)$/u;
+/** Text deltas whose params differ only in `delta`: a client appends them, so consecutive ones can come as one. */
+const JOINED_DELTAS = new Set(["item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta"]);
+const JOINED_DELTA_CHARS = 16_000;
+
+/** A thread list row carries the chat's whole first message as its preview; a phone shows a line of it. */
+function shortPreviews(result: any, chars: number): any {
+  if (!chars || !Array.isArray(result?.data)) return result;
+  return {
+    ...result,
+    data: result.data.map((row: any) => {
+      if (typeof row?.preview !== "string" || row.preview.length <= chars) return row;
+      // Not half of a surrogate pair at the cut.
+      const cut = /[\uD800-\uDBFF]$/u.test(row.preview.slice(0, chars)) ? chars - 1 : chars;
+      return { ...row, preview: `${row.preview.slice(0, cut)}…` };
+    }),
+  };
+}
+
+interface HeldDelta { key: string; method: string; rest: JsonObject; delta: string; raw: boolean; timer: NodeJS.Timeout }
 
 type Handler = (connection: Connection, params: any) => Promise<unknown>;
 
@@ -32,6 +54,9 @@ export class Connection {
   /** The developer instructions this client last sent; the stock threads the gateway starts or resumes for it get them too. */
   public developerInstructions?: string;
   private closed = false;
+  /** A remote client's text delta waiting for the ones that follow it. */
+  private heldDelta?: HeldDelta;
+  private deltaSentAt = 0;
   /** What the client sent past its handshake before the gateway was ready, in order. */
   private backlog?: string[] = [];
 
@@ -56,7 +81,55 @@ export class Connection {
   /** Everything to the client goes here; a switched thread's current backend id reads as its public id. */
   public send(text: string, raw = false): void {
     if (this.closed || this.client.readyState !== WebSocket.OPEN) return;
+    if (text.startsWith("{\"method\":\"item/") && this.remote && this.holdDelta(text, raw)) return;
     this.sendPrepared(this.prepareFrame(text, raw));
+  }
+
+  private get remote(): boolean {
+    return this.clientName !== undefined && REMOTE_CLIENT.test(this.clientName);
+  }
+
+  /**
+   * A remote client gets one item's text deltas at most once per `remote_delta_join_ms`: the first at once, those
+   * that follow joined (a token each, ten a second, is ten messages of envelope and ten wakeups of a phone's radio).
+   * Anything else sent to the client goes after what is held, so the order stays.
+   */
+  private holdDelta(text: string, raw: boolean): boolean {
+    const wait = this.gateway.config.remoteDeltaJoinMs;
+    const method = text.slice(11, text.indexOf("\"", 11));
+    if (!wait || !JOINED_DELTAS.has(method)) return false;
+    let params: JsonObject | undefined;
+    try {
+      params = (JSON.parse(text) as JsonObject).params;
+    } catch {
+      return false;
+    }
+    if (!params || typeof params.delta !== "string") return false;
+    const { delta, ...rest } = params;
+    const key = `${method}\u0000${raw}\u0000${JSON.stringify(rest)}`;
+    const held = this.heldDelta;
+    if (held?.key === key) {
+      held.delta += delta;
+      if (held.delta.length >= JOINED_DELTA_CHARS) this.flushDelta();
+      return true;
+    }
+    this.flushDelta();
+    const due = this.deltaSentAt + wait - Date.now();
+    if (due <= 0) {
+      this.deltaSentAt = Date.now();
+      return false;
+    }
+    this.heldDelta = { key, method, rest, delta, raw, timer: setTimeout(() => this.flushDelta(), due) };
+    return true;
+  }
+
+  private flushDelta(): void {
+    const held = this.heldDelta;
+    if (!held) return;
+    this.heldDelta = undefined;
+    clearTimeout(held.timer);
+    this.deltaSentAt = Date.now();
+    this.sendPrepared(this.prepareFrame(JSON.stringify({ method: held.method, params: { ...held.rest, delta: held.delta } }), held.raw));
   }
 
   private prepareFrame(text: string, raw = false): string {
@@ -65,6 +138,7 @@ export class Connection {
 
   private sendPrepared(text: string, bytes?: number, requestMethod?: string): void {
     if (this.closed || this.client.readyState !== WebSocket.OPEN) return;
+    this.flushDelta();
     const limit = this.gateway.config.rpcLimitBytes;
     if (limit && (bytes ?? Buffer.byteLength(text)) > limit) {
       const held = this.overLimit(text, limit, requestMethod);
@@ -102,7 +176,8 @@ export class Connection {
   ): Promise<void> {
     let page = params;
     while (!this.closed) {
-      const result = await request(page);
+      let result = await request(page);
+      if (this.remote) result = await slimHistoryImages(result, this.gateway.config).catch(() => result);
       if (this.closed) return;
       const text = this.prepareFrame(JSON.stringify({ id, result }));
       const bytes = Buffer.byteLength(text);
@@ -124,6 +199,8 @@ export class Connection {
   private close(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.heldDelta) clearTimeout(this.heldDelta.timer);
+    this.heldDelta = undefined;
     this.gateway.detach(this);
     this.gateway.recorder.connection("closed", this.id);
     if (this.client.readyState === WebSocket.OPEN) this.client.close();
@@ -177,15 +254,19 @@ export class Connection {
     }
     const params = message.params ?? {};
     const handler = this.route(message.method, params);
-    const boundHistory = limit && HISTORY_PAGE_METHODS.has(message.method) && typeof params.threadId === "string";
+    // A phone gets the newest part of a long turn first and the rest by cursor, not megabytes before it shows anything.
+    const remotePage = this.remote ? this.gateway.config.remotePageBytes : 0;
+    const pageLimit = remotePage && limit ? Math.min(remotePage, limit) : remotePage || limit;
+    const boundHistory = pageLimit && HISTORY_PAGE_METHODS.has(message.method) && typeof params.threadId === "string";
     if (!handler && !boundHistory) {
       this.forward(text);
       return;
     }
     const request = (page: JsonObject) => handler ? handler(this, page) : this.upstream.request(message.method, page);
     const answer = boundHistory
-      ? this.sendHistoryPage(message.id, message.method, params, limit, request)
-      : request(params).then((result) => this.respond(message.id, result));
+      ? this.sendHistoryPage(message.id, message.method, params, pageLimit, request)
+      : request(params).then((result) => this.respond(message.id,
+        message.method === "thread/list" && this.remote ? shortPreviews(result, this.gateway.config.remotePreviewChars) : result));
     void answer.catch((error: unknown) => {
       this.gateway.logger.warn("request.failed", { method: message.method, error: String(error) });
       this.send(JSON.stringify({ id: message.id, error: rpcError(error) }));

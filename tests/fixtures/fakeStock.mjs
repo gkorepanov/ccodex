@@ -251,6 +251,18 @@ const handlers = {
     }));
     return {};
   },
+  // One turn of the given items, as stored (a user message with its pasted image).
+  "test/seedItems": (_connection, params) => {
+    const thread = threads.get(params.threadId);
+    materialize(thread);
+    thread.turns = [{ id: "turn-0", items: params.items, itemsView: "full", status: "completed", error: null, startedAt: now(), completedAt: now(), durationMs: 1 }];
+    return {};
+  },
+  // The given notifications in order, as a streaming turn sends them.
+  "test/notifications": (connection, params) => {
+    for (const frame of params.frames) connection.notify(frame.method, frame.params);
+    return {};
+  },
   "test/threads": () => ({ threads: [...threads.values()].map((thread) => ({ ...thread, subscribers: thread.subscribers.size })) }),
   // A notification and an answer of the given size (a diff of a huge repository, a big file read).
   "test/big": (connection, params) => {

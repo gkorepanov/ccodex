@@ -116,6 +116,14 @@ Claude's 30-day cleanup deleted come back as text. The 0.4 databases move to
 - `rpc_limit_mb` (default `10`) — the most CCodex sends the App in one message or as one command's output (how the
   App shows a remote host's image or video): a bigger answer fails, a bigger notification is dropped, the output stops
   there. One huge message holds up every chat over SSH and can drop the phone's connection. `0` turns it off.
+- For a client on the relay (the phone), where every message costs data and wakes the radio; each `0` turns its part off:
+  - `remote_delta_join_ms` (default `800`) — one item's text deltas reach it at most this often: the first at once,
+    those that follow joined into one message, in order with everything else.
+  - `remote_history_page_kb` (default `256`) — the most one `thread/turns/list` or `thread/items/list` page holds: the
+    newest entries of a long turn come first, the rest by the page's cursor.
+  - `remote_image_max_px` (default `1024`) — the longest edge of a user message's pasted image in such a page (a JPEG
+    made once by macOS's `sips` and kept under `state/remote-images`; elsewhere, or if it fails, the image as stored).
+  - `remote_preview_chars` (default `240`) — the most of a chat's first message a `thread/list` row carries as its preview.
   For `thread/turns/list` and `thread/items/list`, an oversized page is retried with fewer entries at the same cursor.
   A single oversized history entry still returns the size-limit error.
 - `log_level` — `debug`, `info` (default), `warn`, `error`.

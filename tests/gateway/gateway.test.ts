@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { randomFillSync } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -2012,3 +2013,130 @@ describe("rpc_limit_mb", () => {
     expect(await cap({ tty: true, outputBytesCap: null })).toBeNull();
   });
 });
+
+describe("clients on the relay (the phone)", () => {
+  afterEach(async () => { await gateway.stop(); });
+
+  const delta = (itemId: string, text: string, method = "item/agentMessage/delta") =>
+    ({ method, params: { threadId: "t", turnId: "turn", itemId, delta: text } });
+
+  it("joins one item's text deltas for a remote client, in order, and leaves a local client's as they come", async () => {
+    gateway = await startTestGateway({ remoteDeltaJoinMs: 150 });
+    client = await gateway.connect();
+    const mobile = await gateway.connect("codex_chatgpt_ios_remote");
+    const frames = [
+      ...["一", "二", "三", "四", "五"].map((text) => delta("a", text)),
+      { method: "item/completed", params: { threadId: "t", turnId: "turn", item: { type: "agentMessage", id: "a", text: "一二三四五" } } },
+      ...["x", "y", "z"].map((text) => delta("b", text, "item/reasoning/summaryTextDelta")),
+      ...["1", "2"].map((text) => delta("c", text)),
+    ];
+    for (const who of [client, mobile]) await who.request("test/notifications", { frames });
+    await mobile.waitFor("item/agentMessage/delta", (params) => params.itemId === "c" && params.delta.endsWith("2"));
+    const streamed = (who: Client) => who.messages.filter((message) => message.method?.startsWith("item/"))
+      .map((message) => [message.method, message.params.itemId ?? message.params.item.id, message.params.delta ?? null]);
+    expect(streamed(client)).toEqual(frames.map((frame: any) => [frame.method, frame.params.itemId ?? frame.params.item.id, frame.params.delta ?? null]));
+    const got = streamed(mobile);
+    // Nothing lost, nothing out of place: each item's text whole, and the item's end after its text.
+    const text = (id: string) => got.filter(([method, item]) => item === id && method !== "item/completed").map((entry) => entry[2]).join("");
+    expect([text("a"), text("b"), text("c")]).toEqual(["一二三四五", "xyz", "12"]);
+    expect(got.map(([, id]) => id).filter((id, at, all) => id !== all[at - 1])).toEqual(["a", "b", "c"]);
+    expect(got.findIndex(([method]) => method === "item/completed")).toBe(got.filter(([, id]) => id === "a").length - 1);
+    // The first delta at once, the four after it as one.
+    expect(got.filter(([, id]) => id === "a")).toEqual([["item/agentMessage/delta", "a", "一"], ["item/agentMessage/delta", "a", "二三四五"], ["item/completed", "a", null]]);
+    expect(got.length).toBeLessThan(frames.length);
+  });
+
+  it("sends a held delta when its time is up, with nothing after it", async () => {
+    gateway = await startTestGateway({ remoteDeltaJoinMs: 100 });
+    client = await gateway.connect();
+    const mobile = await gateway.connect("codex-backend");
+    await mobile.request("test/notifications", { frames: [delta("a", "first"), delta("a", " second"), delta("a", " third")] });
+    await mobile.waitFor("item/agentMessage/delta", (params) => params.delta === " second third", 2_000);
+    expect(mobile.notifications("item/agentMessage/delta").map((message) => message.params.delta)).toEqual(["first", " second third"]);
+  });
+
+  it("shortens a chat's preview in a remote client's thread list, not in a local client's", async () => {
+    gateway = await startTestGateway({ remotePreviewChars: 20 });
+    client = await gateway.connect();
+    const threadId = await stockThread();
+    const long = `${"字".repeat(19)}😀${"x".repeat(500)}`;
+    await client.request("turn/start", { threadId, input: [{ type: "text", text: long, text_elements: [] }] });
+    const shortId = await stockThread();
+    await client.request("turn/start", { threadId: shortId, input: [{ type: "text", text: "short", text_elements: [] }] });
+    const mobile = await gateway.connect("codex_chatgpt_ios_remote");
+    // Stock lists a thread once its first turn is stored.
+    // The list also holds the Claude chats of the tests before this one: read it to its end.
+    const row = async (who: Client, id: string) => {
+      for (let cursor: string | null | undefined; ;) {
+        const page: any = await who.request("thread/list", { limit: 50, ...(cursor ? { cursor } : {}) });
+        const found = page.data.find((thread: any) => thread.id === id);
+        if (found || !page.nextCursor) return found;
+        cursor = page.nextCursor;
+      }
+    };
+    expect((await row(client, threadId)).preview).toBe(long);
+    const shown = await row(mobile, threadId);
+    // The emoji at the cut is left out whole, not split.
+    expect(shown.preview).toBe(`${"字".repeat(19)}…`);
+    expect({ ...shown, preview: long }).toEqual(await row(client, threadId));
+    expect((await row(mobile, shortId)).preview).toBe("short");
+  });
+
+  it("gives a remote client the newest part of a long turn first, the rest by cursor; a local client the whole page", async () => {
+    gateway = await startTestGateway({ remotePageBytes: 100_000 });
+    client = await gateway.connect();
+    const threadId = await stockThread();
+    await client.request("test/seedHistory", { threadId, turns: [[10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 10_000]] });
+    const whole = await client.request("thread/items/list", { threadId, turnId: "turn-0", limit: 100, sortDirection: "desc" });
+    expect(whole.data).toHaveLength(7);
+    const mobile = await gateway.connect("codex_chatgpt_ios_remote");
+    const pages: Array<string[]> = [];
+    let cursor: string | null | undefined;
+    do {
+      const result: any = await mobile.request("thread/items/list", { threadId, turnId: "turn-0", limit: 100, sortDirection: "desc", ...(cursor ? { cursor } : {}) });
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(100_000);
+      pages.push(result.data.map((record: any) => record.item.id));
+      cursor = result.nextCursor;
+    } while (cursor && pages.length < 5);
+    expect(pages[0]?.[0]).toBe("item-0-6");
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.flat()).toEqual(whole.data.map((record: any) => record.item.id));
+  });
+
+  it.skipIf(process.platform !== "darwin" || !existsSync("/usr/bin/sips"))("makes a user message's pasted image smaller in a remote client's history page only", async () => {
+    gateway = await startTestGateway({ remoteImageMaxPx: 64 });
+    client = await gateway.connect();
+    const threadId = await stockThread();
+    // A real image of noise (it does not compress): drawn by sips from a raw bitmap.
+    const work = mkdtempSync(join(tmpdir(), "ccodex-image-"));
+    const side = 300, row = Math.ceil(side * 3 / 4) * 4, pixels = Buffer.alloc(row * side);
+    randomFillSync(pixels);
+    const header = Buffer.alloc(54);
+    header.write("BM"); header.writeUInt32LE(54 + pixels.length, 2); header.writeUInt32LE(54, 10); header.writeUInt32LE(40, 14);
+    header.writeInt32LE(side, 18); header.writeInt32LE(side, 22); header.writeUInt16LE(1, 26); header.writeUInt16LE(24, 28); header.writeUInt32LE(pixels.length, 34);
+    writeFileSync(join(work, "noise.bmp"), Buffer.concat([header, pixels]));
+    expect(spawnSync("/usr/bin/sips", ["-s", "format", "png", join(work, "noise.bmp"), "--out", join(work, "noise.png")]).status).toBe(0);
+    const url = `data:image/png;base64,${readFileSync(join(work, "noise.png")).toString("base64")}`;
+    rmSync(work, { recursive: true, force: true });
+    expect(url.length).toBeGreaterThan(64_000);
+    const small = "data:image/png;base64,iVBORw0KGgo=";
+    await client.request("test/seedItems", { threadId, items: [
+      { type: "userMessage", id: "u", clientId: null, content: [{ type: "text", text: "look", text_elements: [] }, { type: "image", url }, { type: "image", url: small }] },
+      { type: "agentMessage", id: "a", text: "seen", phase: "final_answer", memoryCitation: null },
+    ] });
+    const read = (who: Client) => who.request("thread/items/list", { threadId, turnId: "turn-0", limit: 100, sortDirection: "asc" });
+    const mobile = await gateway.connect("codex_chatgpt_ios_remote");
+    const [local, remote, again] = [await read(client), await read(mobile), await read(mobile)];
+    expect(local.data[0].item.content[1].url).toBe(url);
+    const content = remote.data[0].item.content;
+    expect(content[0]).toEqual({ type: "text", text: "look", text_elements: [] });
+    expect(content[1].url).toMatch(/^data:image\/jpeg;base64,\/9j\//u);
+    expect(content[1].url.length).toBeLessThan(url.length / 4);
+    expect(content[2].url).toBe(small);
+    expect(remote.data[1]).toEqual(local.data[1]);
+    expect(again).toEqual(remote);
+    // What the page was read from is as it was: a local client still gets the original.
+    expect((await read(client)).data[0].item.content[1].url).toBe(url);
+  });
+});
+

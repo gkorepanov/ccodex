@@ -23,6 +23,14 @@ export interface Config {
   readonly rpcCaptureMaxBytes: number;
   /** The most a client gets in one message, or as one command's output (`rpc_limit_mb`); 0: no limit. */
   readonly rpcLimitBytes: number;
+  /** For clients on the relay (the phone): text deltas of one item join into one message per this many ms (`remote_delta_join_ms`); 0: each as it comes. */
+  readonly remoteDeltaJoinMs: number;
+  /** The most one history page holds for a client on the relay (`remote_history_page_kb`): the newest entries come first, the rest by cursor; 0: `rpc_limit_mb` alone. */
+  readonly remotePageBytes: number;
+  /** The most characters of a chat's preview (its first message) in a thread list for a client on the relay (`remote_preview_chars`); 0: all of it. */
+  readonly remotePreviewChars: number;
+  /** Longest edge of a user message's inline image in a history page for a client on the relay (`remote_image_max_px`); 0: as stored. */
+  readonly remoteImageMaxPx: number;
   /** Presence enables CCodex titles; absence keeps stock title behaviour. */
   readonly renamePrompt?: string;
   /** Model that writes titles; default: stock's fast one (…-luna / …-mini), else its default model. */
@@ -192,6 +200,10 @@ export function loadConfig(): Config {
     rpcCapture: process.env.CCODEX_RPC_CAPTURE ? process.env.CCODEX_RPC_CAPTURE === "1" : file.rpc_capture ?? false,
     rpcCaptureMaxBytes: file.rpc_capture_max_bytes ?? 1_073_741_824,
     rpcLimitBytes: (file.rpc_limit_mb ?? 10) * 1_000_000,
+    remoteDeltaJoinMs: file.remote_delta_join_ms ?? 800,
+    remotePageBytes: (file.remote_history_page_kb ?? 256) * 1_000,
+    remoteImageMaxPx: file.remote_image_max_px ?? 1024,
+    remotePreviewChars: file.remote_preview_chars ?? 240,
     ...(renamePrompt ? { renamePrompt } : {}),
     ...(file.title_model ? { titleModel: file.title_model as string } : {}),
     delegateCodex: expandHome(process.env.CCODEX_DELEGATE_CODEX ?? file.delegate_codex ?? codex),

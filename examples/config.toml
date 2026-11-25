@@ -35,6 +35,14 @@ claude_idle_compaction_hold_hours = 24
 # stops there. Over SSH or on the phone, one huge message holds up every chat. 0: no limit.
 rpc_limit_mb = 10
 
+# For a client on the relay (the phone): one item's text deltas at most this often in ms, the most one history page
+# holds in KB (the rest by cursor), the longest edge of a pasted image in a history page in px (macOS), and the most
+# characters of a chat's preview in a thread list. 0 turns each off.
+# remote_delta_join_ms = 800
+# remote_history_page_kb = 256
+# remote_image_max_px = 1024
+# remote_preview_chars = 240
+
 log_level = "info"
 # Codex App RPC capture under data_dir (rpc.jsonl, mode 0600, rolling; holds prompts and outputs). Off by default.
 rpc_capture = false
